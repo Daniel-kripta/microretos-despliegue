@@ -89,7 +89,7 @@ const abrir = (card) => {
                  :class="[
                    card.proximamente ? 'opacity-60' : 'hover:-translate-y-0.5 hover:shadow-md cursor-pointer',
                    esAccion(card)
-                     ? ['flex-row items-center gap-3 p-4 md:gap-4 md:p-5', TINTE_TILE[card.tile] ?? TINTE_TILE['bg-centros']]
+                     ? ['flex-row items-start gap-3 p-4 md:gap-4 md:p-5', TINTE_TILE[card.tile] ?? TINTE_TILE['bg-centros']]
                      : 'p-5',
                    card.ancho && 'sm:col-span-2',
                    cards.length === 3 && i === 2 && 'sm:col-span-2 xl:col-span-1',
@@ -98,7 +98,9 @@ const abrir = (card) => {
                  :role="esAccion(card) ? 'button' : undefined" :tabindex="esAccion(card) ? 0 : undefined"
                  @click="abrir(card)" @keydown.enter="esAccion(card) && abrir(card)">
           <!-- Integradas a dos columnas desde sm: hasta md el icono, la flecha y los huecos encogen
-               para dejar sitio al texto (a 640px cada card mide ~288px) -->
+               para dejar sitio al texto (a 640px cada card mide ~288px). Contenido arriba (items-start
+               en la card): con auto-rows-fr todas miden lo mismo y, centrado, el icono y el título de
+               una card de descripción corta quedaban más bajos que los de sus vecinas -->
           <div class="flex min-w-0 flex-1 items-start" :class="esAccion(card) ? 'gap-3 md:gap-4' : 'gap-4'">
             <span class="flex shrink-0 items-center justify-center rounded-2xl text-white shadow-sm"
                   :class="[card.tile, esAccion(card) ? 'h-10 w-10 md:h-12 md:w-12' : 'h-12 w-12']">
@@ -114,8 +116,9 @@ const abrir = (card) => {
               <p class="mt-1 text-sm leading-snug text-texto-secundario">{{ card.desc }}</p>
             </div>
           </div>
+          <!-- La flecha sigue centrada en vertical aunque el contenido vaya arriba -->
           <span v-if="esAccion(card)" aria-hidden="true"
-                class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white shadow-sm transition group-hover:translate-x-1 md:h-10 md:w-10"
+                class="flex h-8 w-8 shrink-0 self-center items-center justify-center rounded-full text-white shadow-sm transition group-hover:translate-x-1 md:h-10 md:w-10"
                 :class="card.tile">
             <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
           </span>

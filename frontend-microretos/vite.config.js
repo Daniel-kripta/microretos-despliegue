@@ -47,7 +47,8 @@ const pwa = () => VitePWA({
     scope: '/',
     display: 'standalone',
     theme_color: '#17283E',
-    background_color: '#F4F7FA',
+    // Pantalla de arranque en Android: mismo azul que el fondo del icono
+    background_color: '#17283E',
     icons: [
       { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
       { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' },

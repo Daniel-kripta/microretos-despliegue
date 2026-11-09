@@ -31,6 +31,7 @@ RESUMEN_*.pdf
 
 # Notas internas de tareas pendientes — no debe ser público
 /TAREAS_PENDIENTES.txt
+/TAREAS_PENDIENTES.md
 /TAREAS_PENDIENTES_NOTIFICACIONES.md
 
 # Scripts sueltos de prueba manual en la raíz (Playwright ad-hoc, no son tests del repo)

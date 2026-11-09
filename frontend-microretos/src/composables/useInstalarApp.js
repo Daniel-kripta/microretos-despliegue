@@ -31,7 +31,9 @@ function detectarPlataforma() {
   const android = /Android/.test(ua)
   if (/Firefox\//.test(ua)) return android ? 'firefox-android' : 'firefox'
   if (/Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\//.test(ua)) return 'safari-mac'
-  return 'otro'
+  // Chrome, Edge, Samsung Internet, Brave, Opera… (Chromium): sin el diálogo todavía,
+  // se instala desde su menú
+  return android ? 'chrome-android' : 'chrome'
 }
 const plataforma = detectarPlataforma()
 
