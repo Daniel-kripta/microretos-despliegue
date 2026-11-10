@@ -21,6 +21,10 @@ return Application::configure(basePath: dirname(__DIR__))
         // Cabeceras de seguridad HTTP en todas las respuestas
         $middleware->append(SecurityHeaders::class);
 
+        // Confía en el proxy inverso (Caddy) del servidor para leer la IP real del visitante y el protocolo (https).
+        // La lista sale de TRUSTED_PROXIES (direcciones separadas por comas); sin ella no se confía en ningún proxy.
+        $middleware->trustProxies(at: array_filter(explode(',', (string) env('TRUSTED_PROXIES'))));
+
         $middleware->alias([
             'admin'      => \App\Http\Middleware\EnsureIsAdmin::class,
             'superadmin' => \App\Http\Middleware\EnsureIsSuperAdmin::class,
