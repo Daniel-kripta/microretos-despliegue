@@ -161,7 +161,7 @@ function getEstadoKey(p) {
 const landingUrl = computed(() => {
   if (!proyecto.value?.token_empresa) return '';
   const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-  const base = isLocal ? window.location.origin : 'https://dualab.es';
+  const base = isLocal ? window.location.origin : (import.meta.env.VITE_APP_BASE_URL || 'https://dualab.es');
   return `${base}/startup/landing/${proyecto.value.token_empresa}`;
 });
 

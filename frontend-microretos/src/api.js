@@ -4,11 +4,12 @@ import axios from 'axios';
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
 // Si está en tu Mac, busca en local. Si está en internet, dispara al subdominio.
-const apiURL = isLocal ? '/api' : 'https://api.dualab.es/api';
+// VITE_API_URL (al compilar) permite apuntar a otra API, p. ej. un entorno de pruebas; sin ella, la de producción.
+const apiURL = isLocal ? '/api' : (import.meta.env.VITE_API_URL || 'https://api.dualab.es/api');
 
 // Misma base que apiURL pero sin el prefijo /api — /sanctum/csrf-cookie vive en el
 // grupo de rutas 'web', no en 'api'. En local, vite.config.js proxya /sanctum igual que /api.
-const rootURL = isLocal ? '' : 'https://api.dualab.es';
+const rootURL = isLocal ? '' : apiURL.replace(/\/api$/, '');
 
 const api = axios.create({
   baseURL: apiURL,

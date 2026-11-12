@@ -94,7 +94,7 @@ const tokenEmpresa          = ref('');
 const landingUrl = computed(() => {
   if (!tokenEmpresa.value) return '';
   const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-  const base = isLocal ? window.location.origin : 'https://dualab.es';
+  const base = isLocal ? window.location.origin : (import.meta.env.VITE_APP_BASE_URL || 'https://dualab.es');
   return `${base}/startup/landing/${tokenEmpresa.value}`;
 });
 
