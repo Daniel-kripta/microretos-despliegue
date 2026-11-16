@@ -13,6 +13,8 @@ Complementa las instrucciones globales de `~/.claude/CLAUDE.md`. Las reglas de L
   - `CACHE_STORE=file` (no database, no redis)
   - `QUEUE_CONNECTION=database` + scheduler de Laravel para colas
   - Ruta producción: ver `.env` de producción (no versionada) — no incluir la ruta real ni el ID de cuenta de hosting aquí, este archivo es público en GitHub
+- **Dominios, APIs y bases de datos:** [docs/MAPA_DOMINIOS.md](docs/MAPA_DOMINIOS.md) — qué sirve `dualab.es`, `api.dualab.es`, `info.dualab.es` (API de la web, sitio propio en hPanel con su propia BD: no borrarlo), `comercial.`, `central.` y `nexo.dualab.es`, y sus puertos en local. Leerlo antes de tocar nada en hPanel; comprobar con `./scripts/comprobar-dominios.sh`.
+- **Apps del repo:** app DuaLab (`frontend-microretos/src`), app comercial (`comercial/`), DuaLab Central (`central/`, solo superadmin) y Nexo (`nexo/`, página de acceso). La web pública y Gestión web están en el repo aparte `FRONTOFFICE/dualab_proyecto`.
 
 ## Ramas Git
 
@@ -32,7 +34,7 @@ Complementa las instrucciones globales de `~/.claude/CLAUDE.md`. Las reglas de L
 
 Middleware disponibles: `auth:sanctum`, `EnsureIsAdmin`, `EnsureIsSuperAdmin`, `EnsureIsDocente` (lista blanca: docente, admin, superadmin), `EnsureIsComercial` (comercial y superadmin).
 
-**Captación comercial:** la empresa captada no tiene `centro_id`; tras la firma queda `pendiente_centro` y el superadmin la coloca en uno o varios centros (tabla `centro_empresa`) desde Notificaciones → «Captación comercial». Sus retos viven en `microreto_borradores` hasta que el superadmin los publica (un `Microreto` por centro). Textos legales en `config/captacion.php` (de ejemplo hasta `CAPTACION_TEXTOS_REVISADOS=true`).
+**Captaciones:** lo que llega de fuera (entrevista del comercial = origen 1, formulario web del frontoffice = origen 2, tabla `captacion_origenes`) se guarda en `empresa_captaciones` / `centro_captaciones`, nunca directamente en `empresas` / `centro_educativo`. El superadmin las valida desde Notificaciones → «Captación comercial»: al validar una empresa se crea en `empresas` (sin `centro_id`) y se coloca en uno o varios centros (`centro_empresa`); o se descarta. Firma y retos en borrador (`microreto_borradores`) cuelgan de la captación; los retos se publican tras validar (un `Microreto` por centro). Al validar se puede fusionar con una empresa o un centro que ya existan (no se duplican). Los centros se validan dando de alta (o enlazando) un `centro_educativo`. Los formularios web llegan por `POST /api/integraciones/frontoffice/formularios`, firmados con HMAC (`FRONTOFFICE_WEBHOOK_SECRETO`, el mismo que en Gestión web → Integraciones del frontoffice); los de administraciones y el rápido se ignoran. Textos legales en `config/captacion.php` (de ejemplo hasta `CAPTACION_TEXTOS_REVISADOS=true`).
 Los roles `docente` y `empresa` no tienen middleware propio todavía — pendiente en SECURITY_FIXES.md.
 
 ## Base de datos — nunca modificar sin permiso explícito
