@@ -5,10 +5,13 @@
  * Validar = darlo de alta en DuaLab (centro_educativo) o enlazarlo con el que ya existe;
  * descartar = queda registrado con su motivo. Va junto a PanelCaptacionComercial (empresas).
  */
-import { ref, onMounted } from 'vue'
+import AvisoAccionCritica from './AvisoAccionCritica.vue'
+import MoverPapeleraModal from './MoverPapeleraModal.vue'
+import { useAuthStore, ROLE_SUPERADMIN, ROLE_ADMIN_CENTRAL_DUALAB } from '../stores/auth.js'
+import { ref, computed, onMounted } from 'vue'
 import Modal from './Modal.vue'
 import {
-  getCentrosCaptados, validarCentroCaptado, descartarCentroCaptado, getCoincidenciasCentro,
+  getCentrosCaptados, validarCentroCaptado, descartarCentroCaptado, getCoincidenciasCentro, eliminarCentroCaptado,
 } from '../services/captacionService.js'
 
 const emit = defineEmits(['cambio'])
@@ -48,6 +51,31 @@ async function cargar() {
   }
 }
 onMounted(cargar)
+
+// ── Mover a la papelera (superadmin y Admin Central DuaLab) ──────────────────
+const auth = useAuthStore()
+const puedeBorrar = computed(() => [ROLE_SUPERADMIN, ROLE_ADMIN_CENTRAL_DUALAB].includes(auth.userRole))
+const aBorrar = ref(null)
+const borrando = ref(false)
+function pedirBorrar(c) {
+  aBorrar.value = { id: c.id, titulo: 'Borrar centro captado', nombre: c.centro_nombre,
+    texto: c.estado === 'validada' ? 'El centro ya dado de alta en DuaLab no se toca.' : '' }
+}
+async function confirmarBorrar() {
+  borrando.value = true
+  try {
+    const { data } = await eliminarCentroCaptado(aBorrar.value.id)
+    aviso.value = data.message
+    aBorrar.value = null
+    await cargar()
+    emit('cambio')
+  } catch (e) {
+    error.value = mensajeError(e, 'No se ha podido mover a la papelera.')
+    aBorrar.value = null
+  } finally {
+    borrando.value = false
+  }
+}
 
 function cambiarEstado(key) {
   estado.value = key
@@ -125,9 +153,10 @@ async function confirmarDescarte() {
   <article class="card p-4 sm:p-5">
     <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <h2 class="font-heading text-lg font-bold">Centros educativos captados</h2>
-      <div class="inline-flex w-fit gap-1 rounded-full bg-gray-100 p-1" role="group" aria-label="Qué centros ver">
+      <!-- En 360px las tres pestañas casi no caben: se estrechan y, si aun así no caben, el carril se desplaza -->
+      <div class="inline-flex w-fit max-w-full gap-1 overflow-x-auto rounded-full bg-gray-100 p-1" role="group" aria-label="Qué centros ver">
         <button v-for="e in ESTADOS" :key="e.key" type="button" :aria-pressed="estado === e.key" @click="cambiarEstado(e.key)"
-                class="inline-flex h-9 items-center rounded-full px-4 text-sm font-semibold transition"
+                class="inline-flex h-9 shrink-0 items-center rounded-full px-2 text-sm font-semibold transition sm:px-4"
                 :class="estado === e.key ? 'bg-white text-azul-noche shadow-sm' : 'text-gray-600 hover:text-azul-noche'">
           {{ e.label }}
         </button>
@@ -182,12 +211,17 @@ async function confirmarDescarte() {
           <span class="font-semibold text-azul-noche">Motivo:</span> {{ c.motivo_descarte }}
         </p>
 
-        <div v-if="c.estado === 'pendiente_validacion'" class="mt-auto flex flex-wrap gap-2">
-          <button type="button" class="accion-principal" @click="abrirValidar(c)">Validar y dar de alta</button>
-          <button type="button" class="accion-secundaria" @click="abrirDescartar(c)">Descartar</button>
+        <div v-if="c.estado === 'pendiente_validacion' || puedeBorrar" class="mt-auto flex flex-wrap gap-2">
+          <template v-if="c.estado === 'pendiente_validacion'">
+            <button type="button" class="accion-principal" @click="abrirValidar(c)">Validar y dar de alta</button>
+            <button type="button" class="accion-secundaria" @click="abrirDescartar(c)">Descartar</button>
+          </template>
+          <button v-if="puedeBorrar" type="button" class="accion-secundaria !text-red-700" @click="pedirBorrar(c)">Borrar</button>
         </div>
       </li>
     </ul>
+
+    <MoverPapeleraModal :item="aBorrar" :ocupado="borrando" @cerrar="aBorrar = null" @confirmar="confirmarBorrar" />
 
     <!-- Modal: validar -->
     <Modal :visible="!!validando" max-width="max-w-lg" @cerrar="validando = null">
@@ -221,6 +255,7 @@ async function confirmarDescarte() {
           </li>
           <li v-if="!buscando && !coincidencias.length" class="px-3 py-2 text-xs text-gray-500">No hay centros parecidos en DuaLab.</li>
         </ul>
+        <AvisoAccionCritica />
         <div class="fila-pasos">
           <button type="button" class="btn-paso-atras" @click="validando = null">Cancelar</button>
           <button type="button" class="btn-paso" :disabled="guardando" @click="confirmarValidar">
@@ -232,7 +267,7 @@ async function confirmarDescarte() {
 
     <!-- Modal: descartar -->
     <Modal :visible="!!descartando" max-width="max-w-lg" @cerrar="descartando = null">
-      <div v-if="descartando" class="flex flex-col gap-4 p-6 sm:p-8">
+      <div v-if="descartando" class="flex max-h-[90dvh] min-h-0 flex-col gap-4 overflow-y-auto p-6 sm:p-8">
         <div class="pr-10">
           <h2 class="font-heading text-xl font-bold text-azul-noche">Descartar centro</h2>
           <p class="mt-1 break-words text-sm text-texto-secundario">«{{ descartando.centro_nombre }}» no se dará de alta. Queda registrado en «Descartados».</p>
@@ -241,6 +276,7 @@ async function confirmarDescarte() {
           <label for="pcc2-motivo" class="label-style">Motivo <span class="normal-case tracking-normal">(opcional)</span></label>
           <textarea id="pcc2-motivo" v-model="motivo" rows="3" maxlength="500" class="input-style" placeholder="Ej.: duplicado de una solicitud anterior" />
         </div>
+        <AvisoAccionCritica />
         <div class="fila-pasos">
           <button type="button" class="btn-paso-atras" @click="descartando = null">Cancelar</button>
           <button type="button" class="btn-paso" :disabled="guardando" @click="confirmarDescarte">{{ guardando ? 'Descartando…' : 'Descartar' }}</button>

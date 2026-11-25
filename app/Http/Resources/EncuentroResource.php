@@ -19,6 +19,9 @@ class EncuentroResource extends JsonResource
             'id'                 => $this->id,
             'fecha'              => $this->fecha?->format('Y-m-d'),
             'fecha_fin'          => $this->fecha_fin?->format('Y-m-d'),
+            'tipo'               => $this->tipo,
+            // Sesiones del encuentro (o, en encuentros antiguos, las de su propuesta)
+            'planificacion_sesiones' => $this->resource->sesiones(),
             'centro_educativo'   => $this->centro_educativo,
             'ciclo_formativo'    => $this->ciclo_formativo,
             'curso'              => $this->curso,
@@ -45,6 +48,7 @@ class EncuentroResource extends JsonResource
                     'id'     => $m->id,
                     'alias'  => $m->alias,
                     'rol'    => $m->rol,
+                    'destacado' => $m->esDestacado(), // seleccionado por DuaLab para prácticas (P3b)
                 ]),
             ])),
             // Códigos de acceso solo para quien puede editar el encuentro (no a colaboradores de solo lectura)
@@ -52,8 +56,13 @@ class EncuentroResource extends JsonResource
             'codigo_ia'          => $puedeEditar ? $this->codigo_ia : null,
             'microproyecto_uuid' => $this->microproyecto?->uuid,
             'proyecto_titulo'    => $this->microproyecto?->titulo,
+            // Estado del reto ajustado: el docente lo marca como completado desde el encuentro
+            'proyecto_estado'    => $this->microproyecto?->estado,
             'microreto_id'       => $this->microproyecto?->microreto_id,
             'microreto_titulo'   => $this->microproyecto?->microreto?->titulo,
+            // Empresa del reto (filtros Empresa y Sector): solo nombre y sector, nunca datos de contacto
+            'empresa_nombre'     => $this->microproyecto?->empresa?->nombre_comercial ?? $this->microproyecto?->microreto?->empresa_nombre,
+            'empresa_sector'     => $this->microproyecto?->empresa?->sector,
             // Contexto curricular del proyecto (cards de la biblioteca de encuentros)
             'familia_nombre'     => $this->microproyecto?->familia?->nombre,
             'modulos'            => $this->microproyecto?->nombresModulos() ?? [],

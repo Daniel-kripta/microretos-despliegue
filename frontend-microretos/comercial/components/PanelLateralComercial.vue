@@ -1,11 +1,10 @@
-<!-- Panel lateral de la app comercial: misma estética que el SidePanel de DuaLab (azul noche,
+<!-- Panel lateral de la app comercial: misma estética que el SidePanel de DuaLab, sobre un verde
+     muy oscuro a juego con el icono de la herramienta (antes azul noche);
      .nav-item con indicador lateral en el color del rol, banner de marca al fondo). Fijo en lg+,
      cajón deslizante en móvil y tablet (lo abre el botón de menú de la barra superior). -->
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useInstalarApp } from '../../src/composables/useInstalarApp.js'
-import InstalarAppModal from '../../src/components/InstalarAppModal.vue'
 import logo from '../../src/assets/logo_colores.png'
 
 const abierto = defineModel('abierto', { type: Boolean, default: false })
@@ -41,6 +40,15 @@ const GRUPOS = [
         icono: 'M8 10h8M8 14h5M21 12c0 4.4-4 8-9 8a9.8 9.8 0 01-4-.8L3 20l1.3-3.9A7.6 7.6 0 013 12c0-4.4 4-8 9-8s9 3.6 9 8z' },
     ],
   },
+  // Sin título: separada con una raya de los grupos de entrevistas
+  {
+    key: 'papelera',
+    items: [
+      { key: 'papelera', label: 'Papelera', ruta: { name: 'papelera' },
+        activa: () => route.name === 'papelera',
+        icono: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16' },
+    ],
+  },
   {
     titulo: 'Mi cuenta',
     items: [
@@ -56,14 +64,6 @@ function ir(item) {
   router.push(item.ruta)
 }
 
-// Instalar como app, igual que en el SidePanel de DuaLab: diálogo nativo en Chrome/Edge,
-// instrucciones paso a paso en Safari (iPad) y Firefox
-const { puedeInstalar, instalar, plataforma } = useInstalarApp()
-const mostrarInstrucciones = ref(false)
-async function abrirInstalacion() {
-  abierto.value = false
-  if (!(await instalar())) mostrarInstrucciones.value = true
-}
 
 // Al navegar (también con atrás/adelante) se cierra el cajón en móvil
 watch(() => route.fullPath, () => { abierto.value = false })
@@ -76,11 +76,12 @@ watch(() => route.fullPath, () => { abierto.value = false })
   </Transition>
 
   <aside id="panel-comercial" aria-label="Navegación de la app comercial"
-         class="fixed left-0 top-16 z-40 flex h-[calc(100dvh-6.5rem)] w-72 max-w-[85vw] flex-col border-r border-azul-noche-border bg-azul-noche shadow-[6px_0_32px_rgba(0,0,0,0.25)] transition-transform duration-300 ease-in-out lg:translate-x-0"
+         class="panel-lateral fixed left-0 top-16 z-40 flex h-[calc(100dvh-6.5rem)] w-72 max-w-[85vw] flex-col border-r border-white/10 bg-[#1A2E14] shadow-[6px_0_32px_rgba(0,0,0,0.25)] transition-transform duration-300 ease-in-out lg:translate-x-0"
          :class="abierto ? 'translate-x-0' : '-translate-x-full'">
     <nav class="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-3 py-3">
-      <template v-for="grupo in GRUPOS" :key="grupo.titulo">
-        <p class="nav-grupo">{{ grupo.titulo }}</p>
+      <template v-for="grupo in GRUPOS" :key="grupo.key ?? grupo.titulo">
+        <p v-if="grupo.titulo" class="nav-grupo">{{ grupo.titulo }}</p>
+        <hr v-else class="mx-3 my-3 border-white/15" />
         <div class="space-y-0.5">
           <button v-for="item in grupo.items" :key="item.key" type="button" class="nav-item w-full text-left"
                   :class="[item.activa() ? 'nav-item--activo' : 'nav-item--idle', `nav-item--${COLOR_GRUPO[grupo.titulo] ?? 'empresas'}`]"
@@ -93,35 +94,25 @@ watch(() => route.fullPath, () => { abierto.value = false })
         </div>
       </template>
 
-      <!-- Instalar app: lleva el mt-auto para que el banner siga abajo también cuando ya está
-           instalada y el botón no se pinta -->
-      <div class="mt-auto shrink-0 pt-3">
-        <button v-if="puedeInstalar" type="button" class="nav-item nav-item--idle w-full text-left" @click="abrirInstalacion">
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14" />
-          </svg>
-          <span>Instalar app</span>
-        </button>
-      </div>
+      <!-- «Instalar app» está en la cabecera (BotonInstalarApp); este hueco mantiene el banner abajo -->
+      <div class="mt-auto shrink-0" aria-hidden="true"></div>
 
       <!-- Banner de marca al fondo del panel, como en el SidePanel de DuaLab: verde en empresas, azul en centros -->
       <div class="shrink-0 pt-4 [@media(max-height:600px)]:hidden" aria-hidden="true">
-        <div :class="enCentros ? 'banner-centros' : 'banner-empresas'" class="relative h-24 overflow-hidden rounded-2xl border border-white/15 px-4 py-3 shadow-[0_8px_24px_rgba(0,0,0,0.25)] sm:h-28">
+        <div :class="enCentros ? 'banner-centros' : 'banner-empresas'" class="panel-banner relative h-24 overflow-hidden rounded-2xl border border-white/15 px-4 py-3 shadow-[0_8px_24px_rgba(0,0,0,0.25)] sm:h-28">
           <svg class="absolute inset-x-0 bottom-0 h-12 w-full" viewBox="0 0 240 48" preserveAspectRatio="none">
             <path d="M0 30 C60 14 120 46 240 22 V48 H0Z" fill="#FF8920" opacity="0.85" />
             <path d="M0 38 C70 26 140 50 240 34 V48 H0Z" fill="#3FC7C8" opacity="0.9" />
             <path d="M0 44 C80 38 160 52 240 44 V48 H0Z" fill="#ffffff" opacity="0.35" />
           </svg>
-          <img :src="logo" alt="" class="absolute right-3 top-1/2 h-16 w-auto -translate-y-1/2 object-contain drop-shadow-[0_4px_10px_rgba(0,0,0,0.35)] sm:right-4 sm:h-20" />
+          <img :src="logo" alt="" class="panel-banner-logo absolute right-3 top-1/2 h-16 w-auto -translate-y-1/2 object-contain drop-shadow-[0_4px_10px_rgba(0,0,0,0.35)] sm:right-4 sm:h-20" />
           <p class="relative text-base font-black tracking-wide text-white">DUALAB</p>
-          <p class="relative mt-1 max-w-[8.5rem] text-xs font-semibold leading-snug text-white/85">{{ enCentros ? 'Centros que conectan su FP con empresas' : 'Empresas que abren sus puertas a la FP' }}</p>
+          <p class="panel-banner-sub relative mt-1 max-w-[8.5rem] text-xs font-semibold leading-snug text-white/85">{{ enCentros ? 'Centros que conectan su FP con empresas' : 'Empresas que abren sus puertas a la FP' }}</p>
         </div>
       </div>
     </nav>
   </aside>
 
-  <InstalarAppModal :abierto="mostrarInstrucciones" :plataforma="plataforma" nombre="DuaLab Comercial" ruta-inicio="/"
-                    @cerrar="mostrarInstrucciones = false" />
 </template>
 
 <style scoped>

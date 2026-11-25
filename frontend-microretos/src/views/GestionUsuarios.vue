@@ -7,11 +7,16 @@ import { useAuthStore } from '../stores/auth.js'
 import Modal from '../components/Modal.vue'
 import CabeceraSeccion from '../components/CabeceraSeccion.vue'
 import FiltrosPanel from '../components/FiltrosPanel.vue'
+import SelectorTipoCuenta from '../components/SelectorTipoCuenta.vue'
+import TiposCuentaModal from '../components/TiposCuentaModal.vue'
 import FiltroSelect from '../components/FiltroSelect.vue'
 import TituloResultados from '../components/TituloResultados.vue'
 import { usePaginacion } from '../composables/usePaginacion.js'
 
 const authStore = useAuthStore()
+// Gestiona las cuentas de todos los centros (elige tipo, centro y empresa): superadmin y Admin Central
+// DuaLab. Crear superadmins y asociar centro desde el menú siguen siendo solo del superadmin.
+const gestionaTodos = computed(() => authStore.isSuperAdmin || authStore.isAdminCentralDualab)
 
 // ── Estado principal ────────────────────────────────────────────────
 const usuarios    = ref([])
@@ -26,6 +31,18 @@ const creando     = ref(false)
 const form        = ref({ name: '', email: '', password: '', password_confirmation: '', role: '2', centro_educativo_id: null, empresa_id: null })
 const formErrors  = ref({})
 const msgCrear    = ref('')
+const verClave    = ref(false)   // ojo de «Contraseña» y «Repite la contraseña» (crear y editar)
+const modalTipos  = ref(false)   // explicación de todos los tipos de cuenta
+
+// Al cambiar de tipo se suelta lo que ya no aplica: centro solo para docente/admin docente, empresa solo
+// para empresa. Al editar, pasar a empresa no quita el centro (como antes).
+function elegirRol(f, rol, alCrear) {
+  f.role = rol
+  if (['2', '4'].includes(rol)) return
+  if (rol === '3') { if (alCrear) f.centro_educativo_id = null; return }
+  f.centro_educativo_id = null
+  f.empresa_id = null
+}
 
 // ── Modal: éxito tras crear ─────────────────────────────────────────
 const modalExito       = ref(false)
@@ -43,6 +60,7 @@ const editando           = ref(false)
 const usuarioEditando    = ref(null)
 const formEditar         = ref({ name: '', email: '', password: '', password_confirmation: '', role: '2', centro_educativo_id: null, empresa_id: null })
 const confirmarCambioPassword = ref(false)   // switch que el admin debe marcar para autorizar el reseteo de contraseña
+watch([modalCrear, modalEditar], () => { verClave.value = false })   // cada modal empieza con la contraseña oculta
 
 // ── Módulos que imparte el docente: toda la lógica en PanelModulosDocente (la misma que «Mi
 //    usuario»), con los endpoints /admin/usuarios/{id}/modulos ──
@@ -101,7 +119,7 @@ async function abrirModalEditar(usuario) {
   msgEditar.value        = ''
   modalEditar.value      = true
 
-  if (authStore.isSuperAdmin) {
+  if (gestionaTodos.value) {
     await Promise.all([
       centros.value.length === 0 ? api.get('/centros').then(r => { centros.value = r.data }) : Promise.resolve(),
       empresasList.value.length === 0 ? api.get('/empresas').then(r => { empresasList.value = r.data }) : Promise.resolve(),
@@ -113,11 +131,11 @@ async function guardarEdicion() {
   formEditarErrors.value = {}
   msgEditar.value        = ''
 
-  if (authStore.isSuperAdmin && ['2', '4'].includes(formEditar.value.role) && !formEditar.value.centro_educativo_id) {
+  if (gestionaTodos.value && ['2', '4'].includes(formEditar.value.role) && !formEditar.value.centro_educativo_id) {
     formEditarErrors.value.centro_educativo_id = 'Debes asignar un centro educativo.'
     return
   }
-  if (authStore.isSuperAdmin && formEditar.value.role === '3' && !formEditar.value.empresa_id) {
+  if (gestionaTodos.value && formEditar.value.role === '3' && !formEditar.value.empresa_id) {
     formEditarErrors.value.empresa_id = 'Debes asignar una empresa.'
     return
   }
@@ -145,10 +163,10 @@ async function guardarEdicion() {
       payload.password_confirmation = formEditar.value.password_confirmation
       payload.confirm_password_change = true
     }
-    if (authStore.isSuperAdmin && ['2', '4'].includes(formEditar.value.role)) {
+    if (gestionaTodos.value && ['2', '4'].includes(formEditar.value.role)) {
       payload.centro_educativo_id = formEditar.value.centro_educativo_id
     }
-    if (authStore.isSuperAdmin && formEditar.value.role === '3') {
+    if (gestionaTodos.value && formEditar.value.role === '3') {
       payload.empresa_id = formEditar.value.empresa_id
     }
     const { data } = await api.patch(`/admin/usuarios/${usuarioEditando.value.id}`, payload)
@@ -250,6 +268,9 @@ const TIPOS = [
   { val: 4, label: 'Admins de centro', punto: 'bg-administraciones' },
   { val: 3, label: 'Empresas',         punto: 'bg-empresas' },
   { val: 5, label: 'Comerciales',      punto: 'bg-empresas-dark' },
+  { val: 6, label: 'Red DuaLab',       punto: 'bg-espacio-red' },
+  { val: 7, label: 'Gestión de prácticas', punto: 'bg-espacio-practicas' },
+  { val: 8, label: 'Admin Central DuaLab', punto: 'bg-azul-noche' },
   { val: 1, label: 'Superadmin',       punto: 'bg-azul-noche' },
 ]
 const conteoTipos = computed(() => {
@@ -271,6 +292,7 @@ function alternarEstado(v) {
   filtroEstados.value = filtroEstados.value.includes(v) ? filtroEstados.value.filter(x => x !== v) : [...filtroEstados.value, v]
 }
 const etiquetaTipo   = (v) => TIPOS.find(t => t.val === v)?.label || ''
+
 const etiquetaEstado = (v) => ESTADOS.find(e => e.val === v)?.label || ''
 
 // Centro: solo para superadmin y si hay cuentas de más de un centro
@@ -434,11 +456,11 @@ async function crearUsuario() {
   formErrors.value = {}
   msgCrear.value   = ''
 
-  if (authStore.isSuperAdmin && ['2', '4'].includes(form.value.role) && !form.value.centro_educativo_id) {
+  if (gestionaTodos.value && ['2', '4'].includes(form.value.role) && !form.value.centro_educativo_id) {
     formErrors.value.centro_educativo_id = 'Debes asignar un centro educativo antes de crear la cuenta.'
     return
   }
-  if (authStore.isSuperAdmin && form.value.role === '3' && !form.value.empresa_id) {
+  if (gestionaTodos.value && form.value.role === '3' && !form.value.empresa_id) {
     formErrors.value.empresa_id = 'Debes asignar una empresa antes de crear la cuenta.'
     return
   }
@@ -478,7 +500,7 @@ async function abrirModalCrear() {
   formErrors.value = {}
   msgCrear.value = ''
   modalCrear.value = true
-  if (authStore.isSuperAdmin) {
+  if (gestionaTodos.value) {
     const [, ] = await Promise.all([
       centros.value.length === 0 ? api.get('/centros').then(r => { centros.value = r.data }) : Promise.resolve(),
       empresasList.value.length === 0 ? api.get('/empresas').then(r => { empresasList.value = r.data }) : Promise.resolve(),
@@ -694,6 +716,9 @@ const ROLE_COLORS = {
   3: { bg: 'bg-empresas/10 text-empresas-dark',                  punto: 'bg-empresas',        avatar: 'bg-empresas/10 text-empresas-dark',            label: 'Empresa' },
   4: { bg: 'bg-administraciones/10 text-administraciones-dark',  punto: 'bg-administraciones', avatar: 'bg-administraciones/10 text-administraciones-dark', label: 'Admin de centro' },
   5: { bg: 'bg-empresas/10 text-empresas-dark',                  punto: 'bg-empresas-dark',   avatar: 'bg-empresas/10 text-empresas-dark',              label: 'Comercial' },
+  6: { bg: 'bg-espacio-red/10 text-espacio-red-fuerte',          punto: 'bg-espacio-red',     avatar: 'bg-espacio-red/10 text-espacio-red-fuerte',      label: 'Red DuaLab' },
+  7: { bg: 'bg-espacio-practicas/10 text-espacio-practicas-fuerte', punto: 'bg-espacio-practicas', avatar: 'bg-espacio-practicas/10 text-espacio-practicas-fuerte', label: 'Gestión de prácticas' },
+  8: { bg: 'bg-azul-noche/10 text-azul-noche',                   punto: 'bg-azul-noche',      avatar: 'bg-azul-noche/10 text-azul-noche',               label: 'Admin Central DuaLab' },
 }
 function roleChip(role) {
   return ROLE_COLORS[role] ?? { bg: 'bg-gray-100 text-azul-noche', punto: 'bg-azul-noche', avatar: 'bg-gray-100 text-azul-noche', label: 'Superadmin' }
@@ -725,7 +750,7 @@ onMounted(async () => {
   <div class="relative min-h-screen pt-16 font-sans text-azul-noche">
     <div class="relative z-10 mx-auto max-w-[90rem] px-4 pb-10 pt-5 sm:px-6 lg:px-8">
 
-      <CabeceraSeccion titulo="Gestión de" destacado="cuentas" color="text-administraciones" antetitulo="Administración"
+      <CabeceraSeccion titulo="Gestión de" destacado="cuentas" color="text-rol" antetitulo="Administración"
                        subtitulo="Crea, activa, bloquea y elimina cuentas de docentes y empresas." class="mb-5">
         <button type="button" @click="abrirModalCrear()" class="accion-principal">
           <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 5v14M5 12h14"/></svg>
@@ -750,7 +775,7 @@ onMounted(async () => {
       </div>
 
       <!-- Filtros principales: buscador + «Más filtros» · centro (superadmin, si hay varios) -->
-      <FiltrosPanel separadores v-model:busqueda="busqueda" placeholder="Buscar por nombre, email, centro o empresa…" class="mb-5">
+      <FiltrosPanel separadores v-model:busqueda="busqueda" placeholder="Buscar por nombre, email, centro o empresa…" class="mb-3">
         <template #curso>
           <button type="button" @click="panelFiltrosAbierto = !panelFiltrosAbierto" :aria-expanded="panelFiltrosAbierto"
                   aria-controls="filtros-rapidos" :title="panelFiltrosAbierto ? 'Ocultar los filtros rápidos' : 'Mostrar los filtros rápidos'"
@@ -763,10 +788,19 @@ onMounted(async () => {
           </button>
         </template>
         <!-- Slot condicional: sin filtro de centro (admin de centro) no queda una fila vacía -->
-        <template v-if="authStore.isSuperAdmin && centrosDisponibles.length > 1" #default>
+        <template v-if="gestionaTodos && centrosDisponibles.length > 1" #default>
           <FiltroSelect v-model="filtroCentro" label="Centro educativo" todos="Todos los centros" :opciones="centrosDisponibles" />
         </template>
       </FiltrosPanel>
+
+      <!-- Qué es cada tipo de cuenta: siempre a mano bajo los filtros (también en el formulario de crear/editar) -->
+      <div class="mb-5">
+        <button type="button" @click="modalTipos = true"
+                class="inline-flex min-h-9 items-center gap-2 rounded-full border border-borde bg-white px-4 text-sm font-semibold text-texto-secundario transition-colors hover:bg-gray-50 hover:text-azul-noche">
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          ¿Qué es cada tipo de cuenta?
+        </button>
+      </div>
 
       <div class="flex flex-col gap-5 lg:flex-row lg:items-start">
 
@@ -1056,12 +1090,12 @@ onMounted(async () => {
               <div>
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-1.5">Correo electrónico</label>
                 <!-- Docente/Admin sin centro aún -->
-                <div v-if="authStore.isSuperAdmin && ['2','4'].includes(form.role) && !activeEmailDomain"
+                <div v-if="gestionaTodos && ['2','4'].includes(form.role) && !activeEmailDomain"
                   class="w-full bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-600">
                   Selecciona un centro educativo para generar el correo
                 </div>
                 <!-- Empresa sin empresa asignada aún -->
-                <div v-else-if="authStore.isSuperAdmin && form.role === '3' && !activeEmailDomain"
+                <div v-else-if="gestionaTodos && form.role === '3' && !activeEmailDomain"
                   class="w-full bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 text-xs text-amber-600">
                   Selecciona una empresa para generar el correo
                 </div>
@@ -1090,11 +1124,26 @@ onMounted(async () => {
               <!-- Contraseña -->
               <div>
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-1.5">Contraseña temporal</label>
-                <input v-model="form.password" type="password" placeholder="Mín. 8 caracteres, mayúsculas, minúsculas, número y símbolo"
-                  maxlength="128"
-                  class="w-full bg-gray-50 border rounded-xl px-4 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
-                         outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
-                  :class="formErrors.password ? 'border-red-400' : 'border-gray-200'" />
+                <div class="relative">
+                  <input v-model="form.password" :type="verClave ? 'text' : 'password'" autocomplete="new-password" placeholder="Mín. 8 caracteres, mayúsculas, minúsculas, número y símbolo"
+                    maxlength="128"
+                    class="w-full bg-gray-50 border rounded-xl pl-4 pr-12 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
+                           outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
+                    :class="formErrors.password ? 'border-red-400' : 'border-gray-200'" />
+                  <button type="button" @click="verClave = !verClave" :aria-pressed="verClave"
+                    :aria-label="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'" :title="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'"
+                    class="absolute right-1 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-gray-400 transition-colors hover:text-azul-noche">
+                    <svg v-if="verClave" class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                    </svg>
+                    <svg v-else class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                    </svg>
+                  </button>
+                </div>
                 <p v-if="formErrors.password" class="text-xs text-red-500 font-bold mt-1.5">{{ formErrors.password }}</p>
                 <ul class="mt-1.5 grid grid-cols-1 gap-x-3 gap-y-0.5 sm:grid-cols-2">
                   <li v-for="req in passwordRequisitos" :key="req.label"
@@ -1114,70 +1163,37 @@ onMounted(async () => {
               <!-- Repite contraseña -->
               <div>
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-1.5">Repite la contraseña</label>
-                <input v-model="form.password_confirmation" type="password" placeholder="Vuelve a escribir la contraseña"
-                  maxlength="128"
-                  class="w-full bg-gray-50 border rounded-xl px-4 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
-                         outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
-                  :class="formErrors.password_confirmation ? 'border-red-400' : 'border-gray-200'" />
+                <div class="relative">
+                  <input v-model="form.password_confirmation" :type="verClave ? 'text' : 'password'" autocomplete="new-password" placeholder="Vuelve a escribir la contraseña"
+                    maxlength="128"
+                    class="w-full bg-gray-50 border rounded-xl pl-4 pr-12 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
+                           outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
+                    :class="formErrors.password_confirmation ? 'border-red-400' : 'border-gray-200'" />
+                  <button type="button" @click="verClave = !verClave" :aria-pressed="verClave"
+                    :aria-label="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'" :title="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'"
+                    class="absolute right-1 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-gray-400 transition-colors hover:text-azul-noche">
+                    <svg v-if="verClave" class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                    </svg>
+                    <svg v-else class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                    </svg>
+                  </button>
+                </div>
                 <p v-if="formErrors.password_confirmation" class="text-xs text-red-500 mt-1">{{ formErrors.password_confirmation }}</p>
               </div>
 
               <!-- Tipo de cuenta (solo visible para superadmin; admin de centro siempre crea docentes) -->
-              <div v-if="authStore.isSuperAdmin">
-                <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">Tipo de cuenta</label>
-                <div class="flex flex-wrap gap-3">
-                  <!-- Docente: activo si role es 2 (docente) o 4 (admin de centro) -->
-                  <button type="button"
-                    @click="form.role = ['2','4'].includes(form.role) ? form.role : '2'"
-                    :class="['2','4'].includes(form.role) ? 'bg-centros/10 border-centros/40 text-centros' : 'bg-gray-50 border-gray-200 text-texto-secundario hover:text-azul-noche'"
-                    class="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full border px-3 text-sm font-semibold transition-all">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 3h6v4H9V3z"/>
-                    </svg>
-                    Docente
-                  </button>
-                  <button type="button" @click="form.role = '3'; form.centro_educativo_id = null"
-                    :class="form.role === '3' ? 'bg-empresas/10 border-empresas/40 text-empresas-dark' : 'bg-gray-50 border-gray-200 text-texto-secundario hover:text-azul-noche'"
-                    class="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full border px-3 text-sm font-semibold transition-all">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-2 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
-                    </svg>
-                    Empresa
-                  </button>
-                  <!-- Comercial: capta empresas en la app comercial; sin centro ni empresa -->
-                  <button type="button" @click="form.role = '5'; form.centro_educativo_id = null; form.empresa_id = null"
-                    :class="form.role === '5' ? 'bg-empresas/10 border-empresas/40 text-empresas-dark' : 'bg-gray-50 border-gray-200 text-texto-secundario hover:text-azul-noche'"
-                    class="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full border px-3 text-sm font-semibold transition-all">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 3h6v4H9V3zM9 13h6M9 17h4"/>
-                    </svg>
-                    Comercial
-                  </button>
-                </div>
-
-                <!-- Sub-opción anidada: ¿es admin del centro? Solo si Docente está seleccionado -->
-                <div v-if="['2','4'].includes(form.role)"
-                  class="mt-2 px-3.5 py-3 bg-gray-50 border border-gray-200 rounded-xl">
-                  <label class="flex items-start gap-3 cursor-pointer select-none">
-                    <input type="checkbox"
-                      :checked="form.role === '4'"
-                      @change="form.role = $event.target.checked ? '4' : '2'; if (!$event.target.checked) form.centro_educativo_id = null"
-                      class="mt-0.5 w-4 h-4 rounded accent-purple-600 shrink-0" />
-                    <div>
-                      <span class="text-xs font-bold text-gray-700">Administrador del centro</span>
-                      <p class="text-[11px] sm:text-[10px] text-gray-400 mt-0.5">Gestiona los docentes de su centro educativo</p>
-                    </div>
-                  </label>
-                </div>
-
-                <p v-if="formErrors.role" class="text-xs text-red-500 mt-1">{{ formErrors.role }}</p>
+              <div v-if="gestionaTodos">
+                <SelectorTipoCuenta :model-value="form.role" :con-superadmin="authStore.isSuperAdmin" :error="formErrors.role"
+                  @elegir="elegirRol(form, $event, true)" @ayuda="modalTipos = true" />
               </div>
 
               <!-- Centro educativo (requerido para docente/admin) -->
-              <div v-if="authStore.isSuperAdmin && ['2','4'].includes(form.role)">
+              <div v-if="gestionaTodos && ['2','4'].includes(form.role)">
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                   Centro educativo
                   <span class="text-red-400 ml-0.5">*</span>
@@ -1194,7 +1210,7 @@ onMounted(async () => {
               </div>
 
               <!-- Empresa (requerida para role empresa) -->
-              <div v-if="authStore.isSuperAdmin && form.role === '3'">
+              <div v-if="gestionaTodos && form.role === '3'">
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                   Empresa
                   <span class="text-red-400 ml-0.5">*</span>
@@ -1222,6 +1238,9 @@ onMounted(async () => {
             </form>
             </div>
     </Modal>
+
+    <!-- ══ MODAL: Tipos de cuenta (cabecera y «¿Qué es cada tipo?») ══ -->
+    <TiposCuentaModal :visible="modalTipos" @cerrar="modalTipos = false" />
 
     <!-- ══ MODAL: Éxito al crear cuenta ═══════════════════════════ -->
     <Modal :visible="modalExito" max-width="max-w-sm" :z-index="9100" :closable="false" card-class="p-6 sm:p-8 text-center overflow-y-auto">
@@ -1465,11 +1484,26 @@ onMounted(async () => {
               <!-- Nueva contraseña (opcional) -->
               <div>
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-1.5">Nueva contraseña <span class="normal-case text-gray-400 font-normal">(opcional)</span></label>
-                <input v-model="formEditar.password" type="password" placeholder="Dejar en blanco para no cambiar"
-                  maxlength="128"
-                  class="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
-                         outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
-                  :class="formEditarErrors.password ? 'border-red-400' : 'border-gray-200'" />
+                <div class="relative">
+                  <input v-model="formEditar.password" :type="verClave ? 'text' : 'password'" autocomplete="new-password" placeholder="Dejar en blanco para no cambiar"
+                    maxlength="128"
+                    class="w-full bg-gray-50 border border-gray-200 rounded-xl pl-4 pr-12 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
+                           outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
+                    :class="formEditarErrors.password ? 'border-red-400' : 'border-gray-200'" />
+                  <button type="button" @click="verClave = !verClave" :aria-pressed="verClave"
+                    :aria-label="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'" :title="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'"
+                    class="absolute right-1 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-gray-400 transition-colors hover:text-azul-noche">
+                    <svg v-if="verClave" class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                    </svg>
+                    <svg v-else class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                    </svg>
+                  </button>
+                </div>
                 <p v-if="formEditarErrors.password" class="text-xs text-red-500 font-bold mt-1.5">{{ formEditarErrors.password }}</p>
                 <ul v-if="formEditar.password" class="mt-1.5 grid grid-cols-1 gap-x-3 gap-y-0.5 sm:grid-cols-2">
                   <li v-for="req in passwordRequisitosEditar" :key="req.label"
@@ -1489,11 +1523,26 @@ onMounted(async () => {
               <!-- Repite nueva contraseña (solo si se ha escrito una) -->
               <div v-if="formEditar.password">
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-1.5">Repite la nueva contraseña</label>
-                <input v-model="formEditar.password_confirmation" type="password" placeholder="Vuelve a escribir la contraseña"
-                  maxlength="128"
-                  class="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
-                         outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
-                  :class="formEditarErrors.password_confirmation ? 'border-red-400' : 'border-gray-200'" />
+                <div class="relative">
+                  <input v-model="formEditar.password_confirmation" :type="verClave ? 'text' : 'password'" autocomplete="new-password" placeholder="Vuelve a escribir la contraseña"
+                    maxlength="128"
+                    class="w-full bg-gray-50 border border-gray-200 rounded-xl pl-4 pr-12 py-2.5 text-sm text-[#1F2937] placeholder-gray-300
+                           outline-none transition-all focus:border-administraciones/50 focus:ring-2 focus:ring-administraciones/10"
+                    :class="formEditarErrors.password_confirmation ? 'border-red-400' : 'border-gray-200'" />
+                  <button type="button" @click="verClave = !verClave" :aria-pressed="verClave"
+                    :aria-label="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'" :title="verClave ? 'Ocultar contraseña' : 'Mostrar contraseña'"
+                    class="absolute right-1 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-gray-400 transition-colors hover:text-azul-noche">
+                    <svg v-if="verClave" class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+                    </svg>
+                    <svg v-else class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"
+                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                    </svg>
+                  </button>
+                </div>
                 <p v-if="formEditarErrors.password_confirmation" class="text-xs text-red-500 mt-1">{{ formEditarErrors.password_confirmation }}</p>
               </div>
 
@@ -1519,59 +1568,13 @@ onMounted(async () => {
               </div>
 
               <!-- Tipo de cuenta (solo visible para superadmin) -->
-              <div v-if="authStore.isSuperAdmin">
-                <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">Tipo de cuenta</label>
-                <div class="flex flex-wrap gap-3">
-                  <!-- Docente: activo si role es 2 (docente) o 4 (admin de centro) -->
-                  <button type="button"
-                    @click="formEditar.role = ['2','4'].includes(formEditar.role) ? formEditar.role : '2'"
-                    :class="['2','4'].includes(formEditar.role) ? 'bg-centros/10 border-centros/40 text-centros' : 'bg-gray-50 border-gray-200 text-texto-secundario hover:text-azul-noche'"
-                    class="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full border px-3 text-sm font-semibold transition-all">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 3h6v4H9V3z"/>
-                    </svg>
-                    Docente
-                  </button>
-                  <button type="button" @click="formEditar.role = '3'"
-                    :class="formEditar.role === '3' ? 'bg-empresas/10 border-empresas/40 text-empresas-dark' : 'bg-gray-50 border-gray-200 text-texto-secundario hover:text-azul-noche'"
-                    class="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full border px-3 text-sm font-semibold transition-all">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-2 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
-                    </svg>
-                    Empresa
-                  </button>
-                  <!-- Comercial: capta empresas en la app comercial; sin centro ni empresa -->
-                  <button type="button" @click="formEditar.role = '5'; formEditar.centro_educativo_id = null; formEditar.empresa_id = null"
-                    :class="formEditar.role === '5' ? 'bg-empresas/10 border-empresas/40 text-empresas-dark' : 'bg-gray-50 border-gray-200 text-texto-secundario hover:text-azul-noche'"
-                    class="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-2 rounded-full border px-3 text-sm font-semibold transition-all">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 3h6v4H9V3zM9 13h6M9 17h4"/>
-                    </svg>
-                    Comercial
-                  </button>
-                </div>
-
-                <!-- Sub-opción anidada: ¿es admin del centro? Solo si Docente está seleccionado -->
-                <div v-if="['2','4'].includes(formEditar.role)"
-                  class="mt-2 px-3.5 py-3 bg-gray-50 border border-gray-200 rounded-xl">
-                  <label class="flex items-start gap-3 cursor-pointer select-none">
-                    <input type="checkbox"
-                      :checked="formEditar.role === '4'"
-                      @change="formEditar.role = $event.target.checked ? '4' : '2'"
-                      class="mt-0.5 w-4 h-4 rounded accent-purple-600 shrink-0" />
-                    <div>
-                      <span class="text-xs font-bold text-gray-700">Administrador del centro</span>
-                      <p class="text-[11px] sm:text-[10px] text-gray-400 mt-0.5">Gestiona los docentes de su centro educativo</p>
-                    </div>
-                  </label>
-                </div>
+              <div v-if="gestionaTodos">
+                <SelectorTipoCuenta :model-value="formEditar.role" :error="formEditarErrors.role"
+                  @elegir="elegirRol(formEditar, $event, false)" @ayuda="modalTipos = true" />
               </div>
 
               <!-- Centro educativo (visible para cualquier docente) -->
-              <div v-if="authStore.isSuperAdmin && ['2','4'].includes(formEditar.role)">
+              <div v-if="gestionaTodos && ['2','4'].includes(formEditar.role)">
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                   Centro educativo
                   <span class="text-red-400 ml-0.5">*</span>
@@ -1588,7 +1591,7 @@ onMounted(async () => {
               </div>
 
               <!-- Empresa (requerida para role empresa) -->
-              <div v-if="authStore.isSuperAdmin && formEditar.role === '3'">
+              <div v-if="gestionaTodos && formEditar.role === '3'">
                 <label class="block text-[11px] sm:text-[10px] font-black uppercase tracking-widest text-gray-500 mb-2">
                   Empresa
                   <span class="text-red-400 ml-0.5">*</span>

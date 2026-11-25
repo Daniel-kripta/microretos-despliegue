@@ -39,10 +39,17 @@ class EncuentroController extends Controller
         $query = Encuentro::with([
             'docente:id,name',
             'colaboradores:id,name',
-            'microproyecto:id,uuid,titulo,microreto_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial',
-            'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre',
+            'microproyecto:id,uuid,titulo,microreto_id,empresa_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial',
+            'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre', 'microproyecto.empresa:id,nombre_comercial,sector',
             'equipos.miembros',
         ])->visiblesPara($user)->orderBy('created_at', 'desc')->take(self::MAX_LISTADO);
+
+        // Encuentros creativos por defecto (biblioteca de encuentros); ?tipo=plan_practicas_etapa2 para
+        // los cronogramas de planes y ?tipo=todos para ambos (calendario)
+        $tipo = $request->query('tipo');
+        if ($tipo !== 'todos') {
+            $query->where('tipo', in_array($tipo, Encuentro::TIPOS, true) ? $tipo : Encuentro::TIPO_CREATIVO);
+        }
 
         // response()->json() evita el envoltorio {"data": [...]} que Laravel aplica
         // cuando se devuelve una Resource/colección directamente desde el controller —
@@ -62,13 +69,33 @@ class EncuentroController extends Controller
             $validated['centro_educativo_id'] = $user->centro_educativo_id;
         }
 
-        if (!empty($validated['microproyecto_id'])) {
-            $proyecto = Microproyecto::find($validated['microproyecto_id']);
-            $validated['fecha_fin'] = $this->fechaFinSugerida($validated['fecha'], $proyecto);
+        $microproyecto = Microproyecto::with('cicloFormativo:id,nombre')->find($validated['microproyecto_id']);
+
+        // Sin planificación propia, el encuentro parte del calendario que traía la propuesta
+        if (empty($validated['planificacion_sesiones']) && $microproyecto) {
+            $validated['planificacion_sesiones'] = $microproyecto->diseno_microproyecto['clases'] ?? null;
         }
 
-        $encuentro = Encuentro::create($validated);
-        $encuentro->load(['microproyecto:id,uuid,titulo,microreto_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial', 'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre']);
+        // El ciclo es el del reto ajustado (de ahí salen módulos y RA/CE): no lo decide el cliente
+        if ($microproyecto?->cicloFormativo) {
+            $validated['ciclo_formativo'] = $microproyecto->cicloFormativo->nombre;
+        }
+
+        $encuentro = new Encuentro($validated);
+        // Etapa: no es fillable (no la decide el cliente). De momento solo se crean encuentros creativos.
+        $encuentro->tipo = Encuentro::TIPO_CREATIVO;
+        // Propuesta de un reto de una solicitud de docente: el encuentro cierra la solicitud
+        // (fase «con encuentro» en Central). Se deduce de la propuesta, nunca lo manda el cliente.
+        if (!empty($validated['microproyecto_id'])) {
+            $encuentro->solicitud_reto_id = Microproyecto::with('microreto:id,solicitud_reto_id')
+                ->find($validated['microproyecto_id'])?->microreto?->solicitud_reto_id;
+        }
+        // La elegida por el docente (ya validada: no antes de la sugerida) o, si no, la sugerida
+        $encuentro->fecha_fin = !empty($validated['fecha_fin'])
+            ? Carbon::parse($validated['fecha_fin'])->toDateString()
+            : $encuentro->fechaFinSugerida(Carbon::parse($validated['fecha']))?->toDateString();
+        $encuentro->save();
+        $encuentro->load(['microproyecto:id,uuid,titulo,microreto_id,empresa_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial', 'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre', 'microproyecto.empresa:id,nombre_comercial,sector']);
 
         return response()->json(new EncuentroResource($encuentro), 201);
     }
@@ -80,17 +107,9 @@ class EncuentroController extends Controller
             ->firstOrFail();
 
         $encuentro->update($request->validated());
-        $encuentro->load(['microproyecto:id,uuid,titulo,microreto_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial', 'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre']);
+        $encuentro->load(['microproyecto:id,uuid,titulo,microreto_id,empresa_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial', 'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre', 'microproyecto.empresa:id,nombre_comercial,sector']);
 
         return response()->json(new EncuentroResource($encuentro));
-    }
-
-    // Sugiere fecha_fin a partir de las clases estimadas en las fases del proyecto
-    // (heurística centralizada en Microproyecto::fechaFinSugerida). Es solo una
-    // sugerencia editable, nunca un límite duro en creación.
-    private function fechaFinSugerida(string $fecha, ?Microproyecto $proyecto): ?string
-    {
-        return $proyecto?->fechaFinSugerida(Carbon::parse($fecha))?->toDateString();
     }
 
     public function storeLote(StoreEncuentroLoteRequest $request)
@@ -116,8 +135,8 @@ class EncuentroController extends Controller
         $encuentro = Encuentro::with([
             'docente:id,name',
             'colaboradores:id,name',
-            'microproyecto:id,uuid,titulo,microreto_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial',
-            'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre',
+            'microproyecto:id,uuid,titulo,microreto_id,empresa_id,estado,familia_id,modulos_seleccionados,evaluacion_oficial',
+            'microproyecto.microreto:id,titulo,empresa_nombre', 'microproyecto.familia:id,nombre', 'microproyecto.empresa:id,nombre_comercial,sector',
         ])
             ->where('id', $id)
             ->visiblesPara($request->user())
@@ -147,9 +166,11 @@ class EncuentroController extends Controller
 
         $proyecto = $encuentro->microproyecto;
 
-        if (!$proyecto || !in_array($proyecto->estado, ['propuesta', 'validado'])) {
+        // Mismo criterio que al crear el encuentro (StoreEncuentroRequest), más 'propuesta' por los
+        // encuentros antiguos: un reto ajustado ya completado se puede volver a llevar al aula.
+        if (!$proyecto || !in_array($proyecto->estado, ['propuesta', 'validado', 'completado'], true)) {
             return response()->json([
-                'error' => 'Este encuentro no tiene ningún proyecto publicado. Asocia un proyecto al encuentro y márcalo como Propuesta primero.',
+                'error' => 'Este encuentro no tiene ningún reto ajustado listo. Asocia al encuentro un reto ajustado y valídalo primero.',
             ], 422);
         }
 
@@ -250,7 +271,7 @@ class EncuentroController extends Controller
 
         $proyecto = $encuentro->microproyecto;
         if (!$proyecto) {
-            return response()->json(['error' => 'Este encuentro no tiene ningún proyecto asociado.'], 422);
+            return response()->json(['error' => 'Este encuentro no tiene ningún reto ajustado asociado.'], 422);
         }
 
         $numEquipos = (int) $request->validated('num_equipos');

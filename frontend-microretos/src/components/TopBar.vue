@@ -1,4 +1,5 @@
 <script setup>
+import BotonInstalarApp from './BotonInstalarApp.vue'
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
@@ -32,11 +33,11 @@ const sectionLabels = {
   'empresas':             'Empresas',
   'dashboard-docente':    'Crear encuentro',
   'encuentros-registrados': 'Encuentros',
-  'startup-day':          'Propuestas-Proyecto',
-  'proyectos-terminados': 'Proyectos Completados',
-  'startup-day-crear':    'Taller de Ideas',
-  'startup-day-detalle':  'Proyecto',
-  'startup-day-editar':   'Editar proyecto',
+  'startup-day':          'Mis retos ajustados',
+  'proyectos-terminados': 'Mis retos ajustados completados',
+  'startup-day-crear':    'Ajuste del reto',
+  'startup-day-detalle':  'Reto ajustado',
+  'startup-day-editar':   'Ajuste del reto',
   'gestion-usuarios':     'Usuarios',
 }
 
@@ -127,6 +128,9 @@ const cerrarSesion = async () => {
 
     <!-- ── Sesión activa ── -->
     <template v-if="authStore.isAuthenticated">
+
+      <!-- Instalar como app (antes al final del panel lateral, había que hacer scroll) -->
+      <BotonInstalarApp class="mr-1" />
 
       <!-- Conoce DUALAB (bombilla): lleva a la sección Recursos (recorrido completo,
            «¿Qué es DUALAB?», guías). Solo para quien puede abrir las secciones (no empresa).

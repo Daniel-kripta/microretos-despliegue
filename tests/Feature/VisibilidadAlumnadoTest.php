@@ -176,7 +176,8 @@ class VisibilidadAlumnadoTest extends TestCase
 
         $uuid = DB::table('microproyectos')->where('id', $this->encuentro->microproyecto_id)->value('uuid');
         $this->getJson("/api/startup/proyectos/{$uuid}/pantalla-acceso")->assertOk()
-            ->assertJsonPath('equipos.0.token', $this->equipo->token);
+            ->assertJsonPath('equipos.0.token', $this->equipo->token)
+            ->assertJsonPath('equipos.0.encuentro_id', $this->encuentro->id);
         // El token ya no se envía nunca al docente: ve el workspace del grupo por id, en solo lectura
         $this->getJson("/api/encuentros/{$this->encuentro->id}/workspace")->assertOk()
             ->assertJsonMissingPath('equipos.0.token');
@@ -232,5 +233,47 @@ class VisibilidadAlumnadoTest extends TestCase
         $this->putJson("/api/admin/usuarios/{$this->luis->id}/modulos", ['modulo_ids' => [$this->m3]])->assertOk();
         $this->getJson("/api/admin/usuarios/{$this->pedro->id}/modulos")->assertForbidden();
         $this->putJson("/api/admin/usuarios/{$this->pedro->id}/modulos", ['modulo_ids' => [$this->m1]])->assertForbidden();
+    }
+
+    public function test_retos_ajustados_marcan_cuales_son_del_usuario(): void
+    {
+        $mio = fn () => collect($this->getJson('/api/startup/proyectos')->assertOk()->json())
+            ->firstWhere('id', $this->encuentro->microproyecto_id)['es_mio'] ?? null;
+
+        Sanctum::actingAs($this->ana);
+        $this->assertTrue($mio());
+
+        $this->invitar($this->luis, false);
+        Sanctum::actingAs($this->luis);
+        $this->assertFalse($mio());
+        $deAna = collect($this->getJson('/api/startup/proyectos')->json())->firstWhere('id', $this->encuentro->microproyecto_id);
+        $this->assertSame('Ana', $deAna['docente_nombre']);
+
+        Sanctum::actingAs($this->adminA);
+        $this->assertFalse($mio());
+    }
+
+    public function test_el_listado_no_da_la_llave_de_la_empresa_ni_su_contacto_a_quien_colabora(): void
+    {
+        DB::table('microproyectos')->where('id', $this->encuentro->microproyecto_id)->update([
+            'token_empresa' => Str::random(40),
+            'datos_empresa' => json_encode(['nombre' => 'Gestoría Sur', 'sector' => 'Servicios', 'email' => 'contacto@gestoria.test', 'persona_contacto' => 'Pepa']),
+        ]);
+        $fila = fn () => collect($this->getJson('/api/startup/proyectos')->assertOk()->json())->firstWhere('id', $this->encuentro->microproyecto_id);
+
+        $this->invitar($this->luis, true);
+        Sanctum::actingAs($this->luis);
+        $deAna = $fila();
+        $this->assertArrayNotHasKey('token_empresa', $deAna);
+        $this->assertSame(['nombre' => 'Gestoría Sur', 'sector' => 'Servicios'], $deAna['datos_empresa']);
+
+        // Si guarda el asistente con lo que recibió, el contacto no se pierde
+        $this->putJson("/api/startup/proyectos/{$deAna['uuid']}", ['datos_empresa' => $deAna['datos_empresa']])->assertOk();
+
+        // Quien lo creó sigue viendo el contacto (lo edita en el asistente), pero tampoco la llave
+        Sanctum::actingAs($this->ana);
+        $mio = $fila();
+        $this->assertArrayNotHasKey('token_empresa', $mio);
+        $this->assertSame('contacto@gestoria.test', $mio['datos_empresa']['email']);
     }
 }

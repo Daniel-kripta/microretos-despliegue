@@ -4,6 +4,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import CabeceraSeccion from '../components/CabeceraSeccion.vue'
 import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router'
 import api from '../api.js'
+import { crearCodigoAcceso } from '../services/encuentroService.js'
 import MicroretoModal from '../components/MicroretoModal.vue'
 import ProyectoFichaModal from '../components/ProyectoFichaModal.vue'
 import TallerPasos from '../components/TallerPasos.vue'
@@ -12,11 +13,12 @@ import EncuentroResumen from '../components/EncuentroResumen.vue'
 import TourPromptModal from '../components/TourPromptModal.vue'
 import RegenerarAliasButton from '../components/RegenerarAliasButton.vue'
 import AvisoSinNombresReales from '../components/AvisoSinNombresReales.vue'
+import PlanificacionSesiones from '../components/PlanificacionSesiones.vue'
 import { generarAliasAleatorio, errorNombrePila } from '../utils/alias.js'
-import { formatCurso } from '../utils/formatCurso.js'
+import { formatCurso, nivelCurso, CURSO_ENCUENTRO } from '../utils/formatCurso.js'
 import { useUIState } from '../composables/useUIState.js'
 import { useAuthStore } from '../stores/auth.js'
-import { fechaFinEstimada as calcularFechaFinEstimada, duracionPorFase } from '../config/fasesProyecto.js'
+import { fechaFinEstimada as calcularFechaFinEstimada, duracionPorFase, FASES_PROYECTO } from '../config/fasesProyecto.js'
 
 const { tourActivo } = useUIState()
 const authStore = useAuthStore()
@@ -29,6 +31,8 @@ const route  = useRoute()
 // ─── Formulario de encuentro ──────────────────────────────────────────────────────
 const form = ref({
   fecha:            new Date().toISOString().slice(0, 10),
+  // Vacía = la estimada según la planificación; el docente puede alargarla (nunca acortarla)
+  fecha_fin:        '',
   centro_educativo: authStore.userCentroNombre || '',
   ciclo_formativo:  '',
   curso:            '',
@@ -38,7 +42,13 @@ const form = ref({
   alumnados:        [],
   notas:            '',
   microproyecto_id: null,
+  // Sesiones del encuentro y sus fases: se rellena con las de la propuesta y se ajusta aquí
+  planificacion_sesiones: [],
 })
+
+// Por defecto, una sola sesión con todas las fases; el docente añade más si las necesita
+// (antes se copiaba el calendario de la propuesta, que ya no se edita en el ajuste del reto).
+const planificacionInicial = () => [{ fases: FASES_PROYECTO.map(f => f.num) }]
 
 // ─── Buscador de proyectos ─────────────────────────────────────────────────────
 const proyectoSeleccionado  = ref(null)
@@ -57,12 +67,14 @@ const ciclosDisponiblesProy = computed(() => {
   return [...set].sort()
 })
 
-const proyectosFiltrados = computed(() => {
+// Todas las que pasan los filtros; la lista muestra como mucho 60 (contador «60 de N»)
+const proyectosFiltradosTodos = computed(() => {
   // Solo proyectos ya validados (al menos por el docente) pueden asociarse a un
   // encuentro — una propuesta sin validar, un borrador o un archivado no tiene
   // sentido programarlo en clase (ver StoreEncuentroRequest, mismo criterio en backend).
   let base = todosMisProyectos.value.filter(p => p.estado === 'validado' || p.estado === 'completado')
-  if (filtroProyCurso.value)  base = base.filter(p => p.curso === filtroProyCurso.value)
+  // Las propuestas guardan '1' | '2' | 'ambos_cursos' (antes se comparaba con '1º'/'2º' y casi nunca coincidía)
+  if (filtroProyCurso.value)  base = base.filter(p => nivelCurso(p.curso) === filtroProyCurso.value)
   if (filtroProyCiclo.value)  base = base.filter(p => p.ciclo_nombre === filtroProyCiclo.value)
   if (filtroProyEstado.value) base = base.filter(p => p.estado === filtroProyEstado.value)
   if (busquedaProy.value.trim()) {
@@ -73,8 +85,10 @@ const proyectosFiltrados = computed(() => {
       (p.ciclo_nombre   || '').toLowerCase().includes(q)
     )
   }
-  return base.slice(0, 60)
+  return base
 })
+const proyectosFiltrados = computed(() => proyectosFiltradosTodos.value.slice(0, 60))
+const totalProyectosFiltrados = computed(() => proyectosFiltradosTodos.value.length)
 
 async function abrirBuscadorProy() {
   mostrarBuscadorProy.value = true
@@ -95,17 +109,46 @@ function cerrarBuscadorProy() {
   mostrarBuscadorProy.value = false
 }
 
+// Flujo continuo desde el ajuste del reto (?desde=ajuste&microproyecto=<uuid>&fecha=hoy|otro):
+// el reto ajustado llega elegido; «Ahora no» vuelve a su ficha sin guardar nada.
+const desdeAjuste = route.query.desde === 'ajuste'
+function salirSinEncuentro() {
+  const uuid = proyectoSeleccionado.value?.uuid || route.query.microproyecto
+  if (desdeAjuste && uuid) router.push({ name: 'startup-day-detalle', params: { uuid } })
+  else router.push('/encuentros')
+}
+
 function seleccionarProyecto(p) {
   proyectoSeleccionado.value   = p
   form.value.microproyecto_id  = p.id
+  form.value.planificacion_sesiones = planificacionInicial(p)
   if (p.ciclo_nombre) form.value.ciclo_formativo = p.ciclo_nombre
-  if (p.curso)        form.value.curso           = p.curso
+  // Curso del encuentro = el de la propuesta (1º, 2º o ambos), ya marcado en el formulario
+  if (nivelCurso(p.curso)) form.value.curso   = CURSO_ENCUENTRO[nivelCurso(p.curso)]
+  aplicarSesionSugerida(p.sesion_sugerida)
   mostrarBuscadorProy.value    = false
+}
+
+// Reto de una solicitud de docente: la fecha y el horario que propuso se sugieren aquí (el
+// encuentro guarda la fecha; el horario va a las notas). Todo se puede cambiar.
+const sesionSugerida = ref(null)
+const textoHorario = (s) => s?.hora_inicio ? `${s.hora_inicio}${s.hora_fin ? '–' + s.hora_fin : ''}${s.duracion ? ` (${s.duracion})` : ''}` : ''
+function aplicarSesionSugerida(s) {
+  sesionSugerida.value = s || null
+  if (!s?.fecha) return
+  if (s.fecha >= new Date().toISOString().slice(0, 10)) form.value.fecha = s.fecha
+  const horario = textoHorario(s)
+  if (horario && !form.value.notas.includes(horario)) {
+    form.value.notas = [`Sesión propuesta por el docente: ${horario}.`, form.value.notas].filter(Boolean).join('\n')
+  }
 }
 
 function limpiarProyecto() {
   proyectoSeleccionado.value   = null
+  sesionSugerida.value         = null
   form.value.microproyecto_id  = null
+  form.value.planificacion_sesiones = []
+  form.value.fecha_fin         = ''
   form.value.ciclo_formativo   = ''
   form.value.curso             = ''
   // El reparto de equipos se hizo pensando en el proyecto anterior — no tiene
@@ -114,33 +157,36 @@ function limpiarProyecto() {
   form.value.alumnados         = []
 }
 
-// Duración total (en clases) del calendario del proyecto elegido — el backend
-// calcula la fecha_fin real con la misma heurística centralizada (fasesProyecto.js).
-const totalClasesProyectoSeleccionado = computed(() => {
-  return proyectoSeleccionado.value?.diseno_microproyecto?.clases?.length || 0
-})
+// Nº de sesiones planificadas en este encuentro — el backend calcula la fecha_fin real
+// con la misma heurística centralizada (fasesProyecto.js / Encuentro::fechaFinSugerida).
+const totalClasesProyectoSeleccionado = computed(() => form.value.planificacion_sesiones.length)
+const planificacionValida = computed(() =>
+  form.value.planificacion_sesiones.length > 0
+  && form.value.planificacion_sesiones.every(s => (s.fases || []).length > 0))
 
 const fechaFinEstimada = computed(() => {
   return calcularFechaFinEstimada(form.value.fecha, totalClasesProyectoSeleccionado.value)
 })
+// La que se guarda: la elegida por el docente o, si no ha tocado el campo, la estimada
+const fechaFin = computed(() => form.value.fecha_fin || fechaFinEstimada.value)
+// Si cambian la fecha de inicio o las sesiones y la elegida queda antes de la mínima, vuelve a la estimada
+watch(fechaFinEstimada, (min) => {
+  if (form.value.fecha_fin && min && form.value.fecha_fin < min) form.value.fecha_fin = ''
+})
 
 function estadoProyectoBadge(proyectoOEstado) {
   const estado          = typeof proyectoOEstado === 'object' ? proyectoOEstado?.estado : proyectoOEstado
-  const empresaValidado = typeof proyectoOEstado === 'object' && !!proyectoOEstado?.empresa_validado
-  const docenteValidado = typeof proyectoOEstado === 'object' && !!proyectoOEstado?.docente_validado
 
   if (estado === 'borrador' || estado === 'en_edicion')
     return { label: 'En edición',  cls: 'bg-amber-100 text-amber-600' }
   if (estado === 'archivado')
     return { label: 'Archivado',   cls: 'bg-red-50 text-red-400' }
-  if (estado === 'validado') {
-    if (empresaValidado && docenteValidado) return { label: 'Validado · Completo', cls: 'bg-centros/10 text-centros' }
-    if (empresaValidado)  return { label: 'Validado · Empresa',  cls: 'bg-centros/10 text-centros' }
-    if (docenteValidado)  return { label: 'Validado · Docente',  cls: 'bg-empresas/10 text-empresas-dark' }
-    return { label: 'Validado', cls: 'bg-centros/10 text-centros' }
-  }
+  if (estado === 'validado')
+    return { label: 'Validado', cls: 'bg-empresas/10 text-empresas-dark' }
+  if (estado === 'completado')
+    return { label: 'Completado', cls: 'bg-sky-50 text-sky-700' }
   if (estado === 'propuesta')
-    return { label: 'Propuesta',   cls: 'bg-violet-50 text-violet-600' }
+    return { label: 'Sin validar', cls: 'bg-violet-50 text-violet-600' }
   return { label: estado || '—',   cls: 'bg-gray-100 text-gray-500' }
 }
 
@@ -153,10 +199,8 @@ watch(() => form.value.num_equipos, (n) => {
   if (nuevoAlumnadoEquipo.value > (n || 3)) nuevoAlumnadoEquipo.value = n || 3
 })
 
-const limiteAlumnados = computed(() => {
-  const n = Number(form.value.num_alumnos)
-  return n > 0 ? n : null
-})
+// El número de alumnos sale de los que hay en los grupos; el tope es el del backend (200)
+const limiteAlumnados = computed(() => 200)
 
 const limiteAlcanzado = computed(() =>
   limiteAlumnados.value !== null && form.value.alumnados.length >= limiteAlumnados.value
@@ -200,7 +244,7 @@ function alumnadoDe(encuentro) {
 const encuentrosParaCopiar = computed(() => encuentros.value
   .filter(e => e.es_propietario)
   .map(e => ({ id: e.id, alumnado: alumnadoDe(e), etiqueta: [
-    formatFecha(e.fecha), e.proyecto_titulo || 'Sin proyecto',
+    formatFecha(e.fecha), e.proyecto_titulo || 'Sin reto ajustado',
     [e.curso && formatCurso(e.curso), e.grupo].filter(Boolean).join(' '),
   ].filter(Boolean).join(' · ') }))
   .filter(e => e.alumnado.length))
@@ -229,6 +273,32 @@ function copiarAlumnadoDeEncuentro() {
   encuentroACopiar.value = ''
 }
 
+// «Pegar una lista»: un nombre de pila por línea (o separados por comas); cada uno va al grupo
+// con menos alumnado. Los que no son válidos se quedan en el cuadro para corregirlos.
+const pegandoLista = ref(false)
+const listaNombres = ref('')
+const mensajeLista = ref('')
+function anadirListaNombres() {
+  const nombres = listaNombres.value.split(/[\n,;]+/).map(n => n.trim()).filter(Boolean)
+  const grupos = Math.max(1, Number(form.value.num_equipos) || 1)
+  const cuenta = (n) => form.value.alumnados.filter(a => a.equipo_num === n).length
+  const pendientes = []
+  let anadidos = 0
+  for (const nombre of nombres) {
+    if (limiteAlcanzado.value || errorNombrePila(nombre)) { pendientes.push(nombre); continue }
+    let destino = 1
+    for (let n = 2; n <= grupos; n++) if (cuenta(n) < cuenta(destino)) destino = n
+    form.value.alumnados.push({ equipo_num: destino, alias: generarAliasAleatorio(nombre, aliasUsados.value) })
+    anadidos++
+  }
+  listaNombres.value = pendientes.join('\n')
+  mensajeLista.value = [
+    anadidos ? `${anadidos} ${anadidos === 1 ? 'añadido' : 'añadidos'} y repartidos en ${grupos} grupos.` : '',
+    pendientes.length ? `${pendientes.length} sin añadir: solo el nombre de pila, sin apellidos${limiteAlcanzado.value ? ', o se ha llegado al máximo' : ''}.` : '',
+  ].filter(Boolean).join(' ')
+  if (!pendientes.length) pegandoLista.value = false
+}
+
 function removeAlumnadoEncuentro(i) {
   form.value.alumnados.splice(i, 1)
 }
@@ -248,6 +318,26 @@ const alumnadosSinEquipo = computed(() =>
 const guardando     = ref(false)
 const guardadoOk    = ref(false)
 const errorGuardado = ref('')
+const encuentroCreado = ref(null)
+
+// «Proyectar QR y códigos» al terminar: crea los grupos y el código de la clase (si aún no
+// los tiene) y abre la pantalla de acceso de este encuentro, sin pasar por la biblioteca.
+const abriendoProyeccion = ref(false)
+const errorProyeccion    = ref('')
+async function proyectarAcceso() {
+  const e = encuentroCreado.value
+  if (!e) return
+  abriendoProyeccion.value = true
+  errorProyeccion.value = ''
+  try {
+    if (!e.codigo_clase) await crearCodigoAcceso(e.id)
+    router.push({ name: 'pantalla-acceso', params: { uuid: e.microproyecto_uuid }, query: { encuentro: e.id } })
+  } catch (err) {
+    errorProyeccion.value = err.response?.data?.error || 'No se pudo crear el código de acceso. Inténtalo desde la biblioteca de encuentros.'
+  } finally {
+    abriendoProyeccion.value = false
+  }
+}
 
 // ─── Historial de encuentros (API) ────────────────────────────────────────────
 const encuentros         = ref([])
@@ -283,13 +373,16 @@ onMounted(async () => {
 
   // Preselecciona el proyecto si venimos del botón "Crear encuentro" del detalle
   // de un proyecto validado (StartupDayDetalle.vue).
-  if (route.query.microproyecto_id) {
+  if (route.query.microproyecto_id || route.query.microproyecto) {
     try {
       const res = await api.get('/startup/proyectos')
       todosMisProyectos.value = res.data
       proyectosCargados.value = true
-      const p = todosMisProyectos.value.find(pr => String(pr.id) === String(route.query.microproyecto_id))
+      const p = todosMisProyectos.value.find(pr => route.query.microproyecto
+        ? pr.uuid === route.query.microproyecto : String(pr.id) === String(route.query.microproyecto_id))
       if (p) seleccionarProyecto(p)
+      // «Otro día»: sin fecha, para que la elija; «Empezar hoy» deja la de hoy (por defecto)
+      if (desdeAjuste && route.query.fecha === 'otro') form.value.fecha = ''
     } catch (e) {
       console.error('Error preseleccionando proyecto desde query param:', e)
     }
@@ -340,10 +433,11 @@ async function guardarEncuentro() {
   try {
     const payload = {
       ...form.value,
-      num_alumnos: form.value.num_alumnos !== '' ? Number(form.value.num_alumnos) : null,
+      num_alumnos: form.value.alumnados.length || null,
     }
     const res = await api.post('/encuentros', payload)
     encuentros.value = [res.data, ...encuentros.value]
+    encuentroCreado.value = res.data
     guardadoOk.value = true
     pasoEnc.value = 4
     pasoEncMax.value = 4
@@ -524,17 +618,18 @@ const equiposRepartidos = computed(() =>
   alumnadosSinEquipo.value.length === 0
 )
 
-const formularioValido = computed(() => equiposRepartidos.value)
+const formularioValido = computed(() => equiposRepartidos.value && planificacionValida.value)
 
 const requisitosFaltantes = computed(() => {
   const faltantes = []
   if (!proyectoAsociado.value) {
-    faltantes.push('Asocia un proyecto al encuentro.')
+    faltantes.push('Asocia un reto ajustado al encuentro.')
     return faltantes
   }
-  if (!form.value.fecha) faltantes.push('Establece la fecha de trabajo.')
+  if (!form.value.fecha) faltantes.push('Establece la fecha de inicio.')
   if (!form.value.curso) faltantes.push('Indica el curso del encuentro.')
   if (!form.value.grupo) faltantes.push('Indica la clase del encuentro.')
+  if (!planificacionValida.value) faltantes.push('Planifica las sesiones: cada una con al menos una fase.')
   if ((form.value.num_equipos || 0) < 1) faltantes.push('Indica el número de grupos.')
   if (form.value.alumnados.length === 0) faltantes.push('Reparte el alumnado en los grupos.')
   else if (alumnadosSinEquipo.value.length > 0) faltantes.push('Hay alumnado sin grupo asignado.')
@@ -560,10 +655,11 @@ watch(pasoEnc, (v) => {
 
 const faltantesPaso1 = computed(() => {
   const f = []
-  if (!proyectoAsociado.value) f.push('Asocia un proyecto al encuentro.')
-  if (!form.value.fecha) f.push('Establece la fecha de trabajo.')
+  if (!proyectoAsociado.value) f.push('Asocia un reto ajustado al encuentro.')
+  if (!form.value.fecha) f.push('Establece la fecha de inicio.')
   if (!form.value.curso) f.push('Indica el curso del encuentro.')
   if (!form.value.grupo) f.push('Indica la clase del encuentro.')
+  if (proyectoAsociado.value && !planificacionValida.value) f.push('Planifica las sesiones: cada una con al menos una fase.')
   return f
 })
 const faltantesPaso2 = computed(() => {
@@ -590,17 +686,39 @@ function puedeIrAPasoEnc(num) {
   if (num >= 3 && faltantesPaso2.value.length) return false
   return true
 }
+// «Cambiar reto ajustado» vacía también grupos y alumnado: se pide confirmación y se guarda una
+// copia en memoria para poder volver atrás («Restaurar reto ajustado anterior»).
+const confirmandoCambioProyecto = ref(false)
+const proyectoAnterior          = ref(null)   // { proyecto, form, sesionSugerida }
 function cambiarProyecto() {
+  proyectoAnterior.value = {
+    proyecto:       proyectoSeleccionado.value,
+    form:           JSON.parse(JSON.stringify(form.value)),
+    sesionSugerida: sesionSugerida.value,
+  }
+  confirmandoCambioProyecto.value = false
   limpiarProyecto()
   abrirBuscadorProy()
 }
+function restaurarProyectoAnterior() {
+  const copia = proyectoAnterior.value
+  if (!copia) return
+  form.value                 = JSON.parse(JSON.stringify(copia.form))
+  proyectoSeleccionado.value = copia.proyecto
+  sesionSugerida.value       = copia.sesionSugerida
+  mostrarBuscadorProy.value  = false
+  proyectoAnterior.value     = null
+}
 function crearOtroEncuentro() {
   limpiarProyecto()
+  proyectoAnterior.value = null
   form.value.fecha  = new Date().toISOString().slice(0, 10)
   form.value.grupo  = ''
   form.value.num_alumnos = ''
   form.value.notas  = ''
   guardadoOk.value  = false
+  encuentroCreado.value = null
+  errorProyeccion.value = ''
   pasoEncMax.value  = 1
   pasoEnc.value     = 1
 }
@@ -611,14 +729,14 @@ function alumnosTexto(n) { return n ? `${n} ${n === 1 ? 'alumno' : 'alumnos'}` :
 const datosResumenEncuentro = computed(() => [
   { icono: 'centro',     label: 'Centro educativo', valor: authStore.userCentroNombre || form.value.centro_educativo },
   { icono: 'clase',      label: 'Curso y clase',    valor: [form.value.curso && `${form.value.curso} curso`, form.value.grupo && `Clase ${form.value.grupo}`].filter(Boolean).join(' · ') },
-  { icono: 'calendario', label: 'Fecha de trabajo', valor: proyectoAsociado.value && form.value.fecha ? formatFecha(form.value.fecha) : '' },
-  { icono: 'reloj',      label: 'Fecha fin estimada', valor: proyectoAsociado.value && fechaFinEstimada.value ? formatFecha(fechaFinEstimada.value) : '' },
+  { icono: 'calendario', label: 'Fecha de inicio', valor: proyectoAsociado.value && form.value.fecha ? formatFecha(form.value.fecha) : '' },
+  { icono: 'reloj',      label: form.value.fecha_fin ? 'Fecha de fin' : 'Fecha fin estimada', valor: proyectoAsociado.value && fechaFin.value ? formatFecha(fechaFin.value) : '' },
   { icono: 'alumnado',   label: 'Alumnado',         valor: alumnosTexto(form.value.alumnados.length || Number(form.value.num_alumnos) || 0) },
   { icono: 'grupos',     label: 'Grupos',           valor: pasoEncMax.value >= 2 ? `${form.value.num_equipos || 3} grupos` : '' },
 ].filter(d => d.valor))
 
 const CONSEJO_PASO_ENC = {
-  1: 'Verifica que el proyecto y los datos sean correctos. Podrás modificar la información del encuentro más adelante.',
+  1: 'Verifica que el reto ajustado y los datos sean correctos. Podrás modificar la información del encuentro más adelante.',
   2: 'Usa solo alias (nombre de pila + animal + color): nunca nombres reales completos del alumnado.',
   3: 'Revisa el resumen. Al guardar, los grupos quedarán listos para generar su código de acceso.',
   4: 'En la biblioteca de encuentros generarás el código de acceso y, en «Seguimiento de grupos», seguirás el avance de cada grupo.',
@@ -631,13 +749,13 @@ const antesDeContinuarEnc = computed(() => {
 
 // Paso 3: resumen para confirmar.
 const confirmacionEncuentro = computed(() => [
-  { label: 'Proyecto',         valor: proyectoSeleccionado.value?.titulo || '—', ancho: true },
-  { label: 'Fecha de trabajo', valor: formatFecha(form.value.fecha) || '—' },
-  { label: 'Fecha fin estimada', valor: fechaFinEstimada.value ? formatFecha(fechaFinEstimada.value) : '—' },
+  { label: 'Reto ajustado',    valor: proyectoSeleccionado.value?.titulo || '—', ancho: true },
+  { label: 'Fecha de inicio', valor: formatFecha(form.value.fecha) || '—' },
+  { label: form.value.fecha_fin ? 'Fecha de fin' : 'Fecha fin estimada', valor: fechaFin.value ? formatFecha(fechaFin.value) : '—' },
+  { label: 'Sesiones planificadas', valor: String(form.value.planificacion_sesiones.length) },
   { label: 'Centro educativo', valor: authStore.userCentroNombre || form.value.centro_educativo || '—' },
   { label: 'Ciclo formativo',  valor: form.value.ciclo_formativo || '—' },
   { label: 'Curso y clase',    valor: `${form.value.curso || '—'} · Clase ${form.value.grupo || '—'}` },
-  { label: 'Número de alumnos', valor: form.value.num_alumnos || '—' },
   { label: 'Grupos y alumnado', valor: `${form.value.num_equipos || 3} grupos · ${alumnosTexto(form.value.alumnados.length) || '0 alumnos'} con alias`, ancho: true },
 ])
 
@@ -731,9 +849,10 @@ function formatFecha(isoDate) {
       <div class="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-5 xl:gap-8">
       <div class="min-w-0 flex-1 space-y-5">
 
-      <CabeceraSeccion plano titulo="Crear" destacado="encuentro" color="text-rol-fuerte"
+      <CabeceraSeccion plano :titulo="desdeAjuste ? 'Llevar al' : 'Crear'" :destacado="desdeAjuste ? 'aula' : 'encuentro'" color="text-rol-fuerte"
+                       :antetitulo="desdeAjuste ? 'Ajuste del reto · Encuentro' : undefined"
                        volver="/encuentros" volver-label="Volver a encuentros"
-                       subtitulo="Selecciona un reto y registra los datos de la clase.">
+                       :subtitulo="desdeAjuste ? 'Pon la fecha, la clase y el alumnado: al terminar proyectas el QR para los grupos.' : 'Selecciona un reto y registra los datos de la clase.'">
         <div class="flex flex-wrap items-center gap-2">
           <!-- Solo icono por debajo de 2xl: deja sitio al título «Crear encuentro» en una línea -->
           <RouterLink to="/encuentros" class="accion-secundaria max-2xl:w-10 max-2xl:px-0" title="Ver todos tus encuentros"
@@ -769,15 +888,37 @@ function formatFecha(isoDate) {
                 <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
               </span>
               <div class="min-w-0">
-                <h2 id="titulo-proyecto-asociado" class="text-lg font-bold text-azul-noche">Reto y proyecto asociado</h2>
-                <p class="mt-0.5 text-sm text-texto-secundario">Selecciona el proyecto con el que se trabajará en este encuentro.</p>
+                <h2 id="titulo-proyecto-asociado" class="text-lg font-bold text-azul-noche">Reto ajustado</h2>
+                <p class="mt-0.5 text-sm text-texto-secundario">Selecciona el reto ajustado validado que se trabajará en este encuentro.</p>
               </div>
             </div>
-            <button v-if="proyectoSeleccionado && !mostrarBuscadorProy" type="button" @click="cambiarProyecto"
-                    class="inline-flex h-10 shrink-0 items-center justify-center gap-2 self-start rounded-full border border-rol-fuerte/30 bg-white px-4 text-sm font-semibold text-rol-fuerte transition-colors hover:bg-rol-fuerte/5">
-              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-              Cambiar proyecto
-            </button>
+            <div v-if="(proyectoSeleccionado && !mostrarBuscadorProy && !confirmandoCambioProyecto) || proyectoAnterior"
+                 class="flex shrink-0 flex-wrap gap-2 self-start">
+              <button v-if="proyectoAnterior" type="button" @click="restaurarProyectoAnterior"
+                      :title="`Volver a «${proyectoAnterior.proyecto?.titulo || ''}» con sus datos y grupos`"
+                      class="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-4 text-sm font-semibold text-amber-800 transition-colors hover:bg-amber-100">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+                <span class="sm:hidden">Restaurar anterior</span><span class="max-sm:hidden">Restaurar reto ajustado anterior</span>
+              </button>
+              <button v-if="proyectoSeleccionado && !mostrarBuscadorProy && !confirmandoCambioProyecto" type="button" @click="confirmandoCambioProyecto = true"
+                      class="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-rol-fuerte/30 bg-white px-4 text-sm font-semibold text-rol-fuerte transition-colors hover:bg-rol-fuerte/5">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                Cambiar reto ajustado
+              </button>
+            </div>
+          </div>
+
+          <div v-if="confirmandoCambioProyecto && proyectoSeleccionado" role="alertdialog" aria-labelledby="aviso-cambio-proyecto"
+               class="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+            <p id="aviso-cambio-proyecto" class="text-sm font-bold text-amber-900">¿Seguro que quieres cambiar de reto ajustado?</p>
+            <p class="mt-1 text-sm leading-relaxed text-amber-800">
+              Se quitará «{{ proyectoSeleccionado.titulo }}» de este encuentro junto con su planificación de sesiones, los grupos y el alumnado que hayas añadido.
+              Si te equivocas, podrás volver con «Restaurar reto ajustado anterior» mientras no salgas de esta pantalla.
+            </p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button type="button" @click="cambiarProyecto" class="accion-principal">Sí, cambiar</button>
+              <button type="button" @click="confirmandoCambioProyecto = false" class="accion-secundaria">Cancelar</button>
+            </div>
           </div>
 
           <!-- Proyecto seleccionado: miniatura + datos -->
@@ -828,8 +969,8 @@ function formatFecha(isoDate) {
                       <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
                     </svg>
                     <input v-model="busquedaProy" type="text"
-                           placeholder="Buscar por título o empresa..."
-                           class="field-input pl-9 !text-xs" />
+                           placeholder="Buscar por título o empresa"
+                           class="field-input !pl-9 !text-xs" />
                   </div>
 
                   <!-- Filtro estado -->
@@ -852,7 +993,7 @@ function formatFecha(isoDate) {
                   <div>
                     <label class="field-label">Curso</label>
                     <div class="flex gap-2 mt-1">
-                      <button v-for="op in [{ val: '', label: 'Todos' }, { val: '1º', label: '1º' }, { val: '2º', label: '2º' }]"
+                      <button v-for="op in [{ val: '', label: 'Todos' }, { val: '1', label: '1º' }, { val: '2', label: '2º' }, { val: 'ambos', label: 'Ambos' }]"
                               :key="op.val"
                               @click="filtroProyCurso = op.val"
                               class="flex-1 inline-flex h-9 items-center justify-center rounded-full text-xs font-bold uppercase tracking-widest
@@ -869,10 +1010,10 @@ function formatFecha(isoDate) {
                 <!-- Contador + limpiar + cancelar -->
                 <div class="flex items-center justify-between">
                   <p class="text-xs text-texto-secundario font-medium">
-                    <span v-if="cargandoProyectos">Cargando proyectos...</span>
+                    <span v-if="cargandoProyectos">Cargando retos ajustados...</span>
                     <span v-else>
-                      {{ proyectosFiltrados.length }}
-                      {{ proyectosFiltrados.length === 1 ? 'proyecto' : 'proyectos' }}
+                      <template v-if="totalProyectosFiltrados > proyectosFiltrados.length">{{ proyectosFiltrados.length }} de </template>{{ totalProyectosFiltrados }}
+                      {{ totalProyectosFiltrados === 1 ? 'reto ajustado' : 'retos ajustados' }}
                     </span>
                   </p>
                   <div class="flex gap-3">
@@ -917,7 +1058,7 @@ function formatFecha(isoDate) {
                         </span>
                         <span v-if="p.empresa_nombre" class="tag tag-gray">{{ p.empresa_nombre }}</span>
                         <span v-if="p.ciclo_nombre"   class="tag tag-gray truncate max-w-[140px]">{{ p.ciclo_nombre }}</span>
-                        <span v-if="p.curso"          class="tag tag-lime">{{ p.curso }}</span>
+                        <span v-if="nivelCurso(p.curso)" class="tag tag-lime">{{ nivelCurso(p.curso) === 'ambos' ? 'Ambos cursos' : nivelCurso(p.curso) + 'º' }}</span>
                       </div>
                     </button>
                     <!-- Botón Ver (abre modal) -->
@@ -941,7 +1082,7 @@ function formatFecha(isoDate) {
                   <svg class="w-8 h-8 mx-auto mb-2 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
                   </svg>
-                  <p class="text-xs font-medium">Sin proyectos para esos filtros</p>
+                  <p class="text-xs font-medium">Sin retos ajustados para esos filtros</p>
                 </div>
 
               </div>
@@ -951,15 +1092,15 @@ function formatFecha(isoDate) {
             <p class="flex items-start gap-2 rounded-xl bg-rol/5 px-3 py-2.5 text-sm text-azul-noche">
               <svg class="mt-0.5 h-4 w-4 shrink-0 text-rol-fuerte" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <span>
-                Solo se pueden asociar proyectos validados. Los proyectos se crean en el
+                Solo se pueden asociar retos ajustados que hayas validado (o ya completados). Se crean desde
                 <button type="button" @click="router.push({ name: 'startup-day-crear' })"
-                        class="font-semibold text-rol-fuerte underline hover:no-underline">Taller de Ideas</button>.
+                        class="font-semibold text-rol-fuerte underline hover:no-underline">Trabajar un reto</button>.
               </span>
             </p>
             <button type="button" @click="abrirBuscadorProy"
                     class="inline-flex h-10 items-center gap-2 rounded-full bg-rol-fuerte px-5 text-sm font-semibold text-white shadow-sm hover:bg-rol-fuerte/90">
               <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-              Buscar proyecto
+              Buscar reto ajustado
             </button>
           </div>
         </section>
@@ -979,14 +1120,32 @@ function formatFecha(isoDate) {
 
           <div class="grid grid-cols-1 gap-x-5 gap-y-4 sm:grid-cols-2">
             <div ref="refCampoFecha" :class="{ 'tour-active': tourTargetActivo === 'refCampoFecha' }" class="min-w-0 rounded-xl transition-all">
-              <label for="enc-fecha" class="field-label">Fecha de trabajo <span class="text-red-600" aria-hidden="true">*</span></label>
+              <label for="enc-fecha" class="field-label">Fecha de inicio <span class="text-red-600" aria-hidden="true">*</span></label>
               <input id="enc-fecha" v-model="form.fecha" type="date" class="field-input" :disabled="!proyectoAsociado" required />
-              <p v-if="!proyectoAsociado" class="mt-1.5 text-xs font-medium text-amber-800">
-                Asocia primero un proyecto para poder establecer la fecha de trabajo.
+              <p v-if="sesionSugerida?.fecha" class="mt-1.5 rounded-lg bg-alumnos/10 px-2.5 py-1.5 text-xs font-semibold text-alumnos-dark">
+                El docente propuso el {{ new Date(sesionSugerida.fecha + 'T00:00:00').toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }) }}<template v-if="sesionSugerida.hora_inicio">, {{ textoHorario(sesionSugerida) }}</template>.
               </p>
-              <p v-else-if="fechaFinEstimada" class="mt-1.5 text-xs text-texto-secundario">
-                Fecha fin estimada: <span class="font-semibold text-azul-noche">{{ formatFecha(fechaFinEstimada) }}</span>
-                ({{ totalClasesProyectoSeleccionado }} clases). Podrás ajustarla luego en el detalle del encuentro.
+              <p v-if="!proyectoAsociado" class="mt-1.5 text-xs font-medium text-amber-800">
+                Asocia primero un reto ajustado para poder establecer las fechas.
+              </p>
+            </div>
+
+            <!-- Fecha de fin: parte de la estimada (nº de sesiones de la planificación) y se puede
+                 alargar; no acortar, el backend no acepta una anterior a la estimada -->
+            <div class="min-w-0">
+              <label for="enc-fecha-fin" class="field-label">Fecha de fin</label>
+              <input id="enc-fecha-fin" type="date" class="field-input"
+                     :value="fechaFin || ''" :min="fechaFinEstimada || form.fecha || undefined"
+                     :disabled="!proyectoAsociado || !form.fecha"
+                     @change="form.fecha_fin = ($event.target.value && $event.target.value !== fechaFinEstimada) ? $event.target.value : ''" />
+              <p v-if="proyectoAsociado && fechaFinEstimada" class="mt-1.5 text-xs text-texto-secundario">
+                <template v-if="!form.fecha_fin">
+                  Estimada según {{ totalClasesProyectoSeleccionado }} {{ totalClasesProyectoSeleccionado === 1 ? 'sesión' : 'sesiones' }} de la planificación de abajo. Puedes alargarla.
+                </template>
+                <template v-else>
+                  La estimada era el {{ formatFecha(fechaFinEstimada) }}.
+                  <button type="button" @click="form.fecha_fin = ''" class="font-semibold text-rol-fuerte underline-offset-2 hover:underline">Usar la estimada</button>
+                </template>
               </p>
             </div>
 
@@ -1004,25 +1163,34 @@ function formatFecha(isoDate) {
               </template>
             </div>
 
-            <div class="min-w-0 sm:col-span-2">
+            <!-- Ciclo: el del reto ajustado, de solo lectura (los módulos y RA/CE del encuentro salen
+                 de ese ciclo; cambiarlo aquí los descuadraría). El backend también lo fija. -->
+            <div class="min-w-0">
               <label for="enc-ciclo" class="field-label">Ciclo formativo</label>
-              <input id="enc-ciclo" v-model="form.ciclo_formativo" type="text" list="ciclos-datalist"
-                     placeholder="Ej. CFGM Sistemas Microinformáticos" class="field-input" />
-              <datalist id="ciclos-datalist">
-                <option v-for="c in ciclosParaAutocompletar" :key="c" :value="c" />
-              </datalist>
+              <div v-if="proyectoSeleccionado?.ciclo_nombre" id="enc-ciclo" aria-readonly="true"
+                   class="field-input cursor-default select-none bg-gray-50 text-texto-secundario break-words"
+                   title="Es el ciclo del reto ajustado: para otro ciclo, cambia de reto ajustado">
+                {{ form.ciclo_formativo }}
+              </div>
+              <template v-else>
+                <input id="enc-ciclo" v-model="form.ciclo_formativo" type="text" list="ciclos-datalist"
+                       placeholder="Ej. CFGM Sistemas Microinformáticos" class="field-input" />
+                <datalist id="ciclos-datalist">
+                  <option v-for="c in ciclosParaAutocompletar" :key="c" :value="c" />
+                </datalist>
+              </template>
             </div>
 
             <fieldset class="min-w-0">
               <legend class="field-label">Curso <span class="text-red-600" aria-hidden="true">*</span></legend>
-              <div class="grid grid-cols-2 gap-2">
-                <button v-for="c in ['1º', '2º']" :key="c" type="button" @click="form.curso = c"
+              <div class="grid grid-cols-3 gap-2">
+                <button v-for="c in ['1º', '2º', '1º y 2º']" :key="c" type="button" @click="form.curso = c"
                         :aria-pressed="form.curso === c"
                         class="h-10 rounded-full border text-sm font-semibold transition-colors"
                         :class="form.curso === c
                           ? 'border-rol-fuerte bg-rol-fuerte text-white shadow-sm'
                           : 'border-borde bg-white text-azul-noche hover:border-rol-fuerte/40 hover:text-rol-fuerte'">
-                  {{ c }}
+                  {{ c === '1º y 2º' ? 'Ambos' : c }}
                 </button>
               </div>
             </fieldset>
@@ -1039,12 +1207,22 @@ function formatFecha(isoDate) {
                 </button>
               </div>
             </fieldset>
+          </div>
+        </section>
+
+        <!-- Planificación de sesiones: qué fases se trabajan en cada sesión de este encuentro -->
+        <section v-if="proyectoAsociado" class="rounded-2xl border border-borde bg-white p-4 shadow-sm sm:p-6" aria-labelledby="titulo-planificacion"
+                 :class="{ 'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'datos' }">
+          <div class="mb-5 flex items-start gap-3 sm:gap-4">
+            <span class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rol-fuerte text-white sm:h-12 sm:w-12" aria-hidden="true">
+              <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+            </span>
             <div class="min-w-0">
-              <label for="enc-num-alumnos" class="field-label">Número de alumnos</label>
-              <input id="enc-num-alumnos" v-model="form.num_alumnos" type="number" min="1" max="99"
-                     placeholder="Ej. 24" class="field-input" />
+              <h2 id="titulo-planificacion" class="text-lg font-bold text-azul-noche">Planificación de sesiones</h2>
+              <p class="mt-0.5 text-sm text-texto-secundario">Por defecto, una sesión con todas las fases: añade más si lo vais a trabajar en varias. De aquí sale la fecha fin estimada.</p>
             </div>
           </div>
+          <PlanificacionSesiones v-model="form.planificacion_sesiones" />
         </section>
       </template>
 
@@ -1080,7 +1258,7 @@ function formatFecha(isoDate) {
                 </div>
 
                 <p v-if="!fechaEstablecida" class="text-xs text-amber-500 font-medium">
-                  Establece la fecha de trabajo para repartir el alumnado en grupos.
+                  Establece la fecha de inicio para repartir el alumnado en grupos.
                 </p>
 
                 <!-- Alumnado por equipos — siempre visible -->
@@ -1089,9 +1267,9 @@ function formatFecha(isoDate) {
 
                   <label class="field-label">
                     Alumnado por grupos <span class="text-red-400">*</span>
-                    <span v-if="limiteAlumnados" class="ml-2 text-xs font-semibold"
+                    <span v-if="form.alumnados.length" class="ml-2 text-xs font-semibold"
                           :class="limiteAlcanzado ? 'text-red-400' : 'text-texto-secundario'">
-                      {{ form.alumnados.length }}/{{ limiteAlumnados }}
+                      {{ alumnosTexto(form.alumnados.length) }}
                     </span>
                   </label>
 
@@ -1122,6 +1300,34 @@ function formatFecha(isoDate) {
                     </button>
                   </div>
                   <p v-if="errorNuevoAlumnado" class="text-xs font-semibold text-red-500">{{ errorNuevoAlumnado }}</p>
+
+                  <!-- Pegar una lista de nombres: se reparten solos en los grupos -->
+                  <div>
+                    <button v-if="!pegandoLista" type="button" @click="pegandoLista = true; mensajeLista = ''"
+                            :disabled="!fechaEstablecida || limiteAlcanzado"
+                            class="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-rol/30 bg-white px-3 py-2
+                                   text-xs font-bold text-rol-fuerte transition-all hover:bg-rol/5
+                                   disabled:opacity-40 disabled:cursor-not-allowed">
+                      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h10"/>
+                      </svg>
+                      Pegar una lista de nombres
+                    </button>
+                    <div v-else class="space-y-2 rounded-xl border border-rol/20 bg-rol/5 p-3">
+                      <label for="lista-nombres" class="block text-xs font-bold uppercase tracking-widest text-rol-fuerte">Un nombre de pila por línea</label>
+                      <textarea id="lista-nombres" v-model="listaNombres" rows="5" class="field-input resize-y !text-sm"
+                                placeholder="Lucía&#10;Hugo&#10;Martina" />
+                      <p class="text-xs text-texto-secundario">Se reparten solos entre los {{ form.num_equipos || 1 }} grupos y a cada uno se le añade un animal y un color.</p>
+                      <div class="flex flex-wrap gap-2">
+                        <button type="button" @click="anadirListaNombres" :disabled="!listaNombres.trim()"
+                                class="inline-flex min-h-9 items-center rounded-full bg-rol-fuerte px-4 text-xs font-bold text-white disabled:opacity-40">
+                          Añadir y repartir
+                        </button>
+                        <button type="button" @click="pegandoLista = false" class="inline-flex min-h-9 items-center rounded-full px-3 text-xs font-bold text-texto-secundario">Cancelar</button>
+                      </div>
+                    </div>
+                    <p v-if="mensajeLista" class="mt-1.5 text-xs font-semibold text-azul-noche" role="status">{{ mensajeLista }}</p>
+                  </div>
 
                   <!-- Copiar alumnado de un encuentro anterior del mismo docente -->
                   <div v-if="encuentrosParaCopiar.length">
@@ -1292,13 +1498,26 @@ function formatFecha(isoDate) {
         </span>
         <h2 id="titulo-completado" class="mt-4 text-xl font-bold text-azul-noche sm:text-2xl">Encuentro creado</h2>
         <p class="mx-auto mt-2 max-w-md text-sm text-texto-secundario">
-          Ya tienes los grupos listos. En la biblioteca de encuentros generarás el código de acceso del alumnado y, en «Seguimiento de grupos», seguirás su avance.
+          Ya tienes los grupos listos. Proyecta el QR y los códigos para que el alumnado entre en su grupo; en «Seguimiento de grupos» seguirás su avance.
         </p>
-        <div class="mt-6 flex flex-wrap justify-center gap-2">
-          <RouterLink :to="{ name: 'encuentros-registrados', query: { ver: 'seguimiento' } }" class="accion-principal">Ir al seguimiento de grupos</RouterLink>
-          <RouterLink to="/encuentros" class="accion-secundaria">Ver encuentros</RouterLink>
-          <button type="button" @click="crearOtroEncuentro" class="accion-secundaria">Crear otro encuentro</button>
+        <!-- 1) Empezar ya: proyectar el acceso del alumnado -->
+        <div v-if="encuentroCreado?.microproyecto_uuid" class="mx-auto mt-6 max-w-md rounded-2xl border border-rol/25 bg-rol/5 p-4 sm:p-5">
+          <p class="font-heading text-lg font-bold text-azul-noche">¿Empezáis ya?</p>
+          <p class="mt-1 text-sm text-texto-secundario">Proyecta el QR y los códigos en clase: cada grupo entra con el suyo.</p>
+          <button type="button" @click="proyectarAcceso" :disabled="abriendoProyeccion"
+                  class="accion-principal mt-3 disabled:opacity-50">
+            {{ abriendoProyeccion ? 'Preparando…' : 'Proyectar QR y códigos' }}
+          </button>
         </div>
+        <!-- 2) Seguir a los grupos; 3) el resto, más discreto -->
+        <div class="mt-4 flex flex-col items-center gap-3">
+          <RouterLink :to="{ name: 'encuentros-registrados', query: { ver: 'seguimiento' } }" class="accion-secundaria">Ir al seguimiento de grupos</RouterLink>
+          <div class="flex flex-wrap justify-center gap-2 border-t border-borde pt-3">
+            <RouterLink to="/encuentros" class="accion-secundaria">Ver encuentros</RouterLink>
+            <button type="button" @click="crearOtroEncuentro" class="accion-secundaria">Crear otro encuentro</button>
+          </div>
+        </div>
+        <p v-if="errorProyeccion" class="mx-auto mt-3 max-w-md text-sm font-semibold text-red-700" role="alert">{{ errorProyeccion }}</p>
       </section>
 
       <!-- Lo que falta para avanzar (se muestra al intentar seguir) -->
@@ -1314,7 +1533,7 @@ function formatFecha(isoDate) {
       <!-- Botones de paso -->
       <div v-if="pasoEnc < 4" ref="refBtnGuardar" class="fila-pasos rounded-xl transition-all"
            :class="{ 'tour-active': tourTargetActivo === 'refBtnGuardar' }">
-        <button v-if="pasoEnc === 1" type="button" @click="router.push('/encuentros')" class="btn-paso-atras">Cancelar</button>
+        <button v-if="pasoEnc === 1" type="button" @click="salirSinEncuentro" class="btn-paso-atras">{{ desdeAjuste ? 'Ahora no' : 'Cancelar' }}</button>
         <button v-else type="button" @click="pasoEnc--" class="btn-paso-atras">← Anterior</button>
         <button v-if="pasoEnc < 3" type="button" @click="siguientePasoEnc" class="btn-paso">Siguiente →</button>
         <button v-else type="button" @click="guardarEncuentro" :disabled="guardando" class="btn-paso">

@@ -2,12 +2,17 @@
 
 namespace App\Http\Requests;
 
+use App\Http\Requests\Concerns\ValidaPlanificacionSesiones;
+use App\Models\Encuentro;
 use App\Models\Microproyecto;
 use App\Rules\AliasAlumnado;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Carbon;
 
 class StoreEncuentroRequest extends FormRequest
 {
+    use ValidaPlanificacionSesiones;
+
     public function authorize(): bool
     {
         return $this->user() !== null;
@@ -38,6 +43,8 @@ class StoreEncuentroRequest extends FormRequest
                 ->toArray();
         }
 
+        $sanitized += $this->planificacionSesionesSaneada();
+
         if ($sanitized) {
             $this->merge($sanitized);
         }
@@ -57,15 +64,29 @@ class StoreEncuentroRequest extends FormRequest
                 }
 
                 if (!$proyecto->esVisiblePara($user)) {
-                    $fail('No tienes acceso a este proyecto. Pide al docente propietario que lo comparta contigo o crea uno nuevo.');
+                    $fail('No tienes acceso a este reto ajustado. Pide al docente propietario que lo comparta contigo o crea uno nuevo.');
                     return;
                 }
 
                 if (!in_array($proyecto->estado, ['validado', 'completado'], true)) {
-                    $fail('Solo se pueden asociar proyectos ya validados a un encuentro. Valida el proyecto antes de crear el encuentro.');
+                    $fail('Solo se pueden llevar al aula retos ajustados validados. Valida el reto ajustado antes de crear el encuentro.');
                 }
             }],
             'fecha'                  => 'required|date',
+            // Opcional: sin ella se usa la sugerida. Puede alargarse, no quedar antes de la sugerida
+            // (mismo criterio que UpdateEncuentroRequest).
+            'fecha_fin'              => ['sometimes', 'nullable', 'date', 'after_or_equal:fecha', function ($attribute, $value, $fail) {
+                if (!$value || !strtotime((string) $this->input('fecha'))) return;
+                $planificacion = $this->input('planificacion_sesiones');
+                if (empty($planificacion)) {
+                    $planificacion = Microproyecto::find($this->input('microproyecto_id'))?->diseno_microproyecto['clases'] ?? null;
+                }
+                $minimo = (new Encuentro(['planificacion_sesiones' => $planificacion]))
+                    ->fechaFinSugerida(Carbon::parse($this->input('fecha')));
+                if ($minimo && Carbon::parse($value)->lt($minimo)) {
+                    $fail("La fecha de fin no puede ser anterior al {$minimo->format('d/m/Y')}, según las sesiones planificadas.");
+                }
+            }],
             'centro_educativo'       => 'nullable|string|max:255',
             'ciclo_formativo'        => 'nullable|string|max:255',
             'curso'                  => 'required|string|max:20',
@@ -81,13 +102,14 @@ class StoreEncuentroRequest extends FormRequest
                 }
             }],
             'alumnados.*.rol'        => 'nullable|string|max:50',
+            ...$this->reglasPlanificacionSesiones(),
         ];
     }
 
     public function messages(): array
     {
         return [
-            'microproyecto_id.required' => 'Debes asociar un proyecto al encuentro antes de guardarlo.',
+            'microproyecto_id.required' => 'Debes asociar un reto ajustado al encuentro antes de guardarlo.',
             'curso.required'            => 'Indica el curso del encuentro.',
             'grupo.required'            => 'Indica la clase del encuentro.',
             'num_equipos.required'      => 'Indica el número de grupos del encuentro.',
@@ -96,6 +118,7 @@ class StoreEncuentroRequest extends FormRequest
             'alumnados.*.equipo_num.required' => 'Todos los alumnos deben tener un grupo asignado.',
             'alumnados.*.alias.required'      => 'Todos los alumnos necesitan un alias.',
             'alumnados.*.alias.distinct'      => 'Hay dos alumnos con el mismo alias. Genera otro con el dado.',
+            ...$this->mensajesPlanificacionSesiones(),
         ];
     }
 }

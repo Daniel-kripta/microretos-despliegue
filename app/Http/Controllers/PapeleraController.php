@@ -10,6 +10,7 @@ use App\Models\Familia;
 use App\Models\CentroEducativo;
 use App\Models\Microproyecto;
 use App\Models\Encuentro;
+use App\Models\SolicitudReto;
 
 class PapeleraController extends Controller
 {
@@ -23,6 +24,12 @@ class PapeleraController extends Controller
         'centros'     => CentroEducativo::class,
         'proyectos'   => Microproyecto::class,
         'sesiones'    => Encuentro::class,
+        // Al borrarla del todo, sus retos y encuentros se quedan sin solicitud (FK nullOnDelete)
+        'solicitudes' => SolicitudReto::class,
+        // Central → Captaciones
+        'captaciones_empresa' => \App\Models\EmpresaCaptacion::class,
+        'captaciones_centro'  => \App\Models\CentroCaptacion::class,
+        'retos_borrador'      => \App\Models\MicroretoBorrador::class,
     ];
 
     /**
@@ -68,6 +75,7 @@ class PapeleraController extends Controller
         }
 
         $item->restore();
+        app(\App\Services\ActividadCentralService::class)->registrar(request()->user(), 'papelera', 'restaurar', 'Restauró de la papelera: ' . $this->extraerNombre($item, $tipo) . '.', $item, true);
 
         return response()->json([
             'message' => 'Elemento restaurado correctamente',
@@ -91,8 +99,13 @@ class PapeleraController extends Controller
             return response()->json(['error' => 'Elemento no encontrado en la papelera'], 404);
         }
 
+        $nombre = $this->extraerNombre($item, $tipo);
+        if ($this->esEvidenciaLegal($item)) {
+            return response()->json(['error' => 'Tiene la firma de la empresa: es evidencia legal y no se puede borrar del todo. Puede quedarse en la papelera.'], 422);
+        }
         $this->limpiarRelaciones($item, $tipo);
         $item->forceDelete();
+        app(\App\Services\ActividadCentralService::class)->registrar(request()->user(), 'papelera', 'borrar_definitivo', "Borró definitivamente: {$nombre}.", null, true);
 
         return response()->json(['message' => 'Elemento eliminado permanentemente']);
     }
@@ -119,11 +132,15 @@ class PapeleraController extends Controller
         foreach ($clasesAVaciar as $tipo => $clase) {
             $items = $clase::onlyTrashed()->get();
             foreach ($items as $item) {
+                // Captaciones con firma: se quedan en la papelera (la base de datos tampoco deja borrarlas)
+                if ($this->esEvidenciaLegal($item)) continue;
                 $this->limpiarRelaciones($item, $tipo);
                 $item->forceDelete();
                 $totalEliminados++;
             }
         }
+
+        app(\App\Services\ActividadCentralService::class)->registrar($request->user(), 'papelera', 'vaciar', "Vació la papelera" . ($tipoFiltro ? " ({$tipoFiltro})" : '') . ": {$totalEliminados} elementos borrados definitivamente.", null, true);
 
         return response()->json([
             'message'    => 'Papelera vaciada correctamente',
@@ -132,6 +149,12 @@ class PapeleraController extends Controller
     }
 
     // ─── helpers privados ─────────────────────────────────────────────────────
+
+    /** Empresa captada con firma: evidencia legal (empresa_firmas la protege con restrictOnDelete) */
+    private function esEvidenciaLegal($item): bool
+    {
+        return $item instanceof \App\Models\EmpresaCaptacion && $item->firmas()->exists();
+    }
 
     private function resolverClase(string $tipo): ?string
     {
@@ -165,6 +188,10 @@ class PapeleraController extends Controller
             'centros'    => $item->nombre            ?? "Centro #{$item->id}",
             'proyectos'  => $item->titulo            ?? "Proyecto #{$item->id}",
             'sesiones'   => $item->microreto_titulo  ?? "Sesión #{$item->id}",
+            'solicitudes' => "Solicitud de {$item->nombre_docente} · {$item->centro_nombre}",
+            'captaciones_empresa' => "Empresa captada: {$item->nombre_comercial}",
+            'captaciones_centro'  => 'Centro captado: ' . ($item->centro_nombre ?? "#{$item->id}"),
+            'retos_borrador'      => 'Reto en borrador: ' . data_get($item->datos, 'titulo', 'sin título'),
             default      => "#{$item->id}",
         };
     }

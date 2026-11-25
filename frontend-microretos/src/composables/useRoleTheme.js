@@ -1,5 +1,5 @@
-import { computed } from 'vue'
-import { ROLE_SUPERADMIN, ROLE_ADMIN, ROLE_DOCENTE, ROLE_EMPRESA, ROLE_COMERCIAL, useAuthStore } from '../stores/auth.js'
+import { computed, ref } from 'vue'
+import { ROLE_SUPERADMIN, ROLE_ADMIN, ROLE_DOCENTE, ROLE_EMPRESA, ROLE_COMERCIAL, ROLE_RED_DUALAB, ROLE_GESTION_PRACTICAS, ROLE_ADMIN_CENTRAL_DUALAB, useAuthStore } from '../stores/auth.js'
 
 // Color de marca por rol de quien ha iniciado sesión — mismo criterio que el
 // frontoffice (ver logo_colores.png): docente/centro=azul, empresa=verde,
@@ -98,6 +98,10 @@ const THEME_BY_ROLE = {
 // Sin sesión todavía (Home antes de login) o rol desconocido: azul de marca genérico.
 // Comercial: verde de empresas, que es con quien trabaja (app comercial.dualab.es)
 THEME_BY_ROLE[ROLE_COMERCIAL] = THEME_BY_ROLE[ROLE_EMPRESA]
+// Roles de Central (red_dualab, gestion_practicas, admin_central_dualab): con el turquesa del superadmin
+THEME_BY_ROLE[ROLE_RED_DUALAB] = THEME_BY_ROLE[ROLE_SUPERADMIN]
+THEME_BY_ROLE[ROLE_GESTION_PRACTICAS] = THEME_BY_ROLE[ROLE_SUPERADMIN]
+THEME_BY_ROLE[ROLE_ADMIN_CENTRAL_DUALAB] = THEME_BY_ROLE[ROLE_SUPERADMIN]
 
 const DEFAULT_THEME = {
   key: 'primary',
@@ -118,8 +122,79 @@ const DEFAULT_THEME = {
   hexSoft: 'rgba(48,114,170,0.15)',
 }
 
+// DuaLab Central pinta cada espacio con el color de su botón (central/App.vue): mientras se está en
+// un espacio, las vistas compartidas con la app (Base de datos, Usuarios…) usan ese tema en vez del
+// del rol. null = el del rol.
+// Espacios de DuaLab Central (forzarTemaRol): mismas claves que su html[data-rol]
+const TEMA_ESPACIO_CONTACTO = {
+  key: 'espacio-contacto',
+  text: 'text-espacio-contacto-fuerte',
+  text50: 'text-espacio-contacto-fuerte/50',
+  textDark: 'text-espacio-contacto-claro',
+  text50Dark: 'text-espacio-contacto-claro/50',
+  bg: 'bg-espacio-contacto-fuerte',
+  bgHover: 'hover:bg-espacio-contacto-fuerte/90',
+  bgSoft: 'bg-espacio-contacto/15',
+  bg5: 'bg-espacio-contacto/5',
+  border: 'border-espacio-contacto-fuerte',
+  border15: 'border-espacio-contacto/15',
+  border20: 'border-espacio-contacto/20',
+  ring: 'ring-espacio-contacto-fuerte',
+  hex: '#C2413A',
+  hexDark: '#FF9A93',
+  hexSoft: 'rgba(242,102,94,0.15)',
+}
+const TEMA_ESPACIO_RED = {
+  key: 'espacio-red',
+  text: 'text-espacio-red-fuerte',
+  text50: 'text-espacio-red-fuerte/50',
+  textDark: 'text-espacio-red-claro',
+  text50Dark: 'text-espacio-red-claro/50',
+  bg: 'bg-espacio-red-fuerte',
+  bgHover: 'hover:bg-espacio-red-fuerte/90',
+  bgSoft: 'bg-espacio-red/15',
+  bg5: 'bg-espacio-red/5',
+  border: 'border-espacio-red-fuerte',
+  border15: 'border-espacio-red/15',
+  border20: 'border-espacio-red/20',
+  ring: 'ring-espacio-red-fuerte',
+  // Coral rojizo, como Primer contacto (que ahora va dentro de Red DuaLab): style.css --color-espacio-red*
+  hex: '#C2413A',
+  hexDark: '#FF9A93',
+  hexSoft: 'rgba(242,102,94,0.15)',
+}
+const TEMA_ESPACIO_PRACTICAS = {
+  key: 'espacio-practicas',
+  text: 'text-espacio-practicas-fuerte',
+  text50: 'text-espacio-practicas-fuerte/50',
+  textDark: 'text-espacio-practicas-claro',
+  text50Dark: 'text-espacio-practicas-claro/50',
+  bg: 'bg-espacio-practicas-fuerte',
+  bgHover: 'hover:bg-espacio-practicas-fuerte/90',
+  bgSoft: 'bg-espacio-practicas/15',
+  bg5: 'bg-espacio-practicas/5',
+  border: 'border-espacio-practicas-fuerte',
+  border15: 'border-espacio-practicas/15',
+  border20: 'border-espacio-practicas/20',
+  ring: 'ring-espacio-practicas-fuerte',
+  hex: '#6B4BB8',
+  hexDark: '#BBA6F5',
+  hexSoft: 'rgba(142,111,216,0.15)',
+}
+const THEME_BY_KEY = Object.fromEntries([...Object.values(THEME_BY_ROLE), TEMA_ESPACIO_CONTACTO, TEMA_ESPACIO_RED, TEMA_ESPACIO_PRACTICAS].map(t => [t.key, t]))
+const temaForzado = ref(null)
+export function forzarTemaRol(clave) {
+  temaForzado.value = THEME_BY_KEY[clave] ? clave : null
+}
+
+// Tema fijo por clave, para vistas sin sesión (p. ej. el enlace de la solicitud de retos, en azul de docente)
+export function temaPorClave(clave) {
+  return THEME_BY_KEY[clave] || DEFAULT_THEME
+}
+
 export function useRoleTheme() {
   const authStore = useAuthStore()
-  const theme = computed(() => THEME_BY_ROLE[authStore.userRole] ?? DEFAULT_THEME)
+  const theme = computed(() => (temaForzado.value && THEME_BY_KEY[temaForzado.value])
+    || THEME_BY_ROLE[authStore.userRole] || DEFAULT_THEME)
   return { theme }
 }

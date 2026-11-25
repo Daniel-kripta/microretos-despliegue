@@ -124,14 +124,14 @@ class EquipoGestionController extends Controller
 
         $contexto = DiagnosticoFinalService::contexto($equipo);
 
-        $cacheKey  = 'diagnostico_final_v1_' . md5($contexto);
+        $cacheKey  = 'diagnostico_final_v2_' . md5($contexto);
         $resultado = Cache::remember($cacheKey, now()->addDay(), function () use ($contexto) {
             $response = Http::withToken(config('services.openai.key'))
                 ->timeout(60)
                 ->post('https://api.openai.com/v1/chat/completions', [
                     'model'    => 'gpt-4o',
                     'messages' => [
-                        ['role' => 'system', 'content' => 'Eres un docente de Formación Profesional española que redacta el diagnóstico final de un equipo de alumnado al terminar un microproyecto tipo reto de empresa (Aprendizaje Basado en Retos). Básate ÚNICAMENTE en la información proporcionada, nunca inventes datos que no estén en el contexto. Ten en cuenta el nivel de completitud y la calidad del contenido registrado en cada fase, la evaluación curricular ya realizada por el docente (niveles de RA alcanzados) y la nota opcional si existe. No repitas literalmente los datos identificativos (ciclo, curso, grupo, nombres de los participantes) en el texto — el lector ya los tiene delante, céntrate en analizar el proceso y el aprendizaje. Redacta en español, tono profesional y constructivo, sin tecnicismos innecesarios.'],
+                        ['role' => 'system', 'content' => 'Eres un docente de Formación Profesional española que redacta el diagnóstico final de un equipo de alumnado al terminar un microproyecto tipo reto de empresa (Aprendizaje Basado en Retos). Básate ÚNICAMENTE en la información proporcionada, nunca inventes datos que no estén en el contexto. Ten en cuenta el nivel de completitud y la calidad del contenido registrado en cada fase, la evaluación curricular ya realizada por el docente (niveles de RA alcanzados) y la nota opcional si existe. No repitas literalmente los datos identificativos (ciclo, curso, grupo, participantes) en el texto — el lector ya los tiene delante, céntrate en analizar el proceso y el aprendizaje. Los participantes aparecen como «Integrante N»: si necesitas nombrar a alguno, usa exactamente esa forma. Redacta en español, tono profesional y constructivo, sin tecnicismos innecesarios.'],
                         ['role' => 'user',   'content' => "Contexto del equipo:\n{$contexto}\nDevuelve SOLO este JSON:\n{\"resumen\":\"resumen general del desempeño del equipo a lo largo del proyecto (2-4 frases)\",\"fortalezas\":[\"punto fuerte concreto\"],\"areas_mejora\":[\"área de mejora concreta\"],\"valoracion_ra_ce\":\"cómo el trabajo del equipo evidencia (o no) los RA/CE trabajados, apoyándote en la evaluación curricular del docente si existe\",\"conclusion\":\"valoración final breve (1-2 frases)\"}"],
                     ],
                     'response_format' => ['type' => 'json_object'],
@@ -152,6 +152,9 @@ class EquipoGestionController extends Controller
         if (!$resultado || empty($resultado['resumen'])) {
             return response()->json(['error' => 'No se pudo generar el diagnóstico. Inténtalo de nuevo.'], 502);
         }
+
+        // La IA solo conoce «Integrante N» (ver DiagnosticoFinalService::seudonimizar)
+        $resultado = DiagnosticoFinalService::restaurarAlias($resultado, $equipo);
 
         $equipo->update([
             'diagnostico_final'       => $resultado,
@@ -227,13 +230,22 @@ class EquipoGestionController extends Controller
 
         $equipos = $proyecto->equipos()->whereHas('encuentro', fn($q) => $q->editablesPara($user))->get()->map(fn($e) => [
             'id'            => $e->id,
+            'encuentro_id'  => $e->encuentro_id,
             'nombre'        => $e->nombre,
             'codigo_acceso' => $e->codigo_acceso,
             'token'         => $e->token,
         ]);
 
+        // Código de la clase (el que enseñan las tarjetas de encuentro): con él se entra la
+        // primera vez en /unirse y se elige grupo; el de cada grupo sirve también para volver.
+        $clases = $proyecto->encuentros()->editablesPara($user)->whereNotNull('codigo_clase')
+            ->get(['encuentros.id', 'encuentros.grupo', 'encuentros.codigo_clase'])
+            ->map(fn($e) => ['encuentro_id' => $e->id, 'grupo' => $e->grupo, 'codigo_clase' => $e->codigo_clase])
+            ->values();
+
         return response()->json([
             'proyecto_titulo' => $proyecto->titulo,
+            'clases'          => $clases,
             'equipos'         => $equipos,
         ]);
     }

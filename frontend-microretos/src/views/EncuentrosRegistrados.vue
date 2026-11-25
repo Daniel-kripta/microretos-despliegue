@@ -26,12 +26,18 @@ import SelectorCurso from '../components/SelectorCurso.vue'
 import FiltrosPanel from '../components/FiltrosPanel.vue'
 import FiltroSegmentado from '../components/FiltroSegmentado.vue'
 import FiltroSelect from '../components/FiltroSelect.vue'
-import { getEncuentros, getMisGrupos, actualizarEncuentro, crearCodigoAcceso, crearCodigoIa as crearCodigoIaApi } from '../services/encuentroService.js'
+import { useFiltroEmpresaSector } from '../composables/useFiltroEmpresaSector.js'
+import { getEncuentros, getMisGrupos, actualizarEncuentro, crearCodigoAcceso, crearCodigoIa as crearCodigoIaApi,
+  getValoracionEmpresa } from '../services/encuentroService.js'
+import { PREGUNTAS_VALORACION } from '../services/valoracionEmpresaService.js'
+import { marcarRetoAjustadoCompletado } from '../services/retoAjustadoService.js'
+import PlanificacionSesiones from '../components/PlanificacionSesiones.vue'
 import { useRaCeEncuentro } from '../composables/useRaCeEncuentro.js'
 import { useAuthStore } from '../stores/auth.js'
-import { FASES_PROYECTO, progresoPonderado } from '../config/fasesProyecto.js'
+import { FASES_PROYECTO, progresoPonderado, duracionPorFase } from '../config/fasesProyecto.js'
 import { formatCurso } from '../utils/formatCurso.js'
 import { nombreGrupo } from '../utils/nombreGrupo.js'
+import { usePanelFiltros } from '../composables/usePanelFiltros.js'
 
 // Grupos (equipos de alumnado) de un encuentro para la card. Usa los equipos reales si
 // vienen cargados; si no (encuentros antiguos), el reparto plano de `alumnados`.
@@ -144,12 +150,14 @@ const filtros = ref({
   ciclo:     '',
   modulo:    '',
   centro:    '',
+  empresa:   '',   // empresa del reto
+  sector:    '',   // sector de esa empresa
   acceso:    '',   // '' | 'con' (ya tiene código del alumnado) | 'sin'      — solo «Gestión»
   propiedad: '',   // '' | 'mios' | 'compartidos'
   estado:    '',   // '' | 'en_curso' | 'sin_iniciar' | 'completado' (de cada grupo) — solo «Seguimiento»
   diagnostico: false, // solo encuentros con algún diagnóstico listo           — solo «Seguimiento»
 })
-const FILTROS_VACIOS = { titulo: '', desde: '', hasta: '', curso: '', grupo: '', familias: [], ciclo: '', modulo: '', centro: '', acceso: '', propiedad: '', estado: '', diagnostico: false }
+const FILTROS_VACIOS = { titulo: '', desde: '', hasta: '', curso: '', grupo: '', familias: [], ciclo: '', modulo: '', centro: '', empresa: '', sector: '', acceso: '', propiedad: '', estado: '', diagnostico: false }
 
 // Encuentros cuyo proyecto no tiene familia: opción propia en el filtro
 const SIN_FAMILIA = '__sin_familia__'
@@ -201,6 +209,15 @@ const encuentrosUnicos = computed(() => {
   return { centros, familias, ciclos, modulos, familiasPanel, acceso, propiedad }
 })
 
+// Empresa y Sector (juntos en la barra): opciones del curso, centro y familias elegidos; cada
+// uno acota las del otro. Viven en `filtros` (así cuentan en hayFiltrosActivos y limpiarFiltros).
+const campoFiltro = (k) => computed({ get: () => filtros.value[k], set: (v) => { filtros.value[k] = v } })
+const baseEmpresa = computed(() => encuentrosCurso.value.filter(s => coincideFamilia(s)
+  && (!filtros.value.centro || s.centro_educativo === filtros.value.centro)))
+const { empresasDisponibles, sectoresDisponibles, cumpleEmpresaSector } = useFiltroEmpresaSector(baseEmpresa, {
+  empresa: campoFiltro('empresa'), sector: campoFiltro('sector'),
+})
+
 // Filtros comunes a las dos pestañas (barra superior, familia, propiedad y fechas)
 function aplicarComunes(base) {
   let lista = [...base].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0))
@@ -225,6 +242,8 @@ function aplicarComunes(base) {
     lista = lista.filter(s => modulosDeEncuentro(s).includes(filtros.value.modulo))
   if (filtros.value.centro)
     lista = lista.filter(s => s.centro_educativo === filtros.value.centro)
+  if (filtros.value.empresa || filtros.value.sector)
+    lista = lista.filter(cumpleEmpresaSector)
   if (filtros.value.propiedad)
     lista = lista.filter(s => filtros.value.propiedad === 'mios' ? s.es_propietario : !s.es_propietario)
   return lista
@@ -399,7 +418,8 @@ const orden = ref('recientes')   // 'recientes' | 'antiguos' | 'titulo' | 'avanc
 const VISTA_KEY = 'dualab_encuentros_vista'
 const vista = ref((() => { try { return localStorage.getItem(VISTA_KEY) || 'cuadricula' } catch { return 'cuadricula' } })())
 watch(vista, v => { try { localStorage.setItem(VISTA_KEY, v) } catch { /* sin almacenamiento */ } })
-const panelFiltrosAbierto = ref(typeof window === 'undefined' || window.innerWidth >= 1024)
+// «Filtros rápidos»: abierto en escritorio, plegado en móvil; se reajusta al cambiar el ancho
+const panelFiltrosAbierto = usePanelFiltros()
 const columnasEncuentros = computed(() => panelFiltrosAbierto.value
   ? 'md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3'
   : 'md:grid-cols-2 xl:grid-cols-3')
@@ -451,10 +471,50 @@ const { cargandoRaCe, modulosExpandidos, raCeBlocksEncuentro, toggleModulo, carg
 
 async function verEncuentro(s) {
   encuentroAbierto.value = s
+  cargarValoracion(s.id)
   await cargarRaCe(s.microproyecto_uuid)
 }
 
-function cerrarEncuentro()   { encuentroAbierto.value = null; editandoFechaFin.value = false }
+// ─── Valoración final de la empresa (P3) ──────────────────────────────────────
+// Solo lectura en la ficha del encuentro: la envía DuaLab a la empresa desde Central (Empresas →
+// «Enviar soluciones a las empresas»). Aquí también decide si se puede marcar completado.
+const valoracion          = ref(null)
+const cargandoValoracion  = ref(false)
+const errorValoracion     = ref('')
+
+async function cargarValoracion(id) {
+  valoracion.value = null
+  errorValoracion.value = ''
+  cargandoValoracion.value = true
+  try {
+    valoracion.value = (await getValoracionEmpresa(id)).data
+  } catch {
+    errorValoracion.value = 'No se pudo cargar la valoración de la empresa.'
+  } finally {
+    cargandoValoracion.value = false
+  }
+}
+
+// Completado = el docente confirma que los grupos han terminado (con el primer encuentro que lo
+// confirme; el reto ajustado se puede seguir usando en encuentros nuevos). Es aparte de la valoración.
+const completandoReto = ref(false)
+async function marcarRetoCompletado() {
+  const e = encuentroAbierto.value
+  if (!e?.microproyecto_uuid || !confirm('¿Marcar el reto ajustado como completado? Lo podrás seguir usando en encuentros nuevos.')) return
+  completandoReto.value = true
+  errorValoracion.value = ''
+  try {
+    await marcarRetoAjustadoCompletado(e.microproyecto_uuid)
+    encuentros.value = encuentros.value.map(x => x.microproyecto_uuid === e.microproyecto_uuid ? { ...x, proyecto_estado: 'completado' } : x)
+    encuentroAbierto.value = { ...e, proyecto_estado: 'completado' }
+  } catch (err) {
+    errorValoracion.value = err.response?.data?.message || 'No se pudo marcar como completado.'
+  } finally {
+    completandoReto.value = false
+  }
+}
+
+function cerrarEncuentro()   { encuentroAbierto.value = null; editandoFechaFin.value = false; editandoPlanificacion.value = false }
 
 const seccionAccesoAlumnado = ref(null)
 
@@ -465,7 +525,7 @@ function irAAccesoAlumnado() {
 function alumnadosDelEquipoAbierto(n) {
   const equipo = (encuentroAbierto.value?.equipos || []).find(e => e.numero_equipo === n)
   if (equipo) {
-    return equipo.miembros.map(m => ({ alias: m.alias }))
+    return equipo.miembros.map(m => ({ alias: m.alias, destacado: !!m.destacado }))
   }
   // Encuentros sin equipos cargados todavía: snapshot plano del reparto (solo alias).
   return (encuentroAbierto.value?.alumnados || [])
@@ -560,6 +620,39 @@ async function guardarFechaFin() {
     errorFechaFin.value = e.response?.data?.errors?.fecha_fin?.[0] || e.response?.data?.message || 'No se pudo guardar la fecha fin.'
   } finally {
     guardandoFechaFin.value = false
+  }
+}
+
+// ─── Editar planificación de sesiones del encuentro ───────────────────────────
+const editandoPlanificacion  = ref(false)
+const planificacionInput     = ref([])
+const guardandoPlanificacion = ref(false)
+const errorPlanificacion     = ref('')
+
+function empezarEditarPlanificacion() {
+  planificacionInput.value = (encuentroAbierto.value?.planificacion_sesiones || []).map(s => ({ fases: [...(s.fases || [])] }))
+  errorPlanificacion.value = ''
+  editandoPlanificacion.value = true
+}
+
+async function guardarPlanificacion() {
+  if (!planificacionInput.value.length || planificacionInput.value.some(s => !(s.fases || []).length)) {
+    errorPlanificacion.value = 'Cada sesión debe trabajar al menos una fase.'
+    return
+  }
+  guardandoPlanificacion.value = true
+  errorPlanificacion.value     = ''
+  try {
+    const res = await actualizarEncuentro(encuentroAbierto.value.id, { planificacion_sesiones: planificacionInput.value })
+    const cambios = { planificacion_sesiones: res.data.planificacion_sesiones }
+    encuentroAbierto.value = { ...encuentroAbierto.value, ...cambios }
+    encuentros.value = encuentros.value.map(s => s.id === encuentroAbierto.value.id ? { ...s, ...cambios } : s)
+    editandoPlanificacion.value = false
+  } catch (e) {
+    const errores = e.response?.data?.errors || {}
+    errorPlanificacion.value = Object.values(errores)[0]?.[0] || e.response?.data?.message || 'No se pudo guardar la planificación.'
+  } finally {
+    guardandoPlanificacion.value = false
   }
 }
 
@@ -658,7 +751,7 @@ function formatFecha(isoDate) {
     <BienvenidaModal :show="guiaBienvenida" @seleccionar="seleccionarOpcionBienvenida" />
 
     <!-- Fondo decorativo -->
-    <div class="fixed top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px]
+    <div class="fixed top-0 left-1/2 -translate-x-1/2 w-[min(600px,100vw)] h-[400px]
                 bg-rol-fuerte opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
 
     <div class="relative z-10 mx-auto max-w-[90rem] space-y-5 px-4 pb-10 pt-5 sm:px-6 lg:px-8" @keydown.esc="menuEncuentro = null; menuLlave = null">
@@ -726,7 +819,7 @@ function formatFecha(isoDate) {
       </div>
 
       <!-- ─── Filtros (mismo panel que el explorador de retos) ─────────────── -->
-      <FiltrosPanel separadores v-model:busqueda="filtros.titulo" placeholder="Buscar por título del proyecto…">
+      <FiltrosPanel separadores v-model:busqueda="filtros.titulo" placeholder="Buscar por título del reto ajustado…">
         <template #curso>
           <div class="flex flex-wrap items-center gap-2">
             <SelectorCurso permitir-todos :cursos-con-datos="cursosConDatos" />
@@ -751,6 +844,10 @@ function formatFecha(isoDate) {
                       todos="Todos los módulos" :opciones="encuentrosUnicos.modulos" />
         <FiltroSegmentado v-model="filtros.curso" label="Nivel" :opciones="OPCIONES_NIVEL" />
         <FiltroSegmentado v-model="filtros.grupo" label="Clase" :opciones="OPCIONES_CLASE" />
+        <FiltroSelect v-model="filtros.empresa" label="Empresa" todos="Todas las empresas" :opciones="empresasDisponibles"
+                      title="Filtra por la empresa del reto." />
+        <FiltroSelect v-model="filtros.sector" label="Sector de la empresa" todos="Todos los sectores" :opciones="sectoresDisponibles"
+                      title="Filtra por el sector de la empresa. Puede no coincidir con la familia del reto." />
       </FiltrosPanel>
 
       <div class="flex flex-col gap-5 lg:flex-row lg:items-start">
@@ -873,7 +970,7 @@ function formatFecha(isoDate) {
               <select v-model="orden" class="h-9 rounded-xl px-3 text-sm text-azul-noche" aria-label="Ordenar encuentros">
                 <option value="recientes">Más recientes</option>
                 <option value="antiguos">Más antiguos</option>
-                <option value="titulo">Proyecto (A-Z)</option>
+                <option value="titulo">Reto ajustado (A-Z)</option>
                 <option v-if="ver === 'seguimiento'" value="avance">Más avance</option>
               </select>
             </label>
@@ -907,7 +1004,7 @@ function formatFecha(isoDate) {
               <svg class="h-7 w-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
             </span>
             <h3 class="mt-3 text-lg font-bold text-azul-noche">Aún no hay encuentros</h3>
-            <p class="mx-auto mt-1 max-w-md text-sm text-texto-secundario">Crea el primero a partir de un proyecto validado.</p>
+            <p class="mx-auto mt-1 max-w-md text-sm text-texto-secundario">Crea el primero a partir de un reto ajustado validado.</p>
             <button type="button" @click="router.push('/encuentros/crear')" class="accion-principal mt-4">Nuevo encuentro</button>
           </div>
 
@@ -1032,7 +1129,7 @@ function formatFecha(isoDate) {
                          class="absolute bottom-full right-0 z-30 mb-1 w-[min(18rem,calc(100vw-3rem))] rounded-xl border border-borde bg-white p-1.5 shadow-lg">
                       <!-- Atajo: proyectar en clase el QR y el código (pantalla de acceso) -->
                       <button v-if="s.codigo_clase && s.microproyecto_uuid" type="button" role="menuitem"
-                              @click="menuLlave = null; router.push({ name: 'pantalla-acceso', params: { uuid: s.microproyecto_uuid } })"
+                              @click="menuLlave = null; router.push({ name: 'pantalla-acceso', params: { uuid: s.microproyecto_uuid }, query: { encuentro: s.id } })"
                               class="flex w-full items-center gap-2 rounded-lg bg-rol/5 px-2.5 py-2 text-left text-sm font-semibold text-rol-fuerte hover:bg-rol/10">
                         <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
                         Proyectar pantalla de acceso
@@ -1108,9 +1205,9 @@ function formatFecha(isoDate) {
                       <button v-if="s.es_propietario" type="button" role="menuitem" @click="menuEncuentro = null; abrirCompartir(s)"
                               class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Compartir con otro docente</button>
                       <button v-if="s.microreto_id" type="button" role="menuitem" @click="menuEncuentro = null; abrirMicroretoModal(s.microreto_id)"
-                              class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Ficha del reto</button>
+                              class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Ficha del reto original</button>
                       <button v-if="s.microproyecto_uuid" type="button" role="menuitem" @click="menuEncuentro = null; abrirProyectoFicha(s.microproyecto_uuid)"
-                              class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Ficha del proyecto</button>
+                              class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Ficha del reto ajustado</button>
                       <button v-if="s.puede_editar" type="button" role="menuitem" @click="menuEncuentro = null; abrirModalEliminar(s)"
                               class="block w-full px-4 py-2 text-left text-sm text-red-700 hover:bg-red-50">Eliminar encuentro</button>
                     </div>
@@ -1264,6 +1361,76 @@ function formatFecha(isoDate) {
                 <p class="text-sm font-bold text-azul-noche">{{ encuentroAbierto.num_alumnos }}</p>
               </div>
             </div>
+            <!-- Valoración final de la empresa (P3): aquí solo el resumen; se envía desde Empresas -->
+            <div v-if="encuentroAbierto.microproyecto_uuid" class="p-4 rounded-xl border border-empresas/25 bg-empresas/5" aria-live="polite">
+              <p class="text-xs font-bold uppercase tracking-wider text-empresas-dark">Valoración de la empresa</p>
+              <p v-if="cargandoValoracion" class="mt-1 text-sm text-texto-secundario">Cargando…</p>
+              <template v-else-if="valoracion">
+                <p class="mt-1 text-sm text-azul-noche">
+                  {{ valoracion.grupos_con_entrega }} de {{ valoracion.grupos_total }} grupos han entregado su solución (F3).
+                </p>
+
+                <!-- Completar el reto ajustado (aparte de la valoración de la empresa) -->
+                <div v-if="encuentroAbierto.proyecto_estado === 'validado' && valoracion.puede_editar && valoracion.grupos_con_entrega > 0"
+                     class="mt-3 flex flex-col gap-2 rounded-xl border border-borde bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <p class="min-w-0 text-sm text-azul-noche">¿Han terminado los grupos? Marca el reto ajustado como completado.</p>
+                  <button type="button" @click="marcarRetoCompletado" :disabled="completandoReto"
+                          class="inline-flex min-h-9 shrink-0 items-center justify-center rounded-full bg-sky-700 px-4 text-xs font-bold uppercase text-white disabled:opacity-50">
+                    {{ completandoReto ? 'Guardando…' : 'Marcar completado' }}
+                  </button>
+                </div>
+                <p v-else-if="encuentroAbierto.proyecto_estado === 'completado'" class="mt-2 text-sm font-semibold text-sky-700">✓ Reto ajustado completado</p>
+
+                <!-- Solo lectura: DuaLab envía las soluciones a la empresa desde Central -->
+                <div v-if="valoracion.respondido_en" class="mt-3 space-y-2">
+                  <p class="text-sm font-bold text-empresas-dark">Valorada por la empresa · {{ valoracion.valoracion_global }}/5</p>
+                  <dl class="space-y-1.5 text-sm">
+                    <div v-for="p in PREGUNTAS_VALORACION" :key="p.key" class="flex flex-col gap-0.5 sm:flex-row sm:gap-2">
+                      <dt class="min-w-0 text-texto-secundario sm:flex-1">{{ p.label }}</dt>
+                      <dd class="shrink-0 font-semibold text-azul-noche">{{ valoracion.respuestas?.[p.key] || '—' }}</dd>
+                    </div>
+                  </dl>
+                  <p v-if="valoracion.comentarios" class="whitespace-pre-line break-words rounded-xl bg-white px-3 py-2 text-sm italic text-azul-noche">«{{ valoracion.comentarios }}»</p>
+                </div>
+                <p v-else class="mt-3 text-sm text-azul-noche">
+                  {{ valoracion.enviado_en && !valoracion.caducado ? 'DuaLab ya ha enviado las soluciones a la empresa: esperando su valoración.'
+                     : 'DuaLab enviará las soluciones a la empresa para que las valore cuando tus grupos hayan entregado.' }}
+                </p>
+              </template>
+              <p v-if="errorValoracion" class="mt-2 text-xs text-red-600" role="alert">{{ errorValoracion }}</p>
+            </div>
+
+            <!-- Planificación de sesiones del encuentro (qué fases se trabajan en cada sesión) -->
+            <div v-if="encuentroAbierto.microproyecto_uuid" class="p-4 rounded-xl bg-[#F8FAFC] border border-borde">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <p class="text-xs font-bold uppercase tracking-wider text-texto-secundario">
+                  Planificación · {{ (encuentroAbierto.planificacion_sesiones || []).length }}
+                  {{ (encuentroAbierto.planificacion_sesiones || []).length === 1 ? 'sesión' : 'sesiones' }}
+                </p>
+                <button v-if="encuentroAbierto.puede_editar && !editandoPlanificacion" @click="empezarEditarPlanificacion"
+                        class="inline-flex min-h-9 items-center rounded-full px-2 text-xs font-bold uppercase text-rol-fuerte hover:underline shrink-0">Editar</button>
+              </div>
+              <template v-if="!editandoPlanificacion">
+                <p v-if="!(encuentroAbierto.planificacion_sesiones || []).length" class="mt-1 text-sm text-texto-secundario">Sin sesiones planificadas.</p>
+                <ul v-else class="mt-2 flex flex-wrap gap-1.5" aria-label="Sesiones por fase">
+                  <li v-for="f in FASES_PROYECTO" :key="f.num"
+                      class="inline-flex items-center gap-1 rounded-full border border-borde bg-white px-2.5 py-1 text-xs font-semibold text-azul-noche">
+                    F{{ f.num }} · {{ duracionPorFase(encuentroAbierto.planificacion_sesiones, f.num) }}
+                  </li>
+                </ul>
+              </template>
+              <div v-else class="mt-3">
+                <PlanificacionSesiones v-model="planificacionInput" />
+                <p v-if="errorPlanificacion" class="mt-2 text-xs text-red-600" role="alert">{{ errorPlanificacion }}</p>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <button @click="guardarPlanificacion" :disabled="guardandoPlanificacion"
+                          class="inline-flex min-h-9 items-center rounded-full bg-rol-fuerte px-4 text-xs font-bold uppercase text-white disabled:opacity-50">{{ guardandoPlanificacion ? 'Guardando…' : 'Guardar planificación' }}</button>
+                  <button @click="editandoPlanificacion = false" class="inline-flex min-h-9 items-center rounded-full px-3 text-xs font-bold uppercase text-texto-secundario">Cancelar</button>
+                </div>
+                <p class="mt-2 text-xs text-texto-secundario">Si la fecha fin queda antes de lo que piden las sesiones, ajústala después.</p>
+              </div>
+            </div>
+
             <div v-if="encuentroAbierto.notas"
                  class="p-4 rounded-xl bg-[#F8FAFC] border border-borde">
               <p class="text-xs font-bold uppercase tracking-wider text-texto-secundario mb-1.5">Notas adicionales</p>
@@ -1434,7 +1601,7 @@ function formatFecha(isoDate) {
                         d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586
                            a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                 </svg>
-                Ficha del reto
+                Ficha del reto original
               </button>
               <button v-if="encuentroAbierto.microproyecto_uuid"
                       @click="abrirProyectoFicha(encuentroAbierto.microproyecto_uuid)"
@@ -1445,7 +1612,7 @@ function formatFecha(isoDate) {
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414A1 1 0 0119 9.414V19a2 2 0 01-2 2z"/>
                 </svg>
-                Ficha del proyecto
+                Ficha del reto ajustado
               </button>
             </div>
             <div v-if="encuentroAbierto.puede_editar" class="flex justify-end">
@@ -1475,7 +1642,7 @@ function formatFecha(isoDate) {
                 Ver detalle de grupos
               </button>
               <button v-if="encuentroAbierto.codigo_clase && encuentroAbierto.microproyecto_uuid"
-                      @click="router.push({ name: 'pantalla-acceso', params: { uuid: encuentroAbierto.microproyecto_uuid } }); cerrarEncuentro()"
+                      @click="router.push({ name: 'pantalla-acceso', params: { uuid: encuentroAbierto.microproyecto_uuid }, query: { encuentro: encuentroAbierto.id } }); cerrarEncuentro()"
                       class="inline-flex items-center gap-2 px-4 py-2.5 rounded-full border border-rol/30
                              bg-white text-rol-fuerte text-xs font-bold uppercase tracking-widest
                              hover:bg-rol/5 transition-all">

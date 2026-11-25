@@ -7,21 +7,28 @@
  *  2. Retos que el comercial generó delante de la empresa (borradores): con la empresa ya
  *     validada, se publican en sus centros o se descartan. Hasta entonces no salen en ninguna biblioteca.
  */
+import AvisoAccionCritica from './AvisoAccionCritica.vue'
+import MoverPapeleraModal from './MoverPapeleraModal.vue'
+import { useAuthStore, ROLE_SUPERADMIN, ROLE_ADMIN_CENTRAL_DUALAB } from '../stores/auth.js'
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import Modal from './Modal.vue'
 import {
   getEmpresasCaptadas, validarEmpresaCaptada, descartarEmpresaCaptada, getCoincidenciasEmpresa, getBorradoresPendientes, getBorradorCaptacion,
-  publicarBorrador, descartarBorrador, getImagenFirma, getCentrosCaptacion,
+  publicarBorrador, descartarBorrador, getImagenFirma, getCentrosCaptacion, eliminarEmpresaCaptada, eliminarBorrador,
 } from '../services/captacionService.js'
+import { PREGUNTAS_DIAGNOSTICO, COLUMNA_DE } from '../config/preguntasDiagnostico.js'
 
 const emit = defineEmits(['cambio'])
 
+// «En curso»: la comercial aún la está entrevistando (captación en borrador)
 const ESTADOS = [
+  { key: 'borrador',             label: 'En curso' },
   { key: 'pendiente_validacion', label: 'Pendientes' },
   { key: 'validada',             label: 'Validadas' },
   { key: 'descartada',           label: 'Descartadas' },
 ]
 const VACIO = {
+  borrador:             'No hay entrevistas en curso.',
   pendiente_validacion: 'No hay empresas pendientes de validar.',
   validada:             'Todavía no se ha validado ninguna empresa captada.',
   descartada:           'No hay empresas descartadas.',
@@ -44,8 +51,10 @@ async function cargarEmpresas() {
   const { data } = await getEmpresasCaptadas(estado.value)
   empresas.value = data.data
 }
+// Retos: los de empresas por validar o validadas, o los de entrevistas en curso
+const retosEnCurso = ref(false)
 async function cargarBorradores() {
-  const { data } = await getBorradoresPendientes()
+  const { data } = await getBorradoresPendientes(retosEnCurso.value)
   borradores.value = data.data
 }
 async function cargarTodo() {
@@ -63,6 +72,41 @@ onMounted(async () => {
   cargarTodo()
   try { centros.value = (await getCentrosCaptacion()).data } catch { /* se avisa al abrir el selector */ }
 })
+
+async function verRetos(enCurso) {
+  retosEnCurso.value = enCurso
+  try { await cargarBorradores() } catch { error.value = 'No se han podido cargar los retos.' }
+}
+
+// ── Mover a la papelera (superadmin y Admin Central DuaLab) ──────────────────
+const auth = useAuthStore()
+const puedeBorrar = computed(() => [ROLE_SUPERADMIN, ROLE_ADMIN_CENTRAL_DUALAB].includes(auth.userRole))
+const aBorrar = ref(null)    // { titulo, nombre, texto, borrar: () => Promise }
+const borrando = ref(false)
+function pedirBorrarEmpresa(e) {
+  aBorrar.value = { titulo: 'Borrar empresa captada', nombre: e.nombre_comercial,
+    texto: 'Con ella se van sus retos en borrador.' + (e.estado === 'validada' ? ' La empresa ya creada en Base de datos no se toca.' : ''),
+    borrar: () => eliminarEmpresaCaptada(e.id) }
+}
+function pedirBorrarReto(b) {
+  aBorrar.value = { titulo: 'Borrar reto en borrador', nombre: b.reto.titulo, texto: 'No se publicará en ningún centro.', borrar: () => eliminarBorrador(b.uuid) }
+}
+async function confirmarBorrar() {
+  borrando.value = true
+  try {
+    const { data } = await aBorrar.value.borrar()
+    aviso.value = data.message
+    aBorrar.value = null
+    detalle.value = null
+    await cargarTodo()
+    emit('cambio')
+  } catch (e) {
+    error.value = mensajeError(e, 'No se ha podido mover a la papelera.')
+    aBorrar.value = null
+  } finally {
+    borrando.value = false
+  }
+}
 
 async function cambiarEstado(key) {
   estado.value = key
@@ -153,6 +197,22 @@ async function confirmarDescarte() {
   }
 }
 
+// ── Entrevista: lo que contó la empresa ───────────────────────────────────────
+// Respuestas que partieron de una idea de la IA que la empresa confirmó al comercial, y si
+// respondió ella misma el formulario que se le envió por correo.
+const respuestasDe = (e) => PREGUNTAS_DIAGNOSTICO
+  .map(p => ({ campo: p.campo, pregunta: p.pregunta, respuesta: e[COLUMNA_DE[p.campo]], ia: (e.respuestas_ia ?? []).includes(p.campo) }))
+  .filter(r => r.respuesta)
+const resumenEntrevista = (e) => {
+  const n = respuestasDe(e).length
+  if (!n) return ''
+  const partes = [`${n} de ${PREGUNTAS_DIAGNOSTICO.length} preguntas respondidas`]
+  if (e.respuestas_ia?.length) partes.push(`${e.respuestas_ia.length} a partir de ideas de la IA`)
+  if (e.formulario?.respondido_at) partes.push('respondida por la empresa por correo')
+  return partes.join(' · ')
+}
+const empresaEntrevista = ref(null)
+
 // ── Firma (imagen privada, se pide como blob) ─────────────────────────────────
 const firmaUrl     = ref(null)
 const firmaEmpresa = ref(null)
@@ -228,9 +288,10 @@ async function descartar() {
     <article class="card p-4 sm:p-5">
       <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h2 class="font-heading text-lg font-bold">Empresas captadas</h2>
-        <div class="inline-flex w-fit gap-1 rounded-full bg-gray-100 p-1" role="group" aria-label="Qué empresas ver">
+        <!-- En 360px las tres pestañas casi no caben: se estrechan y, si aun así no caben, el carril se desplaza -->
+        <div class="inline-flex w-fit max-w-full gap-1 overflow-x-auto rounded-full bg-gray-100 p-1" role="group" aria-label="Qué empresas ver">
           <button v-for="e in ESTADOS" :key="e.key" type="button" :aria-pressed="estado === e.key" @click="cambiarEstado(e.key)"
-                  class="inline-flex h-9 items-center rounded-full px-4 text-sm font-semibold transition"
+                  class="inline-flex h-9 shrink-0 items-center rounded-full px-2 text-sm font-semibold transition sm:px-4"
                   :class="estado === e.key ? 'bg-white text-azul-noche shadow-sm' : 'text-gray-600 hover:text-azul-noche'">
             {{ e.label }}
           </button>
@@ -278,6 +339,10 @@ async function descartar() {
             </span>
           </div>
 
+          <p v-if="resumenEntrevista(e)" class="text-xs text-texto-secundario">
+            <span class="font-semibold text-azul-noche">Entrevista:</span> {{ resumenEntrevista(e) }}
+          </p>
+
           <p v-if="e.centros?.length" class="text-sm text-texto-secundario">
             <span class="font-semibold text-azul-noche">Centros:</span> {{ e.centros.map(c => c.nombre).join(', ') }}
           </p>
@@ -293,7 +358,9 @@ async function descartar() {
               {{ e.estado === 'validada' ? 'Cambiar centros' : 'Validar y colocar en centros' }}
             </button>
             <button v-if="e.estado === 'pendiente_validacion'" type="button" class="accion-secundaria" @click="abrirDescartar(e)">Descartar</button>
+            <button v-if="respuestasDe(e).length" type="button" class="accion-secundaria" @click="empresaEntrevista = e">Ver entrevista</button>
             <button v-if="e.firma" type="button" class="accion-secundaria" @click="verFirma(e)">Ver firma</button>
+            <button v-if="puedeBorrar" type="button" class="accion-secundaria !text-red-700" @click="pedirBorrarEmpresa(e)">Borrar</button>
           </div>
         </li>
       </ul>
@@ -301,19 +368,33 @@ async function descartar() {
 
     <!-- 2. Retos de comerciales pendientes de validar -->
     <article class="card p-4 sm:p-5">
-      <h2 class="mb-3 font-heading text-lg font-bold">Retos pendientes de validar</h2>
+      <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h2 class="font-heading text-lg font-bold">Retos de la comercial</h2>
+        <div class="inline-flex w-fit max-w-full gap-1 overflow-x-auto rounded-full bg-gray-100 p-1" role="group" aria-label="Qué retos ver">
+          <button v-for="o in [{ v: false, t: 'Por validar' }, { v: true, t: 'En curso' }]" :key="o.t" type="button" :aria-pressed="retosEnCurso === o.v" @click="verRetos(o.v)"
+                  class="inline-flex h-9 shrink-0 items-center rounded-full px-3 text-sm font-semibold transition sm:px-4"
+                  :class="retosEnCurso === o.v ? 'bg-white text-azul-noche shadow-sm' : 'text-gray-600 hover:text-azul-noche'">{{ o.t }}</button>
+        </div>
+      </div>
       <div v-if="cargando && !borradores.length" class="space-y-2"><div v-for="n in 2" :key="n" class="h-16 animate-pulse rounded-xl bg-gray-100" /></div>
-      <p v-else-if="!borradores.length" class="py-8 text-center text-sm text-gray-500">No hay retos de comerciales pendientes.</p>
+      <p v-else-if="!borradores.length" class="py-8 text-center text-sm text-gray-500">
+        {{ retosEnCurso ? 'No hay retos de entrevistas en curso.' : 'No hay retos de comerciales pendientes.' }}
+      </p>
       <ul v-else class="divide-y divide-gray-100">
-        <li v-for="b in borradores" :key="b.uuid">
-          <button type="button" class="flex w-full flex-col gap-1 rounded-xl px-2 py-3 text-left transition hover:bg-gray-50 sm:flex-row sm:items-center sm:gap-3" @click="abrirBorrador(b)">
+        <li v-for="b in borradores" :key="b.uuid" class="flex items-center gap-2">
+          <button type="button" class="flex min-w-0 flex-1 flex-col gap-1 rounded-xl px-2 py-3 text-left transition hover:bg-gray-50 sm:flex-row sm:items-center sm:gap-3" @click="abrirBorrador(b)">
             <span class="min-w-0 flex-1">
               <span class="block break-words text-sm font-bold">{{ b.reto.titulo }}</span>
               <span class="block text-sm text-gray-500">{{ b.captacion?.nombre_comercial }} · {{ b.familia }}</span>
             </span>
-            <span class="w-fit shrink-0 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800">
-              Creado por comercial · pendiente de validar para publicar
+            <!-- Sin shrink-0 y corta: en tablet no debe estrechar el título del reto -->
+            <span class="w-fit rounded-full px-2.5 py-0.5 text-xs font-semibold sm:whitespace-nowrap"
+                  :class="retosEnCurso ? 'bg-gray-100 text-texto-secundario' : 'bg-amber-50 text-amber-800'">
+              {{ retosEnCurso ? 'Entrevista en curso' : 'Pendiente de validar' }}
             </span>
+          </button>
+          <button v-if="puedeBorrar" type="button" class="accion-icono shrink-0 !text-red-700" :aria-label="`Borrar el reto ${b.reto.titulo}`" @click="pedirBorrarReto(b)">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.9 12.1A2 2 0 0116.1 21H7.9a2 2 0 01-2-1.9L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
           </button>
         </li>
       </ul>
@@ -370,6 +451,7 @@ async function descartar() {
           </li>
           <li v-if="!centrosFiltrados.length" class="px-3 py-4 text-sm text-gray-500">No hay centros con ese nombre.</li>
         </ul>
+        <AvisoAccionCritica />
         <div class="fila-pasos">
           <button type="button" class="btn-paso-atras" @click="empresaColocando = null">Cancelar</button>
           <button type="button" class="btn-paso" :disabled="!seleccionCentros.length || guardandoCentros" @click="guardarCentros">
@@ -379,9 +461,11 @@ async function descartar() {
       </div>
     </Modal>
 
+    <MoverPapeleraModal :item="aBorrar" :ocupado="borrando" @cerrar="aBorrar = null" @confirmar="confirmarBorrar" />
+
     <!-- Modal: descartar -->
     <Modal :visible="!!empresaDescartando" max-width="max-w-lg" @cerrar="empresaDescartando = null">
-      <div v-if="empresaDescartando" class="flex flex-col gap-4 p-6 sm:p-8">
+      <div v-if="empresaDescartando" class="flex max-h-[90dvh] min-h-0 flex-col gap-4 overflow-y-auto p-6 sm:p-8">
         <div class="pr-10">
           <h2 class="font-heading text-xl font-bold text-azul-noche">Descartar empresa</h2>
           <p class="mt-1 break-words text-sm text-texto-secundario">«{{ empresaDescartando.nombre_comercial }}» no pasará a Base de datos y sus retos en borrador no se publicarán. Queda registrada en «Descartadas».</p>
@@ -390,10 +474,36 @@ async function descartar() {
           <label for="pcc-motivo" class="label-style">Motivo <span class="normal-case tracking-normal">(opcional)</span></label>
           <textarea id="pcc-motivo" v-model="motivoDescarte" rows="3" maxlength="500" class="input-style" placeholder="Ej.: duplicada de una empresa que ya está en Base de datos" />
         </div>
+        <AvisoAccionCritica />
         <div class="fila-pasos">
           <button type="button" class="btn-paso-atras" @click="empresaDescartando = null">Cancelar</button>
           <button type="button" class="btn-paso" :disabled="descartando" @click="confirmarDescarte">{{ descartando ? 'Descartando…' : 'Descartar' }}</button>
         </div>
+      </div>
+    </Modal>
+
+    <!-- Modal: entrevista (lo que contó la empresa) -->
+    <Modal :visible="!!empresaEntrevista" max-width="max-w-2xl" @cerrar="empresaEntrevista = null">
+      <div v-if="empresaEntrevista" class="flex max-h-[90dvh] min-h-0 flex-col">
+        <div class="border-b border-gray-100 p-6 pr-16 sm:p-8 sm:pr-16">
+          <h2 class="break-words font-heading text-xl font-bold text-azul-noche">Entrevista · {{ empresaEntrevista.nombre_comercial }}</h2>
+          <p class="mt-1 text-sm text-texto-secundario">
+            <template v-if="empresaEntrevista.formulario?.respondido_at">La empresa respondió el formulario por correo el {{ fecha(empresaEntrevista.formulario.respondido_at) }}<template v-if="empresaEntrevista.comercial">; después la completó {{ empresaEntrevista.comercial }}</template>.</template>
+            <template v-else-if="empresaEntrevista.comercial">Entrevista en persona de {{ empresaEntrevista.comercial }}.</template>
+          </p>
+          <p v-if="empresaEntrevista.respuestas_ia?.length" class="mt-2 text-xs text-texto-secundario">
+            Las marcadas con «Idea de la IA» partieron de una sugerencia que la empresa confirmó al comercial: revísalas con más cuidado.
+          </p>
+        </div>
+        <dl class="min-h-0 space-y-4 overflow-y-auto p-6 text-sm sm:p-8">
+          <div v-for="r in respuestasDe(empresaEntrevista)" :key="r.campo">
+            <dt class="font-semibold text-azul-noche">
+              {{ r.pregunta }}
+              <span v-if="r.ia" class="ml-1 inline-block rounded-full bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-800">Idea de la IA</span>
+            </dt>
+            <dd class="mt-1 whitespace-pre-line break-words text-gray-600">{{ r.respuesta }}</dd>
+          </div>
+        </dl>
       </div>
     </Modal>
 
@@ -450,6 +560,7 @@ async function descartar() {
             </p>
           </div>
         </div>
+        <div class="px-4 pt-4 sm:px-8"><AvisoAccionCritica texto="Publicar crea el reto en la biblioteca de cada centro elegido; descartarlo lo deja fuera. Queda en el Historial de Central con tu nombre y la fecha." /></div>
         <div class="fila-pasos border-t border-gray-100 p-4 sm:px-8">
           <button type="button" class="btn-paso-atras" :disabled="publicando" @click="descartar">Descartar</button>
           <button type="button" class="btn-paso" :disabled="publicando || !centrosPublicar.length" @click="publicar">

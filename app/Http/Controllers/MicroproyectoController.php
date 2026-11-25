@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\StoreMicroproyectoRequest;
 use App\Http\Requests\UpdateMicroproyectoRequest;
+use App\Http\Requests\ValidarDocenteRequest;
 use App\Http\Requests\ValidarPropuestaEmpresaRequest;
 use App\Http\Requests\SugerirRaCeRequest;
 use App\Http\Requests\SugerirKpisRequest;
@@ -27,13 +29,22 @@ class MicroproyectoController extends Controller
         $user  = $request->user();
         // withMin precarga el id del primer encuentro de cada proyecto en la misma consulta
         // (antes formatProyecto lanzaba una consulta por proyecto: N+1).
-        $query = Microproyecto::with(['empresa', 'centroEducativo', 'familia', 'cicloFormativo', 'microreto', 'imagenPortada'])
+        $query = Microproyecto::with(['empresa', 'centroEducativo', 'familia', 'cicloFormativo', 'microreto.solicitudReto', 'imagenPortada', 'origen:id,uuid,titulo', 'docente:id,name'])
             ->withMin('encuentros', 'id')
             ->withMin('encuentros', 'fecha')
             ->orderByDesc('updated_at');
 
+        // Propuestas del taller por defecto; ?etapa=plan para la biblioteca de planes de proyecto
+        $query->where('etapa', $request->query('etapa') === Microproyecto::ETAPA_PLAN
+            ? Microproyecto::ETAPA_PLAN : Microproyecto::ETAPA_TALLER);
+
         if ($user->isSuperAdmin()) {
             // sin filtro
+        } elseif ($user->trabajaEnPracticas()) {
+            // Gestión de prácticas: todos los planes; las propuestas del taller no se listan
+            if ($request->query('etapa') !== Microproyecto::ETAPA_PLAN) {
+                $query->whereRaw('1 = 0');
+            }
         } elseif ($user->isAdmin()) {
             $query->where('centro_id', $user->centro_educativo_id);
         } else {
@@ -49,17 +60,9 @@ class MicroproyectoController extends Controller
         return response()->json($proyectos);
     }
 
-    public function store(Request $request)
+    public function store(StoreMicroproyectoRequest $request)
     {
-        $data = $request->validate([
-            'titulo'       => 'required|string|max:255',
-            'microreto_id' => 'required|exists:microretos,id',
-            'empresa_id'   => 'nullable|exists:empresas,id',
-            'centro_id'    => 'nullable|exists:centro_educativo,id',
-            'familia_id'   => 'nullable|exists:familias,id',
-            'ciclo_id'     => 'nullable|exists:ciclos_formativos,id',
-            'curso'        => 'nullable|string',
-        ]);
+        $data = $request->validated();
 
         if (!$request->user()->isSuperAdmin()) {
             $data['centro_id'] = $request->user()->centro_educativo_id;
@@ -91,12 +94,18 @@ class MicroproyectoController extends Controller
 
         $data = $request->validated();
 
+        // Quien colabora recibe datos_empresa sin el contacto: al guardar, se conserva el que había
+        if (isset($data['datos_empresa']) && is_array($data['datos_empresa']) && !$this->veContactoEmpresa($proyecto)) {
+            $data['datos_empresa'] = array_merge($data['datos_empresa'],
+                array_intersect_key($proyecto->datos_empresa ?? [], array_flip(self::CONTACTO_EMPRESA)));
+        }
+
         // Un proyecto sin reto vinculado no puede avanzar más allá del paso 1 del
         // wizard (el reto es la fuente de contexto real de toda la propuesta).
         $pasoDestino = $data['paso_actual'] ?? $proyecto->paso_actual;
         if (!$proyecto->microreto_id && $pasoDestino > 1) {
             return response()->json([
-                'message' => 'Este proyecto no tiene un reto vinculado. Vincula uno antes de continuar.',
+                'message' => 'Este reto ajustado no tiene un reto de origen vinculado. Vincula uno antes de continuar.',
             ], 422);
         }
 
@@ -132,7 +141,9 @@ class MicroproyectoController extends Controller
                     $data['empresa_validado']   = false;
                     $data['docente_validado']   = false;
                     $data['validacion_empresa'] = null;
-                    if (!array_key_exists('estado', $data)) {
+                    // El asistente reenvía el estado actual ('validado'): sin validación docente
+                    // la propuesta no puede seguir validada.
+                    if (!array_key_exists('estado', $data) || $data['estado'] === 'validado') {
                         $data['estado'] = 'propuesta';
                     }
                     break;
@@ -177,7 +188,7 @@ class MicroproyectoController extends Controller
         $this->authorize('publicarEscaparate', $proyecto);
 
         if ($proyecto->estado !== 'completado' && !$proyecto->visible_publico) {
-            return response()->json(['error' => 'Solo se puede publicar un proyecto ya completado.'], 422);
+            return response()->json(['error' => 'Solo se puede publicar un reto ajustado ya completado.'], 422);
         }
 
         $proyecto->visible_publico = !$proyecto->visible_publico;
@@ -249,8 +260,10 @@ class MicroproyectoController extends Controller
 
         $data = $request->validated();
 
+        // Validan la propuesta el docente o la empresa: cualquiera de las dos la lleva a
+        // 'validado' (y al aula). «No validar aún» solo la devuelve a 'propuesta' si el docente
+        // tampoco la ha validado.
         if ($data['decision'] === 'validar') {
-            // La empresa valida: guardar respuestas, marcar validado, avanzar estado
             $proyecto->update([
                 'estado'                => 'validado',
                 'validacion_empresa'    => ['respuestas' => $data['respuestas'], 'comentarios' => $data['comentarios'] ?? null],
@@ -258,9 +271,8 @@ class MicroproyectoController extends Controller
                 'empresa_no_valida_aun' => false,
             ]);
         } else {
-            // La empresa responde "no validar aún": guardar respuestas, mantener en propuesta
             $proyecto->update([
-                'estado'                => 'propuesta',
+                'estado'                => $proyecto->docente_validado ? 'validado' : 'propuesta',
                 'validacion_empresa'    => ['respuestas' => $data['respuestas'], 'comentarios' => $data['comentarios'] ?? null],
                 'empresa_validado'      => false,
                 'empresa_no_valida_aun' => true,
@@ -274,31 +286,31 @@ class MicroproyectoController extends Controller
 
     // --- Validación docente ---
 
-    public function validarDocente(Request $request, $uuid)
+    public function validarDocente(ValidarDocenteRequest $request, $uuid)
     {
         $proyecto = Microproyecto::where('uuid', $uuid)->firstOrFail();
 
         $this->authorize('update', $proyecto);
 
-        if (!in_array($proyecto->estado, ['propuesta', 'validado'])) {
-            return response()->json(['error' => 'Solo se puede validar un proyecto en estado propuesta o validado'], 422);
+        // Desde el borrador también (2026-11-23): validar = «lo he revisado y lo quiero trabajar».
+        // Ya no hay paso intermedio de envío a la empresa.
+        if (!in_array($proyecto->estado, ['en_edicion', 'propuesta', 'validado'], true)) {
+            return response()->json(['error' => 'Solo se puede validar un reto ajustado en edición, sin validar o ya validado'], 422);
         }
 
-        $data = $request->validate([
-            'decision' => 'required|in:validar,desvalidar',
-        ]);
+        $data = $request->validated();
 
+        // La empresa ya no valida al inicio, pero las validadas antes por ella lo conservan: al
+        // desvalidar, sigue validada si la empresa la validó; si no, queda «sin validar».
         if ($data['decision'] === 'validar') {
             $proyecto->update([
                 'docente_validado' => true,
                 'estado'           => 'validado',
             ]);
         } else {
-            // Desvalidar docente: si empresa también validó, mantener 'validado'; si no, volver a 'propuesta'
-            $nuevoEstado = $proyecto->empresa_validado ? 'validado' : 'propuesta';
             $proyecto->update([
                 'docente_validado' => false,
-                'estado'           => $nuevoEstado,
+                'estado'           => $proyecto->empresa_validado ? 'validado' : 'propuesta',
             ]);
         }
 
@@ -564,23 +576,55 @@ class MicroproyectoController extends Controller
 
     // --- Helper ---
 
+    // Contacto de la empresa en datos_empresa: solo para quien creó el reto ajustado, el admin de su
+    // centro, Gestión de prácticas y el superadmin; a un docente invitado a colaborar no le llega
+    private const CONTACTO_EMPRESA = ['cif', 'persona_contacto', 'email', 'telefono', 'web'];
+
+    private function veContactoEmpresa(Microproyecto $p): bool
+    {
+        $user = auth()->user();
+
+        return $user !== null && ($p->user_id === $user->id || $user->isSuperAdmin() || $user->isAdmin() || $user->trabajaEnPracticas());
+    }
+
+    private function datosEmpresaVisibles(Microproyecto $p): ?array
+    {
+        $datos = $p->datos_empresa;
+        if (!is_array($datos) || $this->veContactoEmpresa($p)) return $datos;
+
+        return array_diff_key($datos, array_flip(self::CONTACTO_EMPRESA));
+    }
+
     private function formatProyecto(Microproyecto $p): array
     {
         return [
             'id'               => $p->id,
             'uuid'             => $p->uuid,
+            'etapa'            => $p->etapa ?? Microproyecto::ETAPA_TALLER,
+            // Plan de proyecto: propuesta de la que sale y datos propios de las prácticas
+            'origen'           => $p->origen_id ? ['uuid' => $p->origen?->uuid, 'titulo' => $p->origen?->titulo] : null,
+            'horas_estimadas'  => $p->horas_estimadas,
+            // Reto de una solicitud de docente: la sesión que propuso, como sugerencia al crear el encuentro
+            'sesion_sugerida'  => ($solicitud = $p->microreto?->solicitudReto)?->sesion_fecha
+                ? app(\App\Services\SolicitudRetoService::class)->sesion($solicitud) : null,
+            'expectativas_empresa' => $p->expectativas_empresa,
             'titulo'           => $p->titulo,
             'curso'            => $p->curso,
             'estado'           => $p->estado,
+            // Filtro «De quién» de Retos ajustados: los míos frente a los compartidos o del centro
+            'es_mio'           => $esMio = ($p->user_id !== null && $p->user_id === auth()->id()),
+            // De quién es, solo si no es tuyo (compartido contigo o de tu centro)
+            'docente_nombre'   => $esMio ? null : $p->docente?->name,
             'visible_publico'  => (bool) $p->visible_publico,
             'paso_actual'      => $p->paso_actual,
             'empresa_validado'      => $p->empresa_validado,
             'empresa_no_valida_aun' => $p->empresa_no_valida_aun,
             'enviado_a_empresa_mail'=> $p->enviado_a_empresa_mail,
             'docente_validado'      => $p->docente_validado,
-            'token_empresa'         => $p->token_empresa,
+            // token_empresa no se devuelve: es la llave del enlace de la empresa y el frontend no la usa
             'empresa_id'       => $p->empresa_id,
             'empresa_nombre'   => $p->empresa?->nombre_comercial,
+            'empresa_sector'   => $p->empresa?->sector,   // filtro Sector de las bibliotecas
             'centro_id'        => $p->centro_id,
             'centro_nombre'    => $p->centroEducativo?->nombre,
             'ciclo_id'         => $p->ciclo_id,
@@ -598,7 +642,7 @@ class MicroproyectoController extends Controller
             'encuentro_fecha'  => array_key_exists('encuentros_min_fecha', $p->getAttributes())
                 ? ($p->getAttribute('encuentros_min_fecha') ? substr((string) $p->getAttribute('encuentros_min_fecha'), 0, 10) : null)
                 : (($f = $p->encuentros()->min('fecha')) ? substr((string) $f, 0, 10) : null),
-            'datos_empresa'    => $p->datos_empresa,
+            'datos_empresa'    => $this->datosEmpresaVisibles($p),
             'datos_centro'     => $p->datos_centro,
             'equipo'           => $p->equipo,
             'imagen_portada_url' => $p->imagenPortada?->url,

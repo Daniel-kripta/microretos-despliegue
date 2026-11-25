@@ -156,7 +156,7 @@ const abrir = (card) => {
           <div class="grid items-stretch gap-2"
                :class="bloque.separador
                  ? (bloque.cards.some(c => c.compacta) ? 'sm:grid-cols-[minmax(0,1.6fr)_auto_minmax(0,1fr)]' : 'sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]')
-                 : 'sm:grid-cols-2'">
+                 : (bloque.cards.length > 1 ? 'sm:grid-cols-2' : '')">
             <template v-for="(card, i) in bloque.cards" :key="card.titulo">
               <span v-if="i > 0 && bloque.separador" aria-hidden="true"
                     class="flex items-center justify-center text-xs font-semibold uppercase tracking-widest text-texto-secundario">{{ bloque.separador }}</span>
@@ -195,7 +195,7 @@ const abrir = (card) => {
             </span>
             <div class="min-w-0">
               <h2 id="titulo-flujo" class="card-title">{{ flujo.titulo }}</h2>
-              <p class="mt-0.5 text-sm text-texto-secundario">El recorrido de esta sección, paso a paso.</p>
+              <p class="mt-0.5 text-sm text-texto-secundario">{{ flujo.subtitulo || 'El recorrido de esta sección, paso a paso.' }}</p>
             </div>
           </div>
           <button type="button" class="accion-secundaria self-start sm:self-auto" @click="abrirComoFunciona">

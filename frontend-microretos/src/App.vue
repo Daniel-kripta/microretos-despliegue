@@ -1,4 +1,5 @@
 <script setup>
+import { URL_CENTRAL } from './utils/urlCentral.js'
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { RouterView } from 'vue-router'
@@ -7,7 +8,7 @@ import SidePanel from './components/SidePanel.vue'
 import AppCredit from './components/AppCredit.vue'
 import ComoFuncionaModal from './components/ComoFuncionaModal.vue'
 import LoginModal from './components/LoginModal.vue'
-import { useAuthStore, ROLE_EMPRESA, ROLE_COMERCIAL } from './stores/auth'
+import { useAuthStore, ROLE_EMPRESA, ROLE_COMERCIAL, ROLE_RED_DUALAB, ROLE_GESTION_PRACTICAS, ROLE_ADMIN_CENTRAL_DUALAB } from './stores/auth'
 import { URL_APP_COMERCIAL } from './utils/urlComercial.js'
 import AvisoCaptacionPendiente from './components/AvisoCaptacionPendiente.vue'
 import AvisoSinConexion from './components/AvisoSinConexion.vue'
@@ -40,6 +41,8 @@ watch(() => theme.value.key, (key) => {
 const isPublicRetoRoute = computed(() =>
   route.path.startsWith('/reto/') ||
   route.path.startsWith('/startup/landing/') ||
+  route.path.startsWith('/valoracion/') ||
+  route.path.startsWith('/solicitud-reto/') ||
   route.path.startsWith('/proyecto/equipo/') ||
   // Workspace de un grupo visto por el docente (solo lectura): a pantalla completa como el del
   // alumnado; se abre en otra pestaña y su aviso lleva al Detalle del grupo
@@ -81,6 +84,13 @@ const onLoginSuccess = (data) => {
     authStore.logout().finally(() => window.location.assign(URL_APP_COMERCIAL))
     return
   }
+  // Personal de DuaLab Central (red_dualab, gestion_practicas, admin_central_dualab): su sitio es Central,
+  // con su propia sesión; cada uno a su espacio (admin_central_dualab, que tiene dos, a elegir espacio)
+  if ([ROLE_RED_DUALAB, ROLE_GESTION_PRACTICAS, ROLE_ADMIN_CENTRAL_DUALAB].includes(role)) {
+    const espacio = { [ROLE_RED_DUALAB]: 'red', [ROLE_GESTION_PRACTICAS]: 'practicas' }[role] ?? ''
+    authStore.logout().finally(() => window.location.assign(`${URL_CENTRAL}/${espacio}`))
+    return
+  }
   const destino = destinoTrasLogin.value || rolHome(role)
   destinoTrasLogin.value = null
   router.push(destino).finally(() => triggerWelcome(role, authStore.userName))
@@ -95,7 +105,7 @@ function rolHome(role) {
 const handleTokenExpired = async () => {
   await authStore.logout()
   const currentPath = router.currentRoute.value.fullPath
-  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/')
+  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/') || currentPath.startsWith('/valoracion/')
   if (!isPublic) {
     router.push({ path: '/', query: queryRedirect(currentPath) })
   }
@@ -133,7 +143,7 @@ const handleIdle = async () => {
   showIdleWarning.value = false
   await authStore.logout()
   const currentPath = router.currentRoute.value.fullPath
-  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/')
+  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/') || currentPath.startsWith('/valoracion/')
   if (!isPublic) {
     router.push({ path: '/', query: queryRedirect(currentPath) })
   }
@@ -238,7 +248,13 @@ const extenderDesdeToast = async () => {
   <!-- pb-12: hueco para el pie fijo de AppCredit (fixed bottom-0), que si no tapa el final
        de todas las vistas y parece que el scroll "se queda pillado" sin llegar abajo -->
   <div :class="showSidePanel ? 'lg:pl-72' : ''" class="relative pb-12" style="z-index: 1;">
-    <RouterView />
+    <!-- El generador de retos se queda en memoria al salir (KeepAlive) para no perder el trabajo:
+         al volver pregunta si recuperarlo. La key por usuario evita que otra sesión vea el anterior. -->
+    <RouterView v-slot="{ Component, route: ruta }">
+      <KeepAlive include="GeneradorMicroretos" :max="1">
+        <component :is="Component" :key="ruta.name === 'microretos' ? `generador-${authStore.userId}` : undefined" />
+      </KeepAlive>
+    </RouterView>
   </div>
   <AppCredit />
   <ComoFuncionaModal v-if="authStore.isAuthenticated" />

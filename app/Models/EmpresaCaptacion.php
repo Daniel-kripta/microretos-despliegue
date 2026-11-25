@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
@@ -14,6 +15,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  */
 class EmpresaCaptacion extends Model
 {
+    use SoftDeletes;
+
     protected $table = 'empresa_captaciones';
 
     public const ESTADO_BORRADOR             = 'borrador';
@@ -31,15 +34,31 @@ class EmpresaCaptacion extends Model
         'restricciones', 'lo_que_no_quieren', 'expectativas_alumno', 'notas',
     ];
 
+    // Solo su huella; aun así nunca sale en JSON
+    protected $hidden = ['formulario_token_hash'];
+
     protected $casts = [
         'familias'    => 'array', // [{ nombre, interes }]
         'firmada_at'  => 'datetime',
         'revisada_at' => 'datetime',
+        'formulario_expira_at'     => 'datetime',
+        'formulario_enviado_at'    => 'datetime',
+        'formulario_respondido_at' => 'datetime',
+        'respuestas_ia'            => 'array', // campos del diagnóstico (camelCase) que partieron de una sugerencia de la IA
     ];
 
     public function esBorrador(): bool
     {
         return $this->estado === self::ESTADO_BORRADOR;
+    }
+
+    /** El enlace del formulario público se puede usar: sin firmar, sin caducar y sin enviar aún */
+    public function formularioAbierto(): bool
+    {
+        return $this->esBorrador()
+            && $this->formulario_token_hash !== null
+            && $this->formulario_expira_at?->isFuture()
+            && $this->formulario_respondido_at === null;
     }
 
     /** @return list<string> */

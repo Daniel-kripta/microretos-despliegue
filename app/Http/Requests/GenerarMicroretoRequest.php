@@ -9,8 +9,10 @@ class GenerarMicroretoRequest extends FormRequest
 {
     // Techo pedagógico y de tokens para los RA/CE fijados a mano: un microreto que
     // pretende trabajar decenas de CE pierde coherencia y dispara el tamaño del prompt.
+    // 24 CE: caben 2 RA completos casi siempre (un RA tiene ~7,5 CE de media) y 3 en ~2/3 de
+    // los casos; ~1.000 tokens, menos que el currículo entero que ve la IA en modo automático.
     public const MAX_RA_SELECCIONADOS = 8;
-    public const MAX_CE_SELECCIONADOS = 12;
+    public const MAX_CE_SELECCIONADOS = 24;
 
     protected function prepareForValidation(): void
     {
@@ -46,16 +48,20 @@ class GenerarMicroretoRequest extends FormRequest
             'expectativasAlumno'  => 'sometimes|nullable|string|max:800',
             'consecuencias'       => 'sometimes|nullable|array|max:20',
             'consecuencias.*'     => 'nullable|string|max:300',
-            'ciclo_nombre'      => 'required|string',
+            'ciclo_nombre'      => 'required|string|max:255',
             'ciclo_id'          => 'required|integer|exists:ciclos_formativos,id',
-            'nivelGrupo'        => 'required|string',
+            'nivelGrupo'        => 'required|in:Bajo,Medio,Alto',
             'cursoSeleccionado' => 'required|in:1,2,ambos_cursos',
             'modulo_id'         => 'nullable|array|max:20',
             'modulo_id.*'       => 'integer|distinct|exists:modulos,id',
             'cantidad'          => 'required|integer|min:1|max:5',
-            'familia'           => 'nullable|string',
+            'familia'           => 'nullable|string|max:255',
             // Paso 3, opcional: tipo de propuesta que el docente quiere trabajar con su alumnado.
-            'enfoqueReto'       => 'nullable|string|max:500',
+            'enfoqueReto'       => 'nullable|string|max:1000',
+            // Paso 3, opcionales (los rellena la solicitud de retos del docente): tareas reales que hará el
+            // alumnado en la empresa y entregable que espera el docente. Llegan al prompt como datos.
+            'tareasPracticas'   => 'sometimes|nullable|string|max:1000',
+            'entregableDocente' => 'sometimes|nullable|string|max:800',
             // Interés de la empresa en la familia ajustado solo para estos retos (si no llega, el guardado)
             'interesReto'       => 'sometimes|nullable|string|max:500',
 

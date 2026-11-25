@@ -45,7 +45,7 @@ return [
                 . "5. Legislación aplicable. Estas condiciones se rigen por la legislación española.",
         ],
         'info_rgpd' => [
-            'version' => '0.3-borrador',
+            'version' => '0.4-borrador',
             'titulo'  => 'Información sobre protección de datos',
             'texto'   => "Responsable: [SOCIEDAD TITULAR DE DUALAB, CIF Y DOMICILIO], que opera bajo la marca "
                 . "Grupo Óptima.\n\n"
@@ -56,7 +56,13 @@ return [
                 . "(2) el consentimiento, que puede retirarse en cualquier momento.\n\n"
                 . "Destinatarios: Inicia Lab SL [CIF], para la formación de IniciaLab; los centros "
                 . "educativos participantes, solo los datos de la empresa y del reto; y, si se marca la "
-                . "casilla opcional, Vía Óptima SL [CIF]. No se transfieren datos fuera de la UE.\n\n"
+                . "casilla opcional, Vía Óptima SL [CIF].\n\n"
+                . "Transferencias internacionales: el dictado por voz de la entrevista se transcribe y las "
+                . "sugerencias y retos en borrador se generan con el servicio de inteligencia artificial de "
+                . "OpenAI, en Estados Unidos, como encargado del tratamiento. Esto supone una transferencia "
+                . "internacional de datos, amparada en [GARANTÍA: cláusulas contractuales tipo del contrato "
+                . "de encargo con OpenAI, pendiente de confirmar]. El audio no se conserva una vez "
+                . "transcrito.\n\n"
                 . "Conservación: mientras dure la colaboración y, después, durante los plazos legales. "
                 . "La firma y los consentimientos se guardan como prueba.\n\n"
                 . "Derechos: acceso, rectificación, supresión, oposición, limitación y portabilidad en "
@@ -88,9 +94,10 @@ return [
         'textos' => [
             'info_rgpd_centro' => [
                 // Versión nueva al cambiar el texto: las aceptaciones guardan la versión que se mostró
-                'version' => '0.2-borrador',
+                'version' => '0.3-borrador',
                 'titulo'  => 'Información sobre protección de datos',
-                'texto'   => "Responsable: Grupo Óptima [CIF], que trata estos datos con la finalidad de atender "
+                'texto'   => "Responsable: [SOCIEDAD TITULAR DE DUALAB, CIF Y DOMICILIO], que opera bajo la marca "
+                    . "Grupo Óptima y trata estos datos con la finalidad de atender "
                     . "la solicitud del centro (alta en DuaLab, información o demo) y, si el centro se une, "
                     . "gestionar su participación en el programa.\n\n"
                     . "Base jurídica: la solicitud del propio centro y, después, la relación de colaboración.\n\n"
@@ -104,6 +111,41 @@ return [
                     . "(www.aepd.es).",
             ],
         ],
+    ],
+
+    // Formulario público de la entrevista: el comercial se lo envía por correo a la empresa cuando
+    // no da tiempo a hacerla en persona. Abre la app comercial (ruta /formulario/{token}, sin login).
+    'url_app_comercial' => env('COMERCIAL_URL', env('APP_ENV') === 'production' ? 'https://comercial.dualab.es' : 'http://localhost:5177'),
+    'formulario' => [
+        'dias_validez' => 14,
+        // Lo acepta quien responde el formulario (sin firma: la firma sigue siendo en persona)
+        'privacidad' => [
+            'version' => '0.3-borrador',
+            'titulo'  => 'Información sobre protección de datos',
+            'texto'   => "Responsable: [SOCIEDAD TITULAR DE DUALAB, CIF Y DOMICILIO], que opera bajo la marca "
+                . "Grupo Óptima.\n\n"
+                . "Finalidad: conocer la actividad y las necesidades de la empresa para valorar su "
+                . "participación en el programa DuaLab y diseñar retos formativos para el alumnado de "
+                . "Formación Profesional. No escribas datos personales de clientes ni de empleados.\n\n"
+                . "Base jurídica: el interés de la empresa en participar, que ha pedido esta información "
+                . "a nuestro equipo comercial.\n\n"
+                . "Transferencias internacionales: a partir de las respuestas se generan sugerencias y "
+                . "retos en borrador con el servicio de inteligencia artificial de OpenAI, en Estados "
+                . "Unidos, como encargado del tratamiento. Esto supone una transferencia internacional de "
+                . "datos, amparada en [GARANTÍA: cláusulas contractuales tipo del contrato de encargo con "
+                . "OpenAI, pendiente de confirmar].\n\n"
+                . "Conservación: mientras se valora la colaboración y, si continúa, mientras dure. "
+                . "Si la empresa no sigue adelante, las respuestas se descartan.\n\n"
+                . "Derechos: acceso, rectificación, supresión, oposición, limitación y portabilidad en "
+                . "[EMAIL DE CONTACTO]. Puedes reclamar ante la Agencia Española de Protección de Datos "
+                . "(www.aepd.es).",
+        ],
+    ],
+
+    // IA de la entrevista (OpenAI, services.openai.key): dictado de pago y sugerencias para el comercial
+    'ia' => [
+        'modelo_transcripcion' => env('CAPTACION_MODELO_TRANSCRIPCION', 'gpt-4o-mini-transcribe'),
+        'modelo_sugerencias'   => env('CAPTACION_MODELO_SUGERENCIAS', 'gpt-4o-mini'),
     ],
 
     // Formularios del frontoffice (dualab.es/contacto) que llegan como captaciones: el frontoffice

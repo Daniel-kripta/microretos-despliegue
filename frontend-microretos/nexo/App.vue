@@ -1,10 +1,12 @@
 <!-- Nexo DuaLab: punto de partida del equipo. Una tarjeta por herramienta con su botón de
      entrada; cada herramienta pide su propio inicio de sesión (aquí no hay sesión ni datos). -->
 <script setup>
+import BotonInstalarApp from '../src/components/BotonInstalarApp.vue'
 import {
   AcademicCapIcon, ArrowRightIcon, BriefcaseIcon, GlobeAltIcon, ShieldCheckIcon,
 } from '@heroicons/vue/24/outline'
-import logo from '../src/assets/logo_colores.png'
+// Mismo icono que el favicon (pwa/iconos-herramientas.mjs --barra nexo)
+import logo from './icono-barra.png'
 import AvisoNuevaVersion from '../src/components/AvisoNuevaVersion.vue'
 import { HERRAMIENTAS } from './herramientas.js'
 
@@ -26,8 +28,12 @@ const enLocal = import.meta.env.DEV
 <template>
   <div class="min-h-dvh bg-azul-noche px-4 py-8 sm:px-6 sm:py-12">
     <div class="mx-auto max-w-4xl">
+      <!-- Instalar el Nexo como app (en la cabecera, como en el resto de herramientas) -->
+      <div class="mb-2 flex justify-end">
+        <BotonInstalarApp nombre="Nexo DuaLab" ruta-inicio="/" />
+      </div>
       <header class="flex flex-col items-center text-center text-white">
-        <img :src="logo" alt="" class="h-14 w-auto sm:h-16" />
+        <img :src="logo" alt="" class="h-14 w-14 rounded-[22%] shadow-lg ring-1 ring-white/25 sm:h-16 sm:w-16" />
         <h1 class="mt-4 font-heading text-3xl font-bold sm:text-4xl">
           Nexo <span class="text-administraciones">DuaLab</span>
         </h1>

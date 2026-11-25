@@ -1,8 +1,16 @@
 /* Tipografía de marca — Manual de marca e imagen DUALAB V2.0 (A3PRO
    Marketing, sept. 2026): Montserrat para titulares, Inter para texto de
    lectura e interfaz. Debe ir antes que cualquier otra regla, incluido el
-   @import de Tailwind, o el navegador la ignora. */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@600;700&display=swap');
+   @import de Tailwind, o el navegador la ignora.
+   Servidas desde nuestro dominio (@fontsource), no desde Google Fonts: así no
+   se envía la IP del visitante a Google sin consentimiento (RGPD). Solo el
+   subconjunto latino, que ya incluye tildes y ñ. */
+@import "@fontsource/inter/latin-400.css";
+@import "@fontsource/inter/latin-500.css";
+@import "@fontsource/inter/latin-600.css";
+@import "@fontsource/inter/latin-700.css";
+@import "@fontsource/montserrat/latin-600.css";
+@import "@fontsource/montserrat/latin-700.css";
 @import "tailwindcss";
 
 /* ---------------------------------------------------
@@ -88,17 +96,57 @@
      · rol        → color de marca tal cual: acentos, iconos grandes, fondos suaves (/10)
      · rol-fuerte → variante con contraste ≥ 4,5:1 sobre blanco: fondo de botones con
                     texto blanco, texto y enlaces en el color del rol, foco */
+  /* Espacios de DuaLab Central (central/espacios.js): de la familia de la paleta de marca pero
+     distintos a los colores de colectivo. base = acentos · fuerte = botones/texto (≥ 4,5:1 sobre
+     blanco) · claro = sobre su panel oscuro (≥ 7:1) · panel = fondo del panel lateral */
+  --color-espacio-contacto: #F2665E;
+  --color-espacio-contacto-fuerte: #C2413A;
+  --color-espacio-contacto-claro: #FF9A93;
+  --color-espacio-contacto-panel: #3A1F2B;
+  /* Red DuaLab (con Primer contacto dentro): el coral rojizo de Primer contacto, no el dorado (Cynthia, 18-nov) */
+  --color-espacio-red: #F2665E;
+  --color-espacio-red-fuerte: #C2413A;
+  --color-espacio-red-claro: #FF9A93;
+  --color-espacio-red-panel: #3A1F2B;
+  --color-espacio-practicas: #8E6FD8;
+  --color-espacio-practicas-fuerte: #6B4BB8;
+  --color-espacio-practicas-claro: #BBA6F5;
+  --color-espacio-practicas-panel: #261E3D;
+
   --color-rol: #3072AA;
   --color-rol-fuerte: #3072AA;
+  /* rol-claro → variante legible sobre azul noche (paneles laterales, barra superior) */
+  --color-rol-claro: #6BA4D5;
 }
 
 html[data-rol="administraciones"] {
   --color-rol: #19A7A8;
   --color-rol-fuerte: #0F7C7D;
+  --color-rol-claro: #3FC7C8;
 }
 html[data-rol="empresas"] {
   --color-rol: #509928;
   --color-rol-fuerte: #3D7A1E;
+  --color-rol-claro: #6EC13F;
+}
+/* DuaLab Central pinta cada espacio con su color (central/espacios.js), también el panel lateral */
+html[data-rol="espacio-contacto"] {
+  --color-rol: var(--color-espacio-contacto);
+  --color-rol-fuerte: var(--color-espacio-contacto-fuerte);
+  --color-rol-claro: var(--color-espacio-contacto-claro);
+  --color-panel: var(--color-espacio-contacto-panel);
+}
+html[data-rol="espacio-red"] {
+  --color-rol: var(--color-espacio-red);
+  --color-rol-fuerte: var(--color-espacio-red-fuerte);
+  --color-rol-claro: var(--color-espacio-red-claro);
+  --color-panel: var(--color-espacio-red-panel);
+}
+html[data-rol="espacio-practicas"] {
+  --color-rol: var(--color-espacio-practicas);
+  --color-rol-fuerte: var(--color-espacio-practicas-fuerte);
+  --color-rol-claro: var(--color-espacio-practicas-claro);
+  --color-panel: var(--color-espacio-practicas-panel);
 }
 
 /* ---------------------------------------------------
@@ -236,7 +284,7 @@ input:focus, select:focus, textarea:focus {
 --------------------------------------------------- */
 /* Inputs oscuros sobre fondo claro para alto contraste */
 .input-style {
-  @apply w-full border-2 rounded-2xl p-4 text-sm font-semibold outline-none transition-all shadow-inner disabled:opacity-50;
+  @apply w-full border-2 rounded-2xl p-4 text-base sm:text-sm font-semibold outline-none transition-all shadow-inner disabled:opacity-50;
   background-color: #f6fafc;
   color: #1F2937;
   border-color: var(--color-borde-campo);
@@ -253,3 +301,45 @@ input:focus, select:focus, textarea:focus {
 .label-style {
   @apply text-xs font-bold uppercase tracking-[0.15em] text-gray-500 ml-4 mb-2 block;
 }
+
+/* ── Panel lateral adaptado a la altura de la pantalla (app DuaLab, comercial y Central) ───────────
+   Cada panel lleva .panel-lateral (y .panel-banner* en el banner de marca). En pantallas bajas se
+   compactan las entradas y el banner va encogiendo, para no tener que hacer scroll en el menú.
+   Selectores con `aside` delante: ganan a los estilos scoped de cada panel. */
+@media (max-height: 900px) {
+  aside.panel-lateral .nav-item    { padding-top: 7px; padding-bottom: 7px; }
+  aside.panel-lateral .nav-grupo   { padding-top: 10px; padding-bottom: 4px; }
+  aside.panel-lateral .nav-separador { margin-top: 0.35rem; margin-bottom: 0.35rem; }
+  /* Banner: un poco más bajo, mismo texto y subtítulo (legible) */
+  aside.panel-lateral .panel-banner { height: 6rem; }
+  aside.panel-lateral .panel-banner-logo { height: 4.25rem; }
+  aside.panel-lateral .panel-banner svg { height: 2.5rem; }   /* ondas más bajas: el texto queda sobre fondo liso */
+}
+@media (max-height: 780px) {
+  aside.panel-lateral .nav-item    { padding-top: 5px; padding-bottom: 5px; }
+  aside.panel-lateral .nav-grupo   { padding-top: 8px; padding-bottom: 2px; }
+  aside.panel-lateral .panel-banner { height: 5.25rem; padding-top: 0.6rem; padding-bottom: 0.6rem; }
+  aside.panel-lateral .panel-banner-logo { height: 3.75rem; }
+  aside.panel-lateral .panel-banner svg { height: 1.75rem; }
+}
+@media (max-height: 720px) {
+  aside.panel-lateral .panel-banner { height: 4.75rem; }
+  aside.panel-lateral .nav-grupo   { padding-top: 6px; }
+}
+@media (max-height: 660px) {
+  aside.panel-lateral .panel-banner { display: none; }
+}
+
+/* ── Campos de formulario comunes (etiqueta + campo) ───────────────────────────────────────────────
+   Mismo aspecto que «Crear encuentro» (DashboardDocente.vue); las vistas que los redefinen en su
+   <style scoped> mantienen el suyo. */
+.field-label { display: block; font-size: 0.875rem; font-weight: 600; color: #17283E; margin-bottom: 0.375rem; }
+.field-input {
+  width: 100%; background: #fff; border: 1px solid var(--color-borde-campo); border-radius: 0.75rem;
+  padding: 0.625rem 0.875rem; font-size: 1rem; font-weight: 500; color: #17283E;
+}
+/* 16px en móvil: con menos, Safari de iPhone hace zoom al enfocar el campo */
+@media (min-width: 640px) { .field-input { font-size: 0.875rem; } }
+.field-input:focus { outline: none; border-color: var(--color-rol-fuerte); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-rol-fuerte) 15%, transparent); }
+.field-input::placeholder { color: #6B7280; font-weight: 400; }
+.field-input:disabled { opacity: 0.45; cursor: not-allowed; }

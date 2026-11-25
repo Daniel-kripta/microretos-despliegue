@@ -19,6 +19,11 @@ const StartupDayProyectos = () => import('../views/StartupDayProyectos.vue')
 const StartupDayWizard = () => import('../views/StartupDayWizard.vue')
 const StartupDayDetalle = () => import('../views/StartupDayDetalle.vue')
 const StartupDayLanding = () => import('../views/StartupDayLanding.vue')
+const ValoracionEmpresa = () => import('../views/ValoracionEmpresa.vue')
+const PlanesProyecto = () => import('../views/PlanesProyecto.vue')
+const CrearPlan = () => import('../views/CrearPlan.vue')
+const CronogramaPlan = () => import('../views/CronogramaPlan.vue')
+const AgendaPracticasDocente = () => import('../views/AgendaPracticasDocente.vue')
 const UnirseEquipo = () => import('../views/UnirseEquipo.vue')
 const EquipoWorkspace = () => import('../views/EquipoWorkspace.vue')
 const EmpresasView = () => import('../views/EmpresasView.vue')
@@ -34,7 +39,6 @@ const EntrarWorkspace = () => import('../views/EntrarWorkspace.vue')
 const SeccionHub = () => import('../views/SeccionHub.vue')
 const CalendarioDocente = () => import('../views/CalendarioDocente.vue')
 const NotificacionesDocente = () => import('../views/NotificacionesDocente.vue')
-const PropuestasEmpresas = () => import('../views/PropuestasEmpresas.vue')
 const BibliotecaDiagnosticos = () => import('../views/BibliotecaDiagnosticos.vue')
 const AlumnadoListado = () => import('../views/AlumnadoListado.vue')
 
@@ -122,13 +126,9 @@ const router = createRouter({
       component: PapeleraBaseDatos,
       meta: { requiresAuth: true, roles: [SA] }
     },
-    {
-      // Seguimiento del envío de propuestas
-      path: '/empresas/propuestas',
-      name: 'propuestas-empresas',
-      component: PropuestasEmpresas,
-      meta: { requiresAuth: true, roles: [SA, AD, DO] }
-    },
+    // Antes «Propuestas a empresas» (seguimiento del envío para validar). La empresa ya no valida
+    // al inicio (2026-11-23): los enlaces guardados llevan al hub de Empresas.
+    { path: '/empresas/propuestas', redirect: '/seccion/empresas' },
     {
       path: '/empresas',
       name: 'empresas',
@@ -188,6 +188,12 @@ const router = createRouter({
       name: 'proyectos-terminados',
       redirect: to => ({ name: 'startup-day', query: { ...to.query, ver: 'completados' } })
     },
+    // Plan de proyecto (etapa 2). Específicas antes que la paramétrica. La ficha y la edición del
+    // plan son las de la propuesta (/proyectos/:uuid, /proyectos/:uuid/editar).
+    { path: '/planes',                 name: 'planes',         component: PlanesProyecto, meta: { requiresAuth: true, roles: [SA, AD, DO] } },
+    { path: '/planes/crear',           name: 'planes-crear',   component: CrearPlan,      meta: { requiresAuth: true, roles: [SA, AD, DO] } },
+    { path: '/planes/agenda',          name: 'agenda-practicas', component: AgendaPracticasDocente, meta: { requiresAuth: true, roles: [SA, AD, DO] } },
+    { path: '/planes/:uuid/cronograma', name: 'plan-cronograma', component: CronogramaPlan, meta: { requiresAuth: true, roles: [SA, AD, DO] } },
     {
       path: '/proyectos/crear',
       name: 'startup-day-crear',
@@ -225,6 +231,19 @@ const router = createRouter({
       path: '/startup/landing/:token',
       name: 'startup-day-landing',
       component: StartupDayLanding
+    },
+    {
+      // Vista pública: la empresa valora la propuesta terminada de un encuentro creativo (token que caduca)
+      path: '/valoracion/:token',
+      name: 'valoracion-empresa',
+      component: ValoracionEmpresa
+    },
+    {
+      // Vista pública: el docente cuenta qué quiere trabajar para que DuaLab le prepare los retos
+      // (enlace con token que caduca, enviado desde DuaLab Central); con el aviso, ve sus retos
+      path: '/solicitud-reto/:token([A-Za-z0-9]{64})',
+      name: 'solicitud-reto',
+      component: () => import('../views/SolicitudRetoDocente.vue')
     },
     // ── Compatibilidad: enlaces antiguos con el prefijo /startup-day ──────────
     { path: '/startup-day', redirect: '/proyectos' },

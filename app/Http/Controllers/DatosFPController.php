@@ -55,7 +55,8 @@ class DatosFPController extends Controller
             $query->delCentroDe($user);
         } elseif ($user->isEmpresa()) {
             $query->whereKey($user->empresa_id);
-        } elseif (!$user->isSuperAdmin()) {
+        } elseif (!$user->gestionaTodosLosUsuarios()) {
+            // Ninguna; superadmin y admin_central_dualab las ven todas (en Usuarios asignan empresa a una cuenta)
             $query->whereRaw('0 = 1');
         }
 
@@ -148,19 +149,31 @@ class DatosFPController extends Controller
 
         // Ciclo con módulos y RA/CE: sin ellos el generador no puede completar el reto
         $conDatos = CicloFormativo::conDatosParaRetos()->whereIn('id', $ciclos->pluck('id'))->pluck('id')->flip();
-        $ciclos->each(fn ($c) => $c->setAttribute('con_datos_retos', $conDatos->has($c->id)));
+        // Y en qué cursos: hay ciclos con RA/CE cargados solo en 1º (el generador desactiva el otro)
+        $cursosConDatos = Modulo::whereIn('idcicloformativo', $ciclos->pluck('id'))
+            ->whereHas('ras.criteriosEvaluacion')
+            ->distinct()->get(['idcicloformativo', 'curso'])
+            ->groupBy('idcicloformativo');
+        $ciclos->each(function ($c) use ($conDatos, $cursosConDatos) {
+            $c->setAttribute('con_datos_retos', $conDatos->has($c->id));
+            $c->setAttribute('cursos_con_datos', ($cursosConDatos[$c->id] ?? collect())->pluck('curso')->map(fn ($n) => (int) $n)->sort()->values());
+        });
 
         return response()->json($ciclos);
     }
 
     public function getModulos($idCiclo)
     {
-        return response()->json(
-            Modulo::where('idcicloformativo', $idCiclo)
-                ->orderBy('curso')
-                ->orderBy('nombre')
-                ->get()
-        );
+        $modulos = Modulo::where('idcicloformativo', $idCiclo)
+            ->orderBy('curso')
+            ->orderBy('nombre')
+            ->get();
+
+        // Módulo con RA y CE cargados: los que no tienen no aportan nada al reto
+        $conRaCe = Modulo::whereIn('id', $modulos->pluck('id'))->whereHas('ras.criteriosEvaluacion')->pluck('id')->flip();
+        $modulos->each(fn ($m) => $m->setAttribute('con_ra_ce', $conRaCe->has($m->id)));
+
+        return response()->json($modulos);
     }
 
     public function getRaCe($idModulo)
@@ -197,31 +210,19 @@ class DatosFPController extends Controller
      */
     public function getCentros()
     {
-        $centros = CentroEducativo::orderBy('nombre')->get();
+        // Dos consultas en total (centros y sus ciclos con familia), no una por centro. Misma forma que antes:
+        // ciclos ordenados por familia y nombre, con familia_id y familia_nombre planos.
+        $centros = CentroEducativo::with(['ciclos:ciclos_formativos.id,ciclos_formativos.nombre,ciclos_formativos.familia_id', 'ciclos.familia:id,nombre'])
+            ->orderBy('nombre')->get();
 
-        return response()->json($centros->map(function ($centro) {
-            $ciclos = DB::table('centro_ciclo')
-                ->where('centro_id', $centro->id)
-                ->join('ciclos_formativos', 'ciclos_formativos.id', '=', 'centro_ciclo.ciclo_id')
-                ->leftJoin('familias', 'familias.id', '=', 'ciclos_formativos.familia_id')
-                ->select(
-                    'ciclos_formativos.id',
-                    'ciclos_formativos.nombre',
-                    'familias.id as familia_id',
-                    'familias.nombre as familia_nombre'
-                )
-                ->distinct()
-                ->orderBy('familias.nombre')
-                ->orderBy('ciclos_formativos.nombre')
-                ->get();
-
-            return [
-                'id'     => $centro->id,
-                'nombre' => $centro->nombre,
-                'img'    => $centro->img,
-                'ciclos' => $ciclos,
-            ];
-        }));
+        return response()->json($centros->map(fn ($centro) => [
+            'id'     => $centro->id,
+            'nombre' => $centro->nombre,
+            'img'    => $centro->img,
+            'ciclos' => $centro->ciclos->unique('id')
+                ->map(fn ($c) => ['id' => $c->id, 'nombre' => $c->nombre, 'familia_id' => $c->familia_id, 'familia_nombre' => $c->familia?->nombre])
+                ->sortBy(fn ($c) => \Illuminate\Support\Str::lower(\Illuminate\Support\Str::ascii(($c['familia_nombre'] ?? '') . "\0" . $c['nombre'])))->values(),
+        ]));
     }
 
     /**
@@ -838,7 +839,7 @@ class DatosFPController extends Controller
             return response()->json(['error' => 'Empresa no encontrada'], 404);
         }
 
-        $decision = Gate::inspect('actualizarDiagnostico', $empresa);
+        $decision = Gate::inspect('actualizarInteres', $empresa);
         if ($decision->denied()) {
             Log::warning('Edición de interés de empresa denegada.', [
                 'empresa_id' => $empresa->id,

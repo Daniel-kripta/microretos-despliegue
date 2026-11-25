@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Str;
 
 // Mismas reglas que StoreMicroretoRequest, aplicadas a cada elemento de `microretos`.
 // El saneado (strip_tags) se hace en MicroretoIAController::guardarLote tras validar.
@@ -13,11 +14,27 @@ class StoreMicroretoLoteRequest extends FormRequest
         return $this->user() !== null;
     }
 
+    // `modulo` es solo el texto que se muestra («A y B y C…»): con varios módulos pasa de los 255 de la
+    // columna (Central lo une igual que el generador). Se recorta en lugar de rechazar el reto.
+    protected function prepareForValidation(): void
+    {
+        $retos = $this->input('microretos');
+        if (!is_array($retos)) return;
+        foreach ($retos as $i => $reto) {
+            if (is_array($reto) && is_string($reto['modulo'] ?? null)) {
+                $retos[$i]['modulo'] = Str::limit($reto['modulo'], 254, '…');
+            }
+        }
+        $this->merge(['microretos' => $retos]);
+    }
+
     /** @return array<string, string> */
     public function rules(): array
     {
         return [
             'microretos'                        => 'required|array|max:50',
+            // Retos generados desde una solicitud de docente (solo superadmin, lo comprueba el controller)
+            'solicitud_reto_id'                 => 'sometimes|nullable|integer|exists:solicitudes_reto,id,deleted_at,NULL',
             'microretos.*.demo_id'              => 'nullable|integer|exists:demos,id',
             'microretos.*.empresa_id'           => 'nullable|integer|exists:empresas,id',
             'microretos.*.empresa_nombre'       => 'nullable|string|max:255',

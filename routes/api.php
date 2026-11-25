@@ -17,6 +17,7 @@ use App\Http\Controllers\UploadController;
 use App\Http\Controllers\PapeleraController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\EquipoPublicoController;
+use App\Http\Controllers\FormularioEmpresaController;
 use App\Http\Controllers\EquipoGestionController;
 use App\Http\Controllers\DocenteNotaController;
 use App\Http\Controllers\DocenteTareaController;
@@ -30,6 +31,19 @@ use App\Http\Controllers\ComercialCentroController;
 use App\Http\Controllers\IntegracionFrontofficeController;
 use App\Http\Controllers\ComercialEmpresaController;
 use App\Http\Controllers\CaptacionAdminController;
+use App\Http\Controllers\ValoracionEmpresaController;
+use App\Http\Controllers\ValoracionEmpresaCentralController;
+use App\Http\Controllers\DestacadoCentralController;
+use App\Http\Controllers\PrimerContactoController;
+use App\Http\Controllers\PrimerContactoCorreoController;
+use App\Http\Controllers\PlanProyectoController;
+use App\Http\Controllers\AgendaPracticasController;
+use App\Http\Controllers\RegistroHorasController;
+use App\Http\Controllers\ActividadCentralController;
+use App\Http\Controllers\ConsultaCentralController;
+use App\Http\Controllers\SolicitudRetoController;
+use App\Http\Controllers\SolicitudRetoCorreoController;
+use App\Http\Controllers\SolicitudRetoPublicaController;
 
 /*
 |--------------------------------------------------------------------------
@@ -43,6 +57,26 @@ use App\Http\Controllers\CaptacionAdminController;
 Route::middleware('throttle:publico-lectura')->group(function () {
     Route::get('/familias', [DatosFPController::class, 'getFamilias']);
 });
+
+// Formulario de la entrevista que el comercial envía por correo a la empresa (app comercial,
+// /formulario/{token}): sin sesión, el token es la credencial (FormularioEmpresaService)
+Route::middleware('throttle:formulario-empresa')->prefix('public/formulario-empresa/{token}')
+    ->where(['token' => '[A-Za-z0-9]{64}'])->group(function () {
+        Route::get('/',         [FormularioEmpresaController::class, 'show']);
+        Route::put('/empresa',  [FormularioEmpresaController::class, 'guardarEmpresa']);
+        Route::put('/',         [FormularioEmpresaController::class, 'guardar']);
+        Route::post('/firma',   [FormularioEmpresaController::class, 'firmar'])->middleware('throttle:10,1,formulario-firma');
+    });
+
+// Solicitud de retos que DuaLab envía al docente (app DuaLab, /solicitud-reto/{token}): sin
+// sesión, el token es la credencial (SolicitudRetoService). Con el enlace del aviso, sus retos.
+Route::middleware('throttle:solicitud-reto')->prefix('public/solicitud-reto/{token}')
+    ->where(['token' => '[A-Za-z0-9]{64}'])->group(function () {
+        Route::get('/',        [SolicitudRetoPublicaController::class, 'show']);
+        Route::put('/',        [SolicitudRetoPublicaController::class, 'guardar']);
+        Route::post('/enviar', [SolicitudRetoPublicaController::class, 'enviar'])->middleware('throttle:10,1,solicitud-reto-enviar');
+        Route::get('/retos',   [SolicitudRetoPublicaController::class, 'retos']);
+    });
 
 // Acceso público por token temporal (QR para alumnado — ficha del microreto)
 Route::middleware('throttle:microreto-publico')
@@ -108,6 +142,13 @@ Route::middleware('throttle:workspace-ia-codigo')
 Route::middleware('throttle:startup-landing')->group(function () {
     Route::get('/startup/landing/{token}',          [MicroproyectoController::class, 'showByToken']);
     Route::post('/startup/landing/{token}/validar', [MicroproyectoController::class, 'validarEmpresa']);
+});
+
+// Valoración final de la empresa sobre la propuesta de un encuentro creativo (acceso por token
+// que caduca). Cupo por IP: con uno por token, probar tokens al azar no tendría límite.
+Route::middleware('throttle:valoracion-empresa')->group(function () {
+    Route::get('/valoracion-empresa/{token}',  [ValoracionEmpresaController::class, 'showPublico'])->where('token', '[A-Za-z0-9]{20,64}');
+    Route::post('/valoracion-empresa/{token}', [ValoracionEmpresaController::class, 'responder'])->where('token', '[A-Za-z0-9]{20,64}');
 });
 
 // Datos académicos (ciclos, módulos) — throttle estándar
@@ -182,8 +223,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/perfil/modulos', [ModulosDocenteController::class, 'mios']);
     Route::middleware('throttle:30,1,perfil-modulos')->put('/perfil/modulos', [ModulosDocenteController::class, 'actualizarMios']);
 
-    // Biblioteca de microretos (lectura — todos los roles autenticados)
-    Route::middleware('throttle:60,1,microretos-lectura')->group(function () {
+    // Biblioteca de microretos (lectura). El controlador acota qué ve cada rol (limitarAlcance)
+    Route::middleware(['rol:superadmin,admin,docente,empresa', 'throttle:60,1,microretos-lectura'])->group(function () {
         Route::get('/microretos',      [MicroretoIAController::class, 'index']);
         Route::get('/microretos/{id}', [MicroretoIAController::class, 'show']);
     });
@@ -231,9 +272,12 @@ Route::middleware('auth:sanctum')->group(function () {
     // La edición (PUT) está en el grupo 'docente': la acota EmpresaPolicy::update.
     // El dashboard global (todos los centros) y el borrado son solo superadmin: es catálogo
     // cross-centro, no trabajo del día a día de un centro concreto.
-    Route::get('/empresas',                [DatosFPController::class, 'getEmpresas']);
+    // admin_central_dualab: Central → Usuarios, para asignar empresa a una cuenta
+    Route::get('/empresas',                [DatosFPController::class, 'getEmpresas'])
+        ->middleware('rol:superadmin,admin_central_dualab,admin,docente,empresa');
     // whereNumber: sin él capturaba /empresas/ficticia-ia/familias (registrada más abajo)
-    Route::get('/empresas/{id}/familias',  [DatosFPController::class, 'getFamiliasPorEmpresa'])->whereNumber('id');
+    Route::get('/empresas/{id}/familias',  [DatosFPController::class, 'getFamiliasPorEmpresa'])->whereNumber('id')
+        ->middleware('rol:superadmin,admin,docente,empresa');
     Route::middleware('admin')->group(function () {
         Route::post('/empresas',               [DatosFPController::class, 'guardarEmpresa']);
         Route::patch('/empresas/{id}/estado',  [DatosFPController::class, 'actualizarEstadoEmpresa']);
@@ -310,8 +354,8 @@ Route::middleware('auth:sanctum')->group(function () {
             ->whereNumber('id')
             ->middleware('throttle:30,1,empresa-diagnostico');
 
-        // Interés de la empresa en una familia (paso 3 del Generador): mismas reglas que el
-        // diagnóstico (EmpresaPolicy::actualizarDiagnostico).
+        // Interés de la empresa en una familia (paso 3 del Generador): solo superadmin
+        // (EmpresaPolicy::actualizarInteres).
         Route::patch('/empresas/{id}/interes', [DatosFPController::class, 'actualizarInteresEmpresa'])
             ->whereNumber('id')
             ->middleware('throttle:30,1,empresa-interes');
@@ -338,6 +382,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/encuentros/{id}/reestructurar-equipos', [EncuentroController::class, 'reestructurarEquipos'])->whereNumber('id');
         Route::patch('/encuentros/{id}/miembros/{miembroId}/alias', [EncuentroController::class, 'actualizarAliasMiembro'])->whereNumber('id')->whereNumber('miembroId');
         Route::get('/encuentros/{id}/workspace',           [EncuentroController::class, 'workspace'])->whereNumber('id');
+        // Valoración final de la empresa (P3): el docente solo ve el estado y la respuesta; la envía
+        // DuaLab desde Central (ValoracionEmpresaCentralController)
+        Route::get('/encuentros/{id}/valoracion-empresa',           [ValoracionEmpresaController::class, 'show'])->whereNumber('id');
         // Ruta específica antes de la paramétrica {id} de abajo
         Route::get('/encuentros/{id}/colaboradores/candidatos', [EncuentroColaboradorController::class, 'candidatos'])->whereNumber('id');
         Route::get('/encuentros/{id}/colaboradores',             [EncuentroColaboradorController::class, 'index'])->whereNumber('id');
@@ -370,6 +417,19 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/startup/proyectos/{uuid}/validar-docente',[MicroproyectoController::class, 'validarDocente']);
         Route::patch('/startup/proyectos/{uuid}/visible-publico',[MicroproyectoController::class, 'toggleVisiblePublico']);
         Route::delete('/startup/proyectos/{uuid}',              [MicroproyectoController::class, 'destroy']);
+
+        // Plan de proyecto (etapa 2, P4): crearlo (desde una propuesta o un reto) y su cronograma.
+        // Listado y edición: los de la propuesta (/startup/proyectos?etapa=plan y el asistente).
+        Route::post('/planes',                    [PlanProyectoController::class, 'store']);
+        Route::post('/planes/{uuid}/cronograma',  [PlanProyectoController::class, 'storeCronograma'])->whereUuid('uuid');
+        // Agenda de prácticas: avance de los grupos de cada cronograma (docente: los suyos; superadmin/Central: todos)
+        Route::get('/agenda-practicas',           [AgendaPracticasController::class, 'index'])->middleware('throttle:60,1,agenda-practicas');
+        // Horas de prácticas (A3): las anotan docente y DuaLab; cupo propio para las escrituras
+        Route::get('/agenda-practicas/{id}/horas',    [RegistroHorasController::class, 'index'])->whereNumber('id');
+        Route::middleware('throttle:60,1,registro-horas')->group(function () {
+            Route::post('/agenda-practicas/{id}/horas',   [RegistroHorasController::class, 'store'])->whereNumber('id');
+            Route::delete('/agenda-practicas/horas/{id}', [RegistroHorasController::class, 'destroy'])->whereNumber('id');
+        });
 
         // Taller de Ideas — IA: sugerencia de RA/CE y KPIs
         Route::middleware('throttle:10,1,startup-ia')->group(function () {
@@ -415,7 +475,13 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('/empresas',                [ComercialEmpresaController::class, 'index']);
             Route::get('/empresas/{id}',           [ComercialEmpresaController::class, 'show'])->whereNumber('id');
             Route::get('/empresas/{id}/borradores', [ComercialEmpresaController::class, 'borradores'])->whereNumber('id');
+            Route::get('/papelera',                [ComercialEmpresaController::class, 'papelera']);
         });
+        // A la papelera: pide la contraseña, así que cupo bajo contra fuerza bruta
+        Route::middleware('throttle:5,1,comercial-papelera')
+            ->delete('/empresas/{id}', [ComercialEmpresaController::class, 'destroy'])->whereNumber('id');
+        Route::middleware('throttle:30,1,comercial-escritura')
+            ->patch('/papelera/{id}/restaurar', [ComercialEmpresaController::class, 'restaurar'])->whereNumber('id');
         Route::middleware('throttle:30,1,comercial-escritura')->group(function () {
             Route::post('/empresas',                  [ComercialEmpresaController::class, 'store']);
             Route::put('/empresas/{id}',              [ComercialEmpresaController::class, 'update'])->whereNumber('id');
@@ -424,6 +490,17 @@ Route::middleware('auth:sanctum')->group(function () {
         // Llamada a OpenAI: mismo cupo que la generación del Generador de Retos
         Route::middleware('throttle:5,1,comercial-ia')
             ->post('/empresas/{id}/generar-retos', [ComercialEmpresaController::class, 'generarRetos'])->whereNumber('id');
+        // Ideas de la IA para la entrevista y dictado de pago: cupos propios, no el de generar retos
+        Route::middleware('throttle:10,1,comercial-sugerencias')
+            ->post('/empresas/{id}/sugerencias', [ComercialEmpresaController::class, 'sugerencias'])->whereNumber('id');
+        Route::middleware('throttle:20,1,comercial-dictado')
+            ->post('/transcribir', [ComercialEmpresaController::class, 'transcribir']);
+        // Formulario por correo: cada envío manda un email
+        Route::middleware('throttle:5,1,comercial-formulario')->group(function () {
+            Route::post('/formularios',                [ComercialEmpresaController::class, 'crearFormulario']);
+            Route::post('/empresas/{id}/formulario',   [ComercialEmpresaController::class, 'enviarFormulario'])->whereNumber('id');
+            Route::delete('/empresas/{id}/formulario', [ComercialEmpresaController::class, 'anularFormulario'])->whereNumber('id');
+        });
         Route::middleware('throttle:10,1,comercial-firma')
             ->post('/empresas/{id}/firma', [ComercialEmpresaController::class, 'firmar'])->whereNumber('id');
 
@@ -437,8 +514,88 @@ Route::middleware('auth:sanctum')->group(function () {
             ->post('/centros', [ComercialCentroController::class, 'store']);
     });
 
-    // ── Revisión de lo captado por comerciales (solo superadmin) ─────────────────────
-    Route::middleware(['superadmin', 'throttle:60,1,captacion-admin'])->prefix('captacion')->group(function () {
+    // ── DuaLab Central → Alumnado destacado para prácticas (P3b, solo superadmin) ──────
+    Route::middleware(['practicas', 'throttle:60,1,central-destacados'])->prefix('central/destacados')->group(function () {
+        Route::get('/',                    [DestacadoCentralController::class, 'index']);
+        Route::put('/miembros/{id}',       [DestacadoCentralController::class, 'marcar'])->whereNumber('id');
+    });
+
+    // ── DuaLab Central → Primer contacto: formularios y correo de la web por su API firmada
+    //    (red_dualab, central_dualab y superadmin) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-primer-contacto'])->prefix('central/primer-contacto')->group(function () {
+        Route::get('/formularios',         [PrimerContactoController::class, 'index']);
+        Route::get('/formularios/{id}',    [PrimerContactoController::class, 'show'])->whereNumber('id');
+        Route::patch('/formularios/{id}',  [PrimerContactoController::class, 'update'])->whereNumber('id');
+
+        // Correo de info@ (específicas antes de las paramétricas)
+        Route::post('/correo/enviar',                     [PrimerContactoCorreoController::class, 'enviar'])->middleware('throttle:20,1,central-correo-enviar');
+        Route::post('/correo/envios/{id}/reintentar',     [PrimerContactoCorreoController::class, 'reintentar'])->whereNumber('id');
+        Route::delete('/correo/envios/{id}',              [PrimerContactoCorreoController::class, 'descartar'])->whereNumber('id');
+        // Papelera del correo: la ve y la borra del todo solo el superadmin (como Red DuaLab → Papelera)
+        Route::middleware('superadmin')->group(function () {
+            Route::get('/correo/papelera',                [PrimerContactoCorreoController::class, 'papelera']);
+            Route::delete('/correo/papelera',             [PrimerContactoCorreoController::class, 'vaciarPapelera']);
+            Route::delete('/correo/{id}',                 [PrimerContactoCorreoController::class, 'destroy'])->whereNumber('id');
+        });
+        Route::get('/correo',                             [PrimerContactoCorreoController::class, 'index']);
+        Route::get('/correo/{id}',                        [PrimerContactoCorreoController::class, 'show'])->whereNumber('id');
+        Route::patch('/correo/{id}',                      [PrimerContactoCorreoController::class, 'update'])->whereNumber('id');
+        Route::get('/correo/{correo}/adjuntos/{adjunto}', [PrimerContactoCorreoController::class, 'adjunto'])->whereNumber(['correo', 'adjunto']);
+    });
+
+    // ── DuaLab Central → Historial: qué se hizo, quién y cuándo (superadmin y admin_central_dualab) ──
+    Route::middleware(['admin.central', 'throttle:60,1,central-historial'])->group(function () {
+        Route::get('/central/historial', [ActividadCentralController::class, 'index']);
+        Route::get('/central/historial/envios/{id}', [ActividadCentralController::class, 'envio'])->whereNumber('id');
+    });
+
+    // ── DuaLab Central → Red DuaLab → Empresas y Centros: consulta de solo lectura (editar es de Base de datos) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-consulta'])->prefix('central')->group(function () {
+        Route::get('/empresas', [ConsultaCentralController::class, 'empresas']);
+        Route::get('/centros',  [ConsultaCentralController::class, 'centros']);
+    });
+
+    // ── DuaLab Central → Red DuaLab → Empresas → «Enviar soluciones a las empresas»: DuaLab envía a la
+    //    empresa el enlace para valorar las soluciones de los grupos (red_dualab, central_dualab, superadmin) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-valoraciones'])->prefix('central/valoraciones-empresa')->group(function () {
+        Route::get('/',                 [ValoracionEmpresaCentralController::class, 'index']);
+        Route::post('/{id}',            [ValoracionEmpresaCentralController::class, 'solicitar'])->whereNumber('id');
+        Route::patch('/{id}/enviada',   [ValoracionEmpresaCentralController::class, 'marcarEnviada'])->whereNumber('id');
+        Route::post('/{id}/enviar',     [ValoracionEmpresaCentralController::class, 'enviar'])->whereNumber('id')->middleware('throttle:20,1,central-valoraciones-correo');
+    });
+
+    // ── DuaLab Central → Primer contacto → Solicitudes de retos de docentes (red_dualab, central_dualab
+    //    y superadmin; los datos para el generador, solo superadmin, que es quien genera) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-solicitudes-reto'])->prefix('central/solicitudes-reto')->group(function () {
+        Route::get('/',                [SolicitudRetoController::class, 'index']);
+        // Respuestas de los docentes en info@ (por la referencia del asunto); específica antes de /{id}
+        Route::get('/correos',         [SolicitudRetoCorreoController::class, 'index']);
+        Route::get('/para-generador',  [SolicitudRetoController::class, 'paraGenerador'])->middleware('admin.central');
+        Route::get('/{id}',            [SolicitudRetoController::class, 'show'])->whereNumber('id');
+        Route::get('/{id}/correos',    [SolicitudRetoCorreoController::class, 'deSolicitud'])->whereNumber('id');
+        Route::get('/{id}/retos',      [SolicitudRetoController::class, 'retos'])->whereNumber('id');
+        Route::patch('/{id}',          [SolicitudRetoController::class, 'update'])->whereNumber('id');
+        // Gestión de las peticiones (superadmin y admin_central_dualab): empresa, generar y publicar retos
+        Route::middleware('admin.central')->group(function () {
+            Route::get('/{id}/generador',   [SolicitudRetoController::class, 'generador'])->whereNumber('id');
+            Route::get('/{id}/generacion',  [SolicitudRetoController::class, 'generacion'])->whereNumber('id');
+            Route::get('/{id}/empresas',    [SolicitudRetoController::class, 'empresas'])->whereNumber('id');
+            Route::post('/{id}/publicar',   [SolicitudRetoController::class, 'publicar'])->whereNumber('id');
+            // A la papelera; restaurarla o borrarla del todo es de la Papelera, solo superadmin
+            Route::delete('/{id}',          [SolicitudRetoController::class, 'destroy'])->whereNumber('id');
+        });
+        // Envían correo: cupo propio
+        Route::middleware('throttle:20,1,central-solicitudes-reto-correo')->group(function () {
+            Route::post('/',               [SolicitudRetoController::class, 'store']);
+            Route::post('/{id}/reenviar',  [SolicitudRetoController::class, 'reenviar'])->whereNumber('id');
+            Route::post('/{id}/avisar',    [SolicitudRetoController::class, 'avisar'])->whereNumber('id');
+            // Autorizar a trabajarlos: los publica en el centro del docente (gestión de las peticiones)
+            Route::post('/{id}/autorizar', [SolicitudRetoController::class, 'autorizar'])->whereNumber('id')->middleware('admin.central');
+        });
+    });
+
+    // ── Revisión de lo captado por comerciales (Central → Red DuaLab: red_dualab, central_dualab y superadmin) ──
+    Route::middleware(['red.dualab', 'throttle:60,1,captacion-admin'])->prefix('captacion')->group(function () {
         Route::get('/resumen',                          [CaptacionAdminController::class, 'resumen']);
         Route::get('/empresas',                         [CaptacionAdminController::class, 'empresas']);
         Route::put('/empresas/{id}/validar',            [CaptacionAdminController::class, 'validar'])->whereNumber('id');
@@ -453,10 +610,17 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/borradores/{uuid}/publicar',      [CaptacionAdminController::class, 'publicar'])->whereUuid('uuid');
         Route::delete('/borradores/{uuid}',             [CaptacionAdminController::class, 'descartar'])->whereUuid('uuid');
         Route::get('/firmas/{uuid}/imagen',             [CaptacionAdminController::class, 'imagenFirma'])->whereUuid('uuid');
+        // A la papelera: acción crítica, superadmin y admin_central_dualab
+        Route::middleware('admin.central')->group(function () {
+            Route::delete('/empresas/{id}',             [CaptacionAdminController::class, 'eliminarEmpresa'])->whereNumber('id');
+            Route::delete('/centros/{id}',              [CaptacionAdminController::class, 'eliminarCentro'])->whereNumber('id');
+            Route::delete('/borradores/{uuid}/papelera', [CaptacionAdminController::class, 'eliminarBorrador'])->whereUuid('uuid');
+        });
     });
 
     // ── Gestión de usuarios (solo admin) ─────────────────────────────
-    Route::middleware('admin')->prefix('admin/usuarios')->group(function () {
+    // Superadmin, admin_central_dualab (todas las cuentas menos superadmin) y admin de centro (las de su centro)
+    Route::middleware('usuarios')->prefix('admin/usuarios')->group(function () {
         Route::get('/',                       [AdminUserController::class, 'index']);
         Route::post('/',                      [AdminUserController::class, 'store']);
         Route::get('/papelera',               [AdminUserController::class, 'papelera']);

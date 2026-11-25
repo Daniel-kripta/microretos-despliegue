@@ -3,6 +3,8 @@ import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { versionarIconos } from './pwa/versionarIconos.mjs'
+import { versionarCabeceras } from './pwa/versionarCabeceras.mjs'
 
 // App comercial (comercial.dualab.es): un build aparte que comparte
 // src/ (api.js, servicios, store de auth, estilos, componentes) con la app principal.
@@ -58,23 +60,8 @@ const pwa = () => VitePWA({
     globPatterns: ['**/*.{js,css,html,ico,svg,woff2,webp,png}'],
     navigateFallback: 'index.html',
     navigateFallbackDenylist: [/^\/api\//, /^\/sanctum\//],
+    // Las tipografías van en el build (@fontsource, .woff2): entran en la precaché de arriba
     cleanupOutdatedCaches: true,
-    runtimeCaching: [
-      {
-        urlPattern: ({ url }) => url.origin === 'https://fonts.googleapis.com',
-        handler: 'StaleWhileRevalidate',
-        options: { cacheName: 'google-fonts-css' },
-      },
-      {
-        urlPattern: ({ url }) => url.origin === 'https://fonts.gstatic.com',
-        handler: 'CacheFirst',
-        options: {
-          cacheName: 'google-fonts',
-          expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
-          cacheableResponse: { statuses: [0, 200] },
-        },
-      },
-    ],
   },
 })
 
@@ -87,10 +74,14 @@ export default defineConfig(({ mode }) => {
     // misma carpeta que la app principal
     publicDir: fileURLToPath(new URL('./comercial/public', import.meta.url)),
     envDir: fileURLToPath(new URL('.', import.meta.url)),
+    // Caché propia: si comparten node_modules/.vite, un `vite --force` de otra app borra sus deps
+    cacheDir: fileURLToPath(new URL('./node_modules/.vite-comercial', import.meta.url)),
     plugins: [
       vue(),
       tailwindcss(),
       versionJson(),
+      versionarIconos(),
+      versionarCabeceras(),
       pwa(),
     ],
     define: {

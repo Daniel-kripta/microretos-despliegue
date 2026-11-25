@@ -1,12 +1,16 @@
 <script setup>
 import BotonVolver from '../components/BotonVolver.vue'
+import AvisoAccionCritica from '../components/AvisoAccionCritica.vue'
 import { ref, computed, onMounted } from 'vue'
 import api from '../api.js'
+import { getPapeleraCorreo, borrarCorreo, vaciarPapeleraCorreo, cambiarEstadoCorreo } from '../services/primerContactoService.js'
 
 // ─── Estado ───────────────────────────────────────────────────────────────────
 const cargando    = ref(true)
 const error       = ref('')
-const items       = ref({ empresas: [], microretos: [], ciclos: [], familias: [], centros: [], proyectos: [], sesiones: [] })
+const items       = ref({ empresas: [], microretos: [], ciclos: [], familias: [], centros: [], proyectos: [], sesiones: [], solicitudes: [], captaciones_empresa: [], captaciones_centro: [], retos_borrador: [], correos: [] })
+// Los correos de info@ están en la web (API firmada): si no responde, el resto de la papelera se ve igual
+const errorCorreos = ref('')
 const total       = ref(0)
 const filtroActivo = ref('todos')
 
@@ -28,6 +32,7 @@ const restaurando    = ref(null) // id del item restaurándose
 // ─── Configuración de tipos ───────────────────────────────────────────────────
 const TIPOS = {
   empresas: {
+    grupo: 'datos',
     label: 'Empresa',
     labelPlural: 'Empresas',
     // Nota: color meramente distintivo de esta leyenda de tipos, sin relación con
@@ -39,6 +44,7 @@ const TIPOS = {
     borderColor: 'border-emerald-200',
   },
   microretos: {
+    grupo: 'datos',
     label: 'Reto',
     labelPlural: 'Retos',
     color: '#6366f1',
@@ -47,6 +53,7 @@ const TIPOS = {
     borderColor: 'border-indigo-200',
   },
   ciclos: {
+    grupo: 'datos',
     label: 'Ciclo formativo',
     labelPlural: 'Ciclos formativos',
     color: '#f59e0b',
@@ -55,6 +62,7 @@ const TIPOS = {
     borderColor: 'border-amber-200',
   },
   familias: {
+    grupo: 'datos',
     label: 'Familia profesional',
     labelPlural: 'Familias',
     color: '#4d7c0f',
@@ -63,6 +71,7 @@ const TIPOS = {
     borderColor: 'border-lime-200',
   },
   centros: {
+    grupo: 'datos',
     label: 'Centro educativo',
     labelPlural: 'Centros educativos',
     color: '#3b82f6',
@@ -71,6 +80,7 @@ const TIPOS = {
     borderColor: 'border-blue-200',
   },
   proyectos: {
+    grupo: 'datos',
     label: 'Proyecto',
     labelPlural: 'Proyectos',
     color: '#8b5cf6',
@@ -79,6 +89,7 @@ const TIPOS = {
     borderColor: 'border-violet-200',
   },
   sesiones: {
+    grupo: 'datos',
     label: 'Sesión',
     labelPlural: 'Sesiones',
     color: '#ec4899',
@@ -86,14 +97,67 @@ const TIPOS = {
     textColor: 'text-pink-600',
     borderColor: 'border-pink-200',
   },
+  solicitudes: {
+    grupo: 'red',
+    label: 'Solicitud de retos',
+    labelPlural: 'Solicitudes de retos',
+    color: '#0d9488',
+    bgLight: 'bg-teal-50',
+    textColor: 'text-teal-700',
+    borderColor: 'border-teal-200',
+  },
+  // Central → Captaciones (una empresa captada con firma no se puede borrar del todo: evidencia legal)
+  captaciones_empresa: {
+    grupo: 'red',
+    label: 'Empresa captada',
+    labelPlural: 'Empresas captadas',
+    color: '#d97706',
+    bgLight: 'bg-amber-50',
+    textColor: 'text-amber-700',
+    borderColor: 'border-amber-200',
+  },
+  captaciones_centro: {
+    grupo: 'red',
+    label: 'Centro captado',
+    labelPlural: 'Centros captados',
+    color: '#ea580c',
+    bgLight: 'bg-orange-50',
+    textColor: 'text-orange-700',
+    borderColor: 'border-orange-200',
+  },
+  retos_borrador: {
+    grupo: 'red',
+    label: 'Reto en borrador',
+    labelPlural: 'Retos en borrador',
+    color: '#ca8a04',
+    bgLight: 'bg-yellow-50',
+    textColor: 'text-yellow-700',
+    borderColor: 'border-yellow-200',
+  },
+  // Correo de info@ en la papelera: solo la copia de la web; el original sigue en el webmail
+  correos: {
+    grupo: 'red',
+    label: 'Correo de info@',
+    labelPlural: 'Correos de info@',
+    color: '#0369a1',
+    bgLight: 'bg-sky-50',
+    textColor: 'text-sky-700',
+    borderColor: 'border-sky-200',
+  },
 }
+
+// Filtros separados por origen: lo que se borra en Red DuaLab y lo de Base de datos
+const GRUPOS = [
+  { clave: 'red', titulo: 'Red DuaLab' },
+  { clave: 'datos', titulo: 'Base de datos' },
+].map(g => ({ ...g, tipos: Object.entries(TIPOS).filter(([, c]) => c.grupo === g.clave).map(([t]) => t) }))
 
 // ─── Computed ─────────────────────────────────────────────────────────────────
 const itemsFiltrados = computed(() => {
   if (filtroActivo.value === 'todos') {
     return Object.entries(items.value)
       .flatMap(([tipo, lista]) => lista)
-      .sort((a, b) => new Date(b.deleted_at) - new Date(a.deleted_at))
+      .sort((a, b) => new Date(b.deleted_at || 0) - new Date(a.deleted_at || 0))
   }
   return items.value[filtroActivo.value] ?? []
 })
@@ -109,9 +173,9 @@ async function cargarPapelera() {
   cargando.value = true
   error.value = ''
   try {
-    const res = await api.get('/papelera')
-    items.value = { ...items.value, ...res.data.items }
-    total.value = res.data.total
+    const [res, correos] = await Promise.all([api.get('/papelera'), cargarCorreos()])
+    items.value = { ...items.value, ...res.data.items, correos }
+    total.value = res.data.total + correos.length
   } catch (e) {
     error.value = 'No se pudo cargar la papelera. Comprueba la conexión.'
   } finally {
@@ -119,10 +183,25 @@ async function cargarPapelera() {
   }
 }
 
+async function cargarCorreos() {
+  errorCorreos.value = ''
+  try {
+    const { data } = await getPapeleraCorreo()
+    return data.data.map(c => ({
+      id: c.id, tipo: 'correos', deleted_at: null, fecha: c.fecha,
+      nombre: `${c.asunto || '(Sin asunto)'} · ${c.de || 'sin remitente'}`,
+    }))
+  } catch {
+    errorCorreos.value = 'No se han podido cargar los correos de info@ (la web no responde).'
+    return []
+  }
+}
+
 async function restaurar(item) {
   restaurando.value = item.id + item.tipo
   try {
-    await api.patch(`/papelera/${item.tipo}/${item.id}/restaurar`)
+    if (item.tipo === 'correos') await cambiarEstadoCorreo(item.id, 'leido')
+    else await api.patch(`/papelera/${item.tipo}/${item.id}/restaurar`)
     items.value[item.tipo] = items.value[item.tipo].filter(i => i.id !== item.id)
     total.value--
   } catch (e) {
@@ -150,7 +229,8 @@ async function confirmarEliminar() {
   errorEliminar.value = ''
   try {
     const { tipo, id } = itemAEliminar.value
-    await api.delete(`/papelera/${tipo}/${id}`)
+    if (tipo === 'correos') await borrarCorreo(id)
+    else await api.delete(`/papelera/${tipo}/${id}`)
     items.value[tipo] = items.value[tipo].filter(i => i.id !== id)
     total.value--
     cerrarModalEliminar()
@@ -178,8 +258,11 @@ async function confirmarVaciar() {
   vaciando.value = true
   errorVaciar.value = ''
   try {
-    const params = filtroActivo.value !== 'todos' ? `?tipo=${filtroActivo.value}` : ''
-    await api.delete(`/papelera${params}`)
+    const filtro = filtroActivo.value
+    if (filtro === 'todos' || filtro === 'correos') {
+      if (items.value.correos.length) await vaciarPapeleraCorreo()
+    }
+    if (filtro !== 'correos') await api.delete(`/papelera${filtro !== 'todos' ? `?tipo=${filtro}` : ''}`)
     await cargarPapelera()
     cerrarModalVaciar()
   } catch (e) {
@@ -271,20 +354,27 @@ onMounted(cargarPapelera)
             <span class="ml-1 opacity-70">{{ total }}</span>
           </button>
 
-          <button
-            v-for="(cfg, tipo) in TIPOS"
-            :key="tipo"
-            @click="filtroActivo = tipo"
-            class="min-h-9 px-3 py-1.5 rounded-full text-xs font-bold transition-all duration-150"
-            :class="filtroActivo === tipo
-              ? 'text-white'
-              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'"
-            :style="filtroActivo === tipo ? { backgroundColor: cfg.color } : {}"
-          >
-            {{ cfg.labelPlural }}
-            <span class="ml-1 opacity-70">{{ contadorPorTipo[tipo] }}</span>
-          </button>
         </div>
+        <!-- Un bloque por origen, separados por una línea -->
+        <div v-for="g in GRUPOS" :key="g.clave" class="mt-3 border-t border-gray-100 pt-3">
+          <p class="mb-1.5 text-[11px] font-bold uppercase tracking-[0.15em] text-gray-400">{{ g.titulo }}</p>
+          <div class="flex flex-wrap gap-1.5">
+            <button
+              v-for="tipo in g.tipos"
+              :key="tipo"
+              @click="filtroActivo = tipo"
+              class="min-h-9 px-3 py-1.5 rounded-full text-xs font-bold transition-all duration-150"
+              :class="filtroActivo === tipo
+                ? 'text-white'
+                : 'bg-gray-100 text-gray-500 hover:bg-gray-200'"
+              :style="filtroActivo === tipo ? { backgroundColor: TIPOS[tipo].color } : {}"
+            >
+              {{ TIPOS[tipo].labelPlural }}
+              <span class="ml-1 opacity-70">{{ contadorPorTipo[tipo] }}</span>
+            </button>
+          </div>
+        </div>
+        <p v-if="errorCorreos" class="mt-3 text-xs font-semibold text-amber-700" role="status">{{ errorCorreos }}</p>
       </div>
     </div>
 
@@ -391,6 +481,25 @@ onMounted(cargarPapelera)
               <path stroke-linecap="round" stroke-linejoin="round"
                 d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"/>
             </svg>
+            <!-- Solicitud de retos -->
+            <svg v-else-if="item.tipo === 'solicitudes'"
+                 class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M9.66 17h4.68M12 3v1m6.36 1.64l-.7.7M21 12h-1M4 12H3m3.34-5.66l-.7-.7m2.83 9.9a5 5 0 117.07 0l-.55.54A3.37 3.37 0 0014 18.47V19a2 2 0 11-4 0v-.53c0-.9-.36-1.75-.99-2.38l-.54-.55z"/>
+            </svg>
+            <!-- Correo de info@ -->
+            <svg v-else-if="item.tipo === 'correos'"
+                 class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+            </svg>
+            <!-- Captaciones (empresa, centro o reto en borrador) -->
+            <svg v-else-if="item.tipo?.startsWith('captaciones_') || item.tipo === 'retos_borrador'"
+                 class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
             <!-- Sesión -->
             <svg v-else
                  class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
@@ -411,7 +520,10 @@ onMounted(cargarPapelera)
                 {{ TIPOS[item.tipo]?.label }}
               </span>
             </div>
-            <p class="text-xs text-gray-400 mt-0.5">
+            <p v-if="item.tipo === 'correos'" class="text-xs text-gray-400 mt-0.5">
+              Correo del {{ formatearFecha(item.fecha) }} · borrarlo quita la copia de Central, no el original del webmail
+            </p>
+            <p v-else class="text-xs text-gray-400 mt-0.5">
               Eliminado {{ formatearFecha(item.deleted_at) }}
             </p>
           </div>
@@ -504,6 +616,8 @@ onMounted(cargarPapelera)
             {{ errorEliminar }}
           </div>
 
+          <AvisoAccionCritica class="mb-4" texto="Se borra para siempre y no se puede deshacer. Queda en el Historial de Central con tu nombre y la fecha." />
+
           <div class="flex gap-2">
             <button
               @click="cerrarModalEliminar"
@@ -583,6 +697,8 @@ onMounted(cargarPapelera)
           <div v-if="errorVaciar" class="mb-4 px-3 py-2 rounded-xl bg-red-50 border border-red-100 text-red-600 text-xs font-bold">
             {{ errorVaciar }}
           </div>
+
+          <AvisoAccionCritica class="mb-4" texto="Se borra para siempre y no se puede deshacer. Queda en el Historial de Central con tu nombre y la fecha." />
 
           <div class="flex gap-2">
             <button

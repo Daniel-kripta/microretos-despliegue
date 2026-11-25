@@ -15,7 +15,7 @@ function makeRenderer(doc) {
     doc.setFillColor(...GREEN);
     doc.rect(0, 0, PAGE_W, 8, 'F');
     setFont(6, 'bold', [255, 255, 255]);
-    doc.text('DUALAB · FICHA DE MICROPROYECTO', MARGIN, 5.5);
+    doc.text('DUALAB · FICHA DEL RETO AJUSTADO', MARGIN, 5.5);
 
     s.y = 14;
 
@@ -118,7 +118,7 @@ function makeRenderer(doc) {
     // ── FASES DEL PROYECTO ───────────────────────────────────────────────────
     const fases = p.diseno_microproyecto?.fases;
     if (fases?.length) {
-      addSectionTitle('Fases del proyecto', BLUE);
+      addSectionTitle('Fases del trabajo en el aula', BLUE);
       const clases = p.diseno_microproyecto?.clases;
       fases.forEach((f, i) => {
         const nombre     = f.nombre || `Fase ${i + 1}`;
@@ -237,7 +237,7 @@ export function useMicroproyectoPdfExport() {
     const { renderProyecto } = makeRenderer(doc);
     renderProyecto(proyecto);
     addFooters(doc);
-    doc.save(`microproyecto-${slugify(proyecto.titulo)}.pdf`);
+    doc.save(`reto-ajustado-${slugify(proyecto.titulo)}.pdf`);
   };
 
   return { descargarPDF };
