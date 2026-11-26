@@ -5,7 +5,10 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Str;
 use App\Models\Encuentro;
+use App\Support\AliasGenerator;
 use App\Support\CodigoLegible;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Equipo extends Model
 {
@@ -18,8 +21,10 @@ class Equipo extends Model
         'fase_actual'             => 'integer',
         'numero_equipo'           => 'integer',
         'ia_desbloqueada'         => 'boolean',
-        'diagnostico_final'       => 'array',
+        'diagnostico_final'       => 'encrypted:array', // nombra a los integrantes por su alias
         'diagnostico_generado_en' => 'datetime',
+        // El equipo confirmó sus alias en F0: desde ahí no se pueden cambiar (el docente
+        // los usa para su correspondencia alias → alumno/a). Antes bloqueaba el nombre real.
         'nombres_confirmados'     => 'boolean',
     ];
 
@@ -40,39 +45,63 @@ class Equipo extends Model
         return CodigoLegible::generar(fn($codigo) => static::where('codigo_acceso', $codigo)->exists());
     }
 
+    /**
+     * Alias del miembro al que se refiere un texto guardado como responsable de tarea o
+     * autor de reflexión. Sin coincidencia con un miembro del equipo devuelve null: nunca
+     * se expone el texto guardado tal cual (protección de datos).
+     */
+    public function aliasDe(?string $texto): ?string
+    {
+        $buscado = AliasGenerator::normalizar($texto);
+        if ($buscado === '') {
+            return null;
+        }
+
+        $miembro = $this->miembros->first(fn ($m) => AliasGenerator::normalizar($m->alias) === $buscado);
+
+        return $miembro?->alias;
+    }
+
     // ── Relaciones ────────────────────────────────────────────────────────────
 
-    public function microproyecto()
+    /** @return BelongsTo<Microproyecto, $this> */
+    public function microproyecto(): BelongsTo
     {
         return $this->belongsTo(Microproyecto::class);
     }
 
-    public function encuentro()
+    /** @return BelongsTo<Encuentro, $this> */
+    public function encuentro(): BelongsTo
     {
         return $this->belongsTo(Encuentro::class);
     }
 
-    public function miembros()
+    /** @return HasMany<EquipoMiembro, $this> */
+    public function miembros(): HasMany
     {
         return $this->hasMany(EquipoMiembro::class)->orderBy('id');
     }
 
-    public function fases()
+    /** @return HasMany<EquipoFase, $this> */
+    public function fases(): HasMany
     {
         return $this->hasMany(EquipoFase::class)->orderBy('numero_fase');
     }
 
-    public function tareas()
+    /** @return HasMany<EquipoTarea, $this> */
+    public function tareas(): HasMany
     {
         return $this->hasMany(EquipoTarea::class)->orderBy('orden')->orderBy('id');
     }
 
-    public function reflexiones()
+    /** @return HasMany<EquipoReflexion, $this> */
+    public function reflexiones(): HasMany
     {
         return $this->hasMany(EquipoReflexion::class)->orderBy('created_at');
     }
 
-    public function prototipos()
+    /** @return HasMany<EquipoPrototipo, $this> */
+    public function prototipos(): HasMany
     {
         return $this->hasMany(EquipoPrototipo::class)->orderBy('created_at');
     }

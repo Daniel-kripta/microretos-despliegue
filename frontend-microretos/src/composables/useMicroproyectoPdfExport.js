@@ -15,7 +15,7 @@ function makeRenderer(doc) {
     doc.setFillColor(...GREEN);
     doc.rect(0, 0, PAGE_W, 8, 'F');
     setFont(6, 'bold', [255, 255, 255]);
-    doc.text('DUALAB · FICHA DE MICROPROYECTO', MARGIN, 5.5);
+    doc.text('DUALAB · FICHA DEL RETO AJUSTADO', MARGIN, 5.5);
 
     s.y = 14;
 
@@ -69,25 +69,6 @@ function makeRenderer(doc) {
       if (emp.descripcion) addParagraph(emp.descripcion);
     }
 
-    // ── EQUIPO ───────────────────────────────────────────────────────────────
-    if (p.equipo?.alumnos?.length) {
-      addSectionTitle(`Equipo (${p.equipo.alumnos.length} personas)`, DARK);
-      p.equipo.alumnos.forEach(a => {
-        checkBreak(6);
-        const nombre = a.nombre || '';
-        const rol    = a.rol ? ` · ${a.rol}` : '';
-        setFont(8.5, 'normal', LGRAY);
-        doc.text(`• ${nombre}`, MARGIN, s.y);
-        if (a.rol) {
-          const nw = doc.getTextWidth(`• ${nombre}`);
-          setFont(8, 'normal', GRAY);
-          doc.text(rol, MARGIN + nw, s.y);
-        }
-        s.y += 4.8;
-      });
-      s.y += 2;
-    }
-
     // ── EL RETO ──────────────────────────────────────────────────────────────
     const reto = p.diseno_reto;
     if (reto?.descripcion || reto?.pregunta_reto) {
@@ -137,7 +118,7 @@ function makeRenderer(doc) {
     // ── FASES DEL PROYECTO ───────────────────────────────────────────────────
     const fases = p.diseno_microproyecto?.fases;
     if (fases?.length) {
-      addSectionTitle('Fases del proyecto', BLUE);
+      addSectionTitle('Fases del trabajo en el aula', BLUE);
       const clases = p.diseno_microproyecto?.clases;
       fases.forEach((f, i) => {
         const nombre     = f.nombre || `Fase ${i + 1}`;
@@ -256,7 +237,7 @@ export function useMicroproyectoPdfExport() {
     const { renderProyecto } = makeRenderer(doc);
     renderProyecto(proyecto);
     addFooters(doc);
-    doc.save(`microproyecto-${slugify(proyecto.titulo)}.pdf`);
+    doc.save(`reto-ajustado-${slugify(proyecto.titulo)}.pdf`);
   };
 
   return { descargarPDF };

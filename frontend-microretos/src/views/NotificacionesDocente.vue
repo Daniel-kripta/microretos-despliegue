@@ -1,0 +1,187 @@
+<!-- Ruta: /notificaciones (name: notificaciones). Avisos in-app del docente que genera
+     el backend (app/Notifications): empresa responde a una propuesta, proyecto pendiente
+     de validar, equipo completa una fase e invitación a un encuentro de otro docente.
+     Superadmin: además, el apartado «Captación comercial» (?apartado=captacion) con las empresas
+     que han entrevistado los comerciales y sus retos en borrador (PanelCaptacionComercial) y los
+     centros educativos captados (PanelCaptacionCentros). -->
+<script setup>
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import CabeceraSeccion from '../components/CabeceraSeccion.vue'
+import PanelCaptacionComercial from '../components/PanelCaptacionComercial.vue'
+import PanelCaptacionCentros from '../components/PanelCaptacionCentros.vue'
+import { useAuthStore } from '../stores/auth'
+import { getNotificaciones, marcarNotificacionLeida, marcarTodasLeidas } from '../services/notificacionService.js'
+import { useNotificaciones } from '../composables/useNotificaciones.js'
+
+const router = useRouter()
+const route  = useRoute()
+const authStore = useAuthStore()
+const { noLeidas, refrescarNoLeidas } = useNotificaciones()
+
+// Apartado en la URL para poder enlazarlo desde la notificación y el aviso de inicio de sesión
+const verCaptacion = computed(() => authStore.isSuperAdmin && route.query.apartado === 'captacion')
+const irApartado = (captacion) => router.replace({ query: captacion ? { apartado: 'captacion' } : {} })
+
+// Presentación por tipo: icono (trazo SVG), color de marca y filtro al que pertenece
+const TIPOS = {
+  propuesta_validada:        { filtro: 'empresas',   tile: 'bg-empresas',         icon: 'M9 12l2 2 4-4M3 21h18M5 21V7l7-4 7 4v14' },
+  propuesta_valorada:        { filtro: 'empresas',   tile: 'bg-empresas',         icon: 'M11.48 3.5a.56.56 0 011.04 0l2.13 5.11 5.52.44c.5.04.7.66.32.98l-4.2 3.6 1.28 5.38a.56.56 0 01-.84.61L12 16.73l-4.73 2.89a.56.56 0 01-.84-.61l1.28-5.38-4.2-3.6a.56.56 0 01.32-.98l5.52-.44 2.13-5.11z' },
+  propuesta_no_validada_aun: { filtro: 'empresas',   tile: 'bg-alumnos',          icon: 'M12 8v4l2 2M3 21h18M5 21V7l7-4 7 4v14' },
+  pendiente_validar:         { filtro: 'validacion', tile: 'bg-centros',          icon: 'M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11' },
+  equipo_fase:               { filtro: 'equipos',    tile: 'bg-administraciones', icon: 'M3 3v18h18M7 15l4-6 4 4 5-8' },
+  invitacion_encuentro:      { filtro: 'encuentros', tile: 'bg-azul-noche',       icon: 'M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM19 8v6M22 11h-6' },
+  empresa_captada:           { filtro: 'empresas',   tile: 'bg-empresas',         icon: 'M3 21h18M5 21V7l7-4 7 4v14M12 10v6M9 13h6' },
+  centro_captado:            { filtro: 'otros',      tile: 'bg-centros',          icon: 'M22 10L12 5 2 10l10 5 10-5zM6 12v5c3 2 9 2 12 0v-5' },
+}
+const tipoDe = (n) => TIPOS[n.tipo] ?? { filtro: 'otros', tile: 'bg-gray-400', icon: 'M12 8v4M12 16h.01M12 22a10 10 0 100-20 10 10 0 000 20z' }
+
+const FILTROS = [
+  { key: 'todas',      label: 'Todas' },
+  { key: 'no_leidas',  label: 'No leídas' },
+  { key: 'empresas',   label: 'Empresas' },
+  { key: 'validacion', label: 'Validación' },
+  { key: 'equipos',    label: 'Grupos' },
+  { key: 'encuentros', label: 'Encuentros' },
+]
+const filtro = ref('todas')
+
+// ── Carga paginada ("Cargar más") ─────────────────────────────────────────────
+const items      = ref([])
+const pagina     = ref(0)
+const ultima     = ref(1)
+const cargando   = ref(false)
+const error      = ref('')
+
+async function cargar(reiniciar = false) {
+  if (cargando.value) return
+  cargando.value = true
+  error.value = ''
+  try {
+    const siguiente = reiniciar ? 1 : pagina.value + 1
+    const { data } = await getNotificaciones({
+      page: siguiente, per_page: 20,
+      ...(filtro.value === 'no_leidas' ? { solo_no_leidas: 1 } : {}),
+    })
+    items.value  = reiniciar ? data.data : [...items.value, ...data.data]
+    pagina.value = data.meta.current_page
+    ultima.value = data.meta.last_page
+  } catch {
+    error.value = 'No se han podido cargar las notificaciones.'
+  } finally {
+    cargando.value = false
+  }
+}
+onMounted(() => { cargar(true); refrescarNoLeidas({ forzar: true }) })
+// "No leídas" filtra en el servidor; el resto de filtros, sobre lo ya cargado
+watch(filtro, (nuevo, anterior) => { if (nuevo === 'no_leidas' || anterior === 'no_leidas') cargar(true) })
+
+const visibles = computed(() =>
+  ['todas', 'no_leidas'].includes(filtro.value) ? items.value : items.value.filter(n => tipoDe(n).filtro === filtro.value))
+
+// ── Acciones ──────────────────────────────────────────────────────────────────
+async function abrir(n) {
+  if (!n.leida) {
+    n.leida = true
+    noLeidas.value = Math.max(0, noLeidas.value - 1)
+    marcarNotificacionLeida(n.id).catch(() => { /* se reintentará al volver a abrirla */ })
+  }
+  if (n.ruta) router.push(n.ruta)
+}
+async function leerTodas() {
+  try {
+    await marcarTodasLeidas()
+    items.value.forEach(n => { n.leida = true })
+    noLeidas.value = 0
+  } catch {
+    error.value = 'No se han podido marcar como leídas.'
+  }
+}
+
+const haceCuanto = (isoStr) => {
+  const min = Math.floor((Date.now() - new Date(isoStr).getTime()) / 60_000)
+  if (min < 1) return 'Ahora'
+  if (min < 60) return `Hace ${min} min`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `Hace ${h} h`
+  const d = Math.floor(h / 24)
+  if (d < 7) return `Hace ${d} día${d > 1 ? 's' : ''}`
+  return new Date(isoStr).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })
+}
+</script>
+
+<template>
+  <div class="relative min-h-screen pt-16 font-sans text-azul-noche">
+    <div class="relative z-10 mx-auto max-w-[90rem] space-y-4 px-4 pb-10 pt-5 sm:px-6 lg:px-8">
+
+      <CabeceraSeccion data-tour="notif-cabecera" titulo="Notificaciones"
+                       subtitulo="Respuestas de empresas, retos ajustados que esperan tu validación, fases completadas por tus grupos e invitaciones a encuentros.">
+        <button v-if="noLeidas" type="button" data-tour="notif-leer-todas" @click="leerTodas" class="accion-secundaria">
+          <svg aria-hidden="true" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+          Marcar todas como leídas
+        </button>
+      </CabeceraSeccion>
+
+      <!-- Superadmin: avisos / captación comercial (carril y pestañas en píldora) -->
+      <div v-if="authStore.isSuperAdmin" data-tour="notif-apartados" class="inline-flex w-fit gap-1 rounded-full bg-white p-1 shadow-sm ring-1 ring-gray-200/70" role="group" aria-label="Apartado">
+        <button type="button" :aria-pressed="!verCaptacion" @click="irApartado(false)"
+                class="inline-flex h-9 items-center rounded-full px-4 text-sm font-semibold transition"
+                :class="!verCaptacion ? 'bg-centros text-white shadow-sm' : 'text-gray-600 hover:bg-gray-100'">Avisos</button>
+        <button type="button" :aria-pressed="verCaptacion" @click="irApartado(true)"
+                class="inline-flex h-9 items-center rounded-full px-4 text-sm font-semibold transition"
+                :class="verCaptacion ? 'bg-centros text-white shadow-sm' : 'text-gray-600 hover:bg-gray-100'">Captación comercial</button>
+      </div>
+
+      <div v-if="verCaptacion" class="space-y-4">
+        <PanelCaptacionComercial data-tour="notif-captacion-empresas" />
+        <PanelCaptacionCentros data-tour="notif-captacion-centros" />
+      </div>
+
+      <article v-else class="card p-4">
+        <!-- Filtros en píldora (botones con estado pulsado: no son pestañas con panel) -->
+        <div data-tour="notif-filtros" class="mb-3 flex flex-wrap gap-1.5" role="group" aria-label="Filtrar notificaciones">
+          <button v-for="f in FILTROS" :key="f.key" type="button" :aria-pressed="filtro === f.key" @click="filtro = f.key"
+                  class="inline-flex h-9 items-center rounded-full px-4 text-sm font-semibold transition"
+                  :class="filtro === f.key ? 'bg-centros text-white shadow-sm' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'">
+            {{ f.label }}<span v-if="f.key === 'no_leidas' && noLeidas"> · {{ noLeidas }}</span>
+          </button>
+        </div>
+
+        <p v-if="error" class="mb-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{{ error }}</p>
+
+        <div v-if="cargando && !items.length" class="space-y-2"><div v-for="n in 4" :key="n" class="h-16 animate-pulse rounded-xl bg-gray-100" /></div>
+        <div v-else-if="!visibles.length" class="flex flex-col items-center justify-center py-12 text-center text-sm text-gray-500">
+          <svg class="mb-2 h-10 w-10 text-gray-300" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/></svg>
+          {{ filtro === 'no_leidas' ? 'No tienes notificaciones sin leer.' : 'No hay notificaciones por ahora.' }}
+        </div>
+        <ul v-else class="divide-y divide-gray-100">
+          <li v-for="(n, i) in visibles" :key="n.id" :data-tour="i === 0 ? 'notif-aviso' : undefined">
+            <button class="flex w-full items-start gap-3 rounded-xl px-2 py-3 text-left transition hover:bg-gray-50" @click="abrir(n)">
+              <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-white shadow-sm" :class="tipoDe(n).tile">
+                <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path :d="tipoDe(n).icon" /></svg>
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="flex items-center gap-2">
+                  <span class="truncate text-sm" :class="n.leida ? 'font-medium text-gray-700' : 'font-bold'">{{ n.titulo }}</span>
+                  <span v-if="!n.leida" class="h-2 w-2 shrink-0 rounded-full bg-alumnos" aria-label="Sin leer" />
+                </span>
+                <span class="mt-0.5 block text-sm leading-snug text-gray-500">{{ n.mensaje }}</span>
+              </span>
+              <span class="shrink-0 pt-0.5 text-xs text-gray-400">{{ haceCuanto(n.created_at) }}</span>
+            </button>
+          </li>
+        </ul>
+
+        <div v-if="pagina < ultima" data-tour="notif-mas" class="mt-3 flex justify-center">
+          <button type="button" class="accion-secundaria disabled:opacity-50" :disabled="cargando" @click="cargar()">{{ cargando ? 'Cargando…' : 'Cargar más' }}</button>
+        </div>
+      </article>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+@reference "../style.css";
+
+.card { @apply rounded-2xl bg-white shadow-sm ring-1 ring-gray-200/70; }
+</style>

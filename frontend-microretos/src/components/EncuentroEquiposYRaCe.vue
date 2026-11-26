@@ -1,37 +1,58 @@
 <script setup>
+import MarcaDestacado from './MarcaDestacado.vue'
 defineProps({
   numEquipos: { type: Number, default: 0 },
-  alumnadosDelEquipo: { type: Function, required: true }, // (n) => { nombre, alias }[]
+  alumnadosDelEquipo: { type: Function, required: true }, // (n) => { alias }[] — sin nombres reales
   cargandoRaCe: { type: Boolean, default: false },
   raCeBlocks: { type: Array, default: () => [] },
   modulosExpandidos: { type: Set, default: () => new Set() },
+  // Con `enlaces`, cada alias lleva a su ficha en el Listado de alumnado (ver-alumno) y cada
+  // grupo con id real (grupoConWorkspace) ofrece «Ver detalle» (ver-grupo).
+  enlaces: { type: Boolean, default: false },
+  grupoConWorkspace: { type: Function, default: () => false },
 })
-defineEmits(['toggle-modulo'])
+defineEmits(['toggle-modulo', 'ver-alumno', 'ver-grupo'])
 </script>
 
 <template>
   <!-- Equipos y alumnado -->
   <div v-if="numEquipos" class="space-y-2">
     <p class="text-[9px] font-black uppercase tracking-wider text-gray-400">
-      Equipos <span class="text-gray-300">·</span> {{ numEquipos }}
+      Grupos <span class="text-gray-300">·</span> {{ numEquipos }}
     </p>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
       <div v-for="n in numEquipos" :key="n"
            class="p-3 rounded-xl bg-gradient-to-br from-[#F8FAFC] to-white border border-gray-100">
         <div class="flex items-center gap-1.5 mb-2">
-          <span class="w-5 h-5 rounded-full bg-[#00A859]/10 text-[#00A859] font-black text-[9px]
+          <span class="w-5 h-5 rounded-full bg-centros/10 text-centros font-black text-[9px]
                        flex items-center justify-center shrink-0">{{ n }}</span>
-          <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">
-            Equipo {{ n }}
+          <p class="min-w-0 flex-1 text-[9px] font-black uppercase tracking-widest text-gray-400">
+            Grupo {{ n }}
           </p>
+          <button v-if="enlaces && grupoConWorkspace(n)" type="button" @click="$emit('ver-grupo', n)"
+                  :title="`Ver el detalle del grupo ${n}`"
+                  class="inline-flex h-9 shrink-0 items-center gap-1 rounded-full px-2.5 text-xs font-semibold text-rol-fuerte hover:bg-rol/10">
+            Ver detalle
+            <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
+          </button>
         </div>
         <div v-if="alumnadosDelEquipo(n).length" class="flex flex-wrap gap-1">
-          <span v-for="a in alumnadosDelEquipo(n)" :key="a.nombre"
-                class="text-[11px] font-semibold text-[#1F2937] bg-white border border-gray-200
-                       rounded-full px-2 py-0.5">
-            {{ a.nombre }}
-            <span v-if="a.alias" class="font-normal text-gray-400"> · {{ a.alias }}</span>
-          </span>
+          <template v-for="a in alumnadosDelEquipo(n)" :key="a.alias">
+            <!-- Alias → su ficha en el Listado de alumnado (desplegada y resaltada) -->
+            <button v-if="enlaces" type="button" @click="$emit('ver-alumno', a.alias)"
+                    :title="`Ver a ${a.alias} en el listado de alumnado`"
+                    class="inline-flex min-h-9 max-w-full items-center rounded-full border border-gray-200 bg-white px-3 text-left
+                           text-[11px] font-semibold text-[#1F2937] transition-colors hover:border-rol-fuerte/40 hover:bg-rol/5 hover:text-rol-fuerte">
+              <span class="break-words">{{ a.alias }}</span>
+              <MarcaDestacado v-if="a.destacado" class="ml-1" />
+            </button>
+            <span v-else
+                  class="text-[11px] font-semibold text-[#1F2937] bg-white border border-gray-200
+                         rounded-full px-2 py-0.5">
+              {{ a.alias }}
+              <MarcaDestacado v-if="a.destacado" />
+            </span>
+          </template>
         </div>
         <p v-else class="text-[10px] text-gray-300 italic">Sin alumnos</p>
       </div>
@@ -40,7 +61,7 @@ defineEmits(['toggle-modulo'])
 
   <!-- Módulos trabajados con sus RA/CE -->
   <div v-if="cargandoRaCe" class="flex justify-center py-4">
-    <svg class="animate-spin w-4 h-4 text-[#00A859]" viewBox="0 0 24 24">
+    <svg class="animate-spin w-4 h-4 text-centros" viewBox="0 0 24 24">
       <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
     </svg>
   </div>
@@ -60,7 +81,7 @@ defineEmits(['toggle-modulo'])
                   leave-active-class="transition-all duration-150 ease-in" leave-to-class="opacity-0 -translate-y-1">
         <div v-if="modulosExpandidos.has(block.modulo)" class="px-3.5 pb-3.5 space-y-3">
           <div v-for="(item, i) in block.items" :key="i" :class="{ 'pt-3 border-t border-gray-100': i > 0 }">
-            <p class="text-[9px] uppercase font-bold text-[#00A859] mb-1">Resultado de Aprendizaje</p>
+            <p class="text-[9px] uppercase font-bold text-centros mb-1">Resultado de Aprendizaje</p>
             <p class="text-sm font-semibold text-[#1F2937] mb-2">{{ item.ra }}</p>
             <template v-if="item.ce?.length">
               <p class="text-[9px] uppercase font-bold text-gray-400 mb-1">Criterios de Evaluación</p>

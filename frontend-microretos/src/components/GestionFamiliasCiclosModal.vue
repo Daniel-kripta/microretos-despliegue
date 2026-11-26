@@ -3,9 +3,19 @@ import { ref, reactive, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import api from '../api.js'
+import ImportarCurriculoModal from './ImportarCurriculoModal.vue'
+import { useRoleTheme } from '../composables/useRoleTheme.js'
 
 const router    = useRouter()
 const authStore = useAuthStore()
+const { theme } = useRoleTheme()
+
+const paletteExtra = {
+  centros:          { hoverText: 'hover:text-centros', hoverBgSoft: 'hover:bg-centros/20', hoverIconBtn: 'hover:text-centros hover:bg-centros/10 hover:border-centros/30' },
+  empresas:         { hoverText: 'hover:text-empresas', hoverBgSoft: 'hover:bg-empresas/20', hoverIconBtn: 'hover:text-empresas hover:bg-empresas/10 hover:border-empresas/30' },
+  administraciones: { hoverText: 'hover:text-administraciones', hoverBgSoft: 'hover:bg-administraciones/20', hoverIconBtn: 'hover:text-administraciones hover:bg-administraciones/10 hover:border-administraciones/30' },
+  primary:          { hoverText: 'hover:text-primary-700', hoverBgSoft: 'hover:bg-primary-600/20', hoverIconBtn: 'hover:text-primary-700 hover:bg-primary-600/10 hover:border-primary-600/30' },
+}
 
 function handle401(e) {
   if (e.response?.status === 401) {
@@ -41,6 +51,21 @@ const mostrarNuevaFamilia = ref(false)
 const nuevaFamiliaForm    = reactive({ nombre: '', imagen_url: '' })
 const nuevaFamiliaErr     = ref('')
 const nuevaFamiliaLoad    = ref(false)
+
+// ─── Importar módulos, RA y CE de un ciclo (CSV) ─────────────
+const cicloImportando      = ref(null)   // { id, nombre }
+const cicloImportandoFamId = ref(null)
+
+function abrirImportarCurriculo(ciclo, familiaId) {
+  cicloImportando.value      = ciclo
+  cicloImportandoFamId.value = familiaId
+}
+
+async function onCurriculoImportado() {
+  const f = familias.value.find(x => x.id === cicloImportandoFamId.value)
+  if (f) { f.ciclosLoaded = false; await cargarCiclosDeFamilia(f.id) }
+  emit('cambios')
+}
 
 // ─── Edición inline de ciclo ──────────────────────────────────
 const editCicloId      = ref(null)
@@ -347,7 +372,7 @@ async function guardarNuevoCiclo(familiaId) {
                 </svg>
               </div>
               <div class="flex-1 min-w-0">
-                <h2 class="text-xl font-black text-[#1F2937] tracking-tight">Catálogo de Familias y Ciclos</h2>
+                <h2 class="text-xl font-black text-azul-noche tracking-tight">Catálogo de Familias y Ciclos</h2>
                 <p class="text-xs text-gray-400 font-medium mt-0.5">
                   Gestiona las familias profesionales y sus ciclos formativos. Los cambios afectan a todo el sistema.
                 </p>
@@ -361,10 +386,10 @@ async function guardarNuevoCiclo(familiaId) {
 
             <!-- ══ Contadores ══ -->
             <div v-if="!cargando && totalFamilias > 0" class="flex items-center gap-2 mb-5 -mt-2">
-              <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#00A859]/8 border border-[#00A859]/20">
-                <span class="w-1.5 h-1.5 rounded-full bg-[#00A859] shrink-0" />
-                <span class="text-[11px] font-black text-[#00A859]">{{ totalFamilias }}</span>
-                <span class="text-[11px] text-[#00A859]/70">familias</span>
+              <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border" :class="[theme.bg5, theme.border20]">
+                <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="theme.bg" />
+                <span class="text-[11px] font-black" :class="theme.text">{{ totalFamilias }}</span>
+                <span class="text-[11px]" :class="theme.text50">familias</span>
               </div>
               <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-gray-50 border border-gray-200">
                 <span class="w-1.5 h-1.5 rounded-full bg-gray-400 shrink-0" />
@@ -375,7 +400,7 @@ async function guardarNuevoCiclo(familiaId) {
 
             <!-- ══ Cargando ══ -->
             <div v-if="cargando" class="flex items-center justify-center py-16 gap-3 text-gray-400">
-              <div class="w-6 h-6 rounded-full border-2 border-gray-200 border-t-[#00A859] animate-spin"/>
+              <div class="w-6 h-6 rounded-full border-2 border-gray-200 border-t-current animate-spin" :class="theme.text"/>
               <span class="text-sm font-medium">Cargando catálogo...</span>
             </div>
 
@@ -393,10 +418,11 @@ async function guardarNuevoCiclo(familiaId) {
                 <button
                   v-if="!mostrarNuevaFamilia"
                   @click="mostrarNuevaFamilia = true; editFamiliaId = null"
-                  class="flex items-center gap-1.5 px-4 py-2 rounded-xl
-                         bg-[#00A859]/10 border border-[#00A859]/20 text-[#00A859]
-                         hover:bg-[#00A859]/20 font-black text-xs uppercase tracking-widest
+                  class="flex items-center gap-1.5 px-4 py-2 rounded-full
+                         border
+                         font-black text-xs uppercase tracking-widest
                          transition-all duration-150"
+                  :class="[theme.bg5, theme.border20, theme.text, paletteExtra[theme.key].hoverBgSoft]"
                 >
                   <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
@@ -408,10 +434,10 @@ async function guardarNuevoCiclo(familiaId) {
               <!-- Form nueva familia -->
               <Transition name="gfcm-fade">
                 <div v-if="mostrarNuevaFamilia"
-                  class="bg-[#00A859]/5 border border-[#00A859]/20 rounded-2xl p-4 mb-2 space-y-3">
-                  <p class="text-[10px] font-black uppercase tracking-widest text-[#00A859] mb-1">Nueva familia profesional</p>
-                  <div class="flex gap-3">
-                    <div class="flex-1">
+                  class="border rounded-2xl p-4 mb-2 space-y-3" :class="[theme.bg5, theme.border20]">
+                  <p class="text-[10px] font-black uppercase tracking-widest mb-1" :class="theme.text">Nueva familia profesional</p>
+                  <div class="flex flex-wrap gap-3">
+                    <div class="w-full min-w-0 sm:w-auto sm:flex-1">
                       <input
                         v-model="nuevaFamiliaForm.nombre"
                         placeholder="Nombre de la familia (ej: Informática y Comunicaciones)"
@@ -453,7 +479,7 @@ async function guardarNuevoCiclo(familiaId) {
                     @click="toggleFamilia(familia.id)"
                     class="flex-1 flex items-center gap-3 text-left min-w-0"
                   >
-                    <div class="w-2 h-2 rounded-full bg-[#00A859] shrink-0"/>
+                    <div class="w-2 h-2 rounded-full shrink-0" :class="theme.bg"/>
                     <span class="font-bold text-sm text-[#1F2937] truncate">{{ familia.nombre }}</span>
                     <span v-if="familia.ciclosLoaded"
                       class="text-[10px] font-black uppercase tracking-widest
@@ -474,8 +500,8 @@ async function guardarNuevoCiclo(familiaId) {
                   <div class="flex items-center gap-1 shrink-0">
                     <button
                       @click.stop="abrirEditarFamilia(familia)"
-                      :class="editFamiliaId === familia.id ? 'text-[#00A859] bg-[#00A859]/10 border-[#00A859]/30' : 'text-gray-300 hover:text-[#00A859] hover:bg-[#00A859]/10 hover:border-[#00A859]/30'"
-                      class="w-8 h-8 rounded-xl flex items-center justify-center border border-transparent transition-all duration-150"
+                      :class="editFamiliaId === familia.id ? [theme.text, theme.bg5, theme.border20] : ['text-gray-300', paletteExtra[theme.key].hoverIconBtn]"
+                      class="w-9 h-9 rounded-full flex items-center justify-center border border-transparent transition-all duration-150"
                       title="Editar familia"
                     >
                       <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -485,7 +511,7 @@ async function guardarNuevoCiclo(familiaId) {
                     </button>
                     <button
                       @click.stop="pedirEliminarFamilia(familia)"
-                      class="w-8 h-8 rounded-xl flex items-center justify-center border border-transparent
+                      class="w-9 h-9 rounded-full flex items-center justify-center border border-transparent
                              text-gray-300 hover:text-red-500 hover:bg-red-50 hover:border-red-200
                              transition-all duration-150"
                       title="Eliminar familia"
@@ -503,8 +529,8 @@ async function guardarNuevoCiclo(familiaId) {
                   <div v-if="editFamiliaId === familia.id"
                     class="px-4 pb-3 pt-0 border-t border-gray-100 bg-white">
                     <p class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-2 mt-3">Editar familia</p>
-                    <div class="flex gap-3">
-                      <div class="flex-1">
+                    <div class="flex flex-wrap gap-3">
+                      <div class="w-full min-w-0 sm:w-auto sm:flex-1">
                         <input
                           v-model="editFamiliaForm.nombre"
                           placeholder="Nombre"
@@ -531,7 +557,7 @@ async function guardarNuevoCiclo(familiaId) {
 
                     <!-- Cargando ciclos -->
                     <div v-if="!familia.ciclosLoaded" class="flex items-center gap-2 px-5 py-4 text-gray-400 text-xs">
-                      <div class="w-4 h-4 rounded-full border-2 border-gray-200 border-t-[#00A859] animate-spin"/>
+                      <div class="w-4 h-4 rounded-full border-2 border-gray-200 border-t-current animate-spin" :class="theme.text"/>
                       Cargando ciclos...
                     </div>
 
@@ -550,19 +576,40 @@ async function guardarNuevoCiclo(familiaId) {
                       >
                         <!-- Fila ciclo -->
                         <div v-if="editCicloId !== ciclo.id"
-                          class="flex items-center gap-2 pl-8 pr-2 py-2.5 hover:bg-white/70 transition-colors">
-                          <span class="text-[11px] font-semibold text-gray-600 flex-1 truncate">
+                          class="flex items-center gap-1 sm:gap-2 pl-4 sm:pl-8 pr-2 py-1.5 sm:py-2.5 hover:bg-white/70 transition-colors">
+                          <span class="text-[11px] font-semibold text-gray-600 flex-1 min-w-0 line-clamp-2 break-words sm:truncate" :title="ciclo.nombre">
                             {{ ciclo.nombre }}
                           </span>
                           <span v-if="ciclo.siglasGrado"
                             class="text-[10px] font-black bg-[#1F2937]/8 text-gray-500 px-2 py-0.5 rounded-full shrink-0 uppercase">
                             {{ ciclo.siglasGrado }}
                           </span>
+                          <!-- Sin módulos con RA y CE no se pueden generar retos con este ciclo -->
+                          <span v-if="ciclo.con_datos_retos === false"
+                            title="Sin módulos con RA y CE: no se pueden generar retos con este ciclo"
+                            class="text-[10px] font-black bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full shrink-0 uppercase">
+                            <span class="sm:hidden" aria-hidden="true">!</span><span class="sr-only sm:not-sr-only">Sin módulos</span>
+                          </span>
+                          <button
+                            @click="abrirImportarCurriculo(ciclo, familia.id)"
+                            class="w-9 h-9 rounded-full flex items-center justify-center border border-transparent
+                                   text-gray-300
+                                   transition-all duration-150 shrink-0"
+                            :class="[paletteExtra[theme.key].hoverIconBtn, ciclo.con_datos_retos === false ? '!text-amber-500' : '']"
+                            title="Importar módulos, RA y CE (CSV)"
+                            aria-label="Importar módulos, RA y CE"
+                          >
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
+                            </svg>
+                          </button>
                           <button
                             @click="abrirEditarCiclo(ciclo, familia.id)"
-                            class="w-7 h-7 rounded-lg flex items-center justify-center border border-transparent
-                                   text-gray-300 hover:text-[#00A859] hover:bg-[#00A859]/10 hover:border-[#00A859]/30
+                            class="w-9 h-9 rounded-full flex items-center justify-center border border-transparent
+                                   text-gray-300
                                    transition-all duration-150 shrink-0"
+                            :class="paletteExtra[theme.key].hoverIconBtn"
                             title="Editar ciclo"
                           >
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -572,7 +619,7 @@ async function guardarNuevoCiclo(familiaId) {
                           </button>
                           <button
                             @click="pedirEliminarCiclo(ciclo, familia.id)"
-                            class="w-7 h-7 rounded-lg flex items-center justify-center border border-transparent
+                            class="w-9 h-9 rounded-full flex items-center justify-center border border-transparent
                                    text-gray-300 hover:text-red-500 hover:bg-red-50 hover:border-red-200
                                    transition-all duration-150 shrink-0"
                             title="Eliminar ciclo"
@@ -595,7 +642,7 @@ async function guardarNuevoCiclo(familiaId) {
                               @keyup.escape="cancelarEditarCiclo"
                             />
                             <div class="flex gap-2">
-                              <select v-model="editCicloForm.grado" @change="onGradoEditChange" class="gfcm-input flex-1 text-xs">
+                              <select v-model="editCicloForm.grado" @change="onGradoEditChange" class="gfcm-input flex-1 min-w-0 text-xs">
                                 <option value="">Sin grado</option>
                                 <option v-for="g in GRADOS" :key="g.value" :value="g.value">{{ g.value }}</option>
                               </select>
@@ -619,8 +666,8 @@ async function guardarNuevoCiclo(familiaId) {
                       <!-- Form nuevo ciclo -->
                       <Transition name="gfcm-fade">
                         <div v-if="nuevoCicloPorFamiliaId === familia.id"
-                          class="pl-8 pr-3 py-3 bg-[#00A859]/4 border-t border-[#00A859]/10">
-                          <p class="text-[10px] font-black uppercase tracking-widest text-[#00A859] mb-2">Nuevo ciclo</p>
+                          class="pl-8 pr-3 py-3 border-t" :class="[theme.bg5, theme.border15]">
+                          <p class="text-[10px] font-black uppercase tracking-widest mb-2" :class="theme.text">Nuevo ciclo</p>
                           <div class="space-y-2">
                             <input
                               v-model="nuevoCicloForm.nombre"
@@ -629,7 +676,7 @@ async function guardarNuevoCiclo(familiaId) {
                               @keyup.escape="nuevoCicloPorFamiliaId = null"
                             />
                             <div class="flex gap-2">
-                              <select v-model="nuevoCicloForm.grado" @change="onGradoChange" class="gfcm-input flex-1 text-xs">
+                              <select v-model="nuevoCicloForm.grado" @change="onGradoChange" class="gfcm-input flex-1 min-w-0 text-xs">
                                 <option value="">Sin grado</option>
                                 <option v-for="g in GRADOS" :key="g.value" :value="g.value">{{ g.value }}</option>
                               </select>
@@ -655,8 +702,9 @@ async function guardarNuevoCiclo(familiaId) {
                         class="px-5 py-2.5 border-t border-gray-50">
                         <button
                           @click="abrirNuevoCiclo(familia.id)"
-                          class="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest
-                                 text-gray-400 hover:text-[#00A859] transition-colors duration-150"
+                          class="inline-flex min-h-9 items-center gap-1.5 rounded-full text-[10px] font-black uppercase tracking-widest
+                                 text-gray-400 transition-colors duration-150"
+                          :class="paletteExtra[theme.key].hoverText"
                         >
                           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
@@ -686,7 +734,7 @@ async function guardarNuevoCiclo(familiaId) {
                       </svg>
                     </div>
                     <div>
-                      <h3 class="font-black text-base text-[#1F2937]">Eliminar familia</h3>
+                      <h3 class="font-black text-base text-azul-noche">Eliminar familia</h3>
                       <p class="text-xs text-gray-400">Esta acción no se puede deshacer</p>
                     </div>
                   </div>
@@ -722,13 +770,13 @@ async function guardarNuevoCiclo(familiaId) {
                   <div class="flex gap-2">
                     <button
                       @click="confirmElimFamilia = null; confirmNombreFamilia = ''; elimError = ''"
-                      class="flex-1 py-2.5 rounded-xl border border-gray-200 text-sm font-bold text-gray-500 hover:bg-gray-50 transition-all">
+                      class="flex-1 py-2.5 rounded-full border border-gray-200 text-sm font-bold text-gray-500 hover:bg-gray-50 transition-all">
                       Cancelar
                     </button>
                     <button
                       @click="confirmarEliminarFamilia"
                       :disabled="elimLoading || confirmElimFamilia.numCiclos > 0 || confirmNombreFamilia !== confirmElimFamilia.nombre"
-                      class="flex-1 py-2.5 rounded-xl bg-red-500 text-white text-sm font-black hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      class="flex-1 py-2.5 rounded-full bg-red-500 text-white text-sm font-black hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                     >
                       {{ elimLoading ? 'Eliminando...' : 'Eliminar definitivamente' }}
                     </button>
@@ -752,7 +800,7 @@ async function guardarNuevoCiclo(familiaId) {
                       </svg>
                     </div>
                     <div>
-                      <h3 class="font-black text-base text-[#1F2937]">Eliminar ciclo formativo</h3>
+                      <h3 class="font-black text-base text-azul-noche">Eliminar ciclo formativo</h3>
                       <p class="text-xs text-gray-400">Esta acción no se puede deshacer</p>
                     </div>
                   </div>
@@ -782,13 +830,13 @@ async function guardarNuevoCiclo(familiaId) {
                   <div class="flex gap-2">
                     <button
                       @click="confirmElimCiclo = null; confirmNombreCiclo = ''; elimError = ''"
-                      class="flex-1 py-2.5 rounded-xl border border-gray-200 text-sm font-bold text-gray-500 hover:bg-gray-50 transition-all">
+                      class="flex-1 py-2.5 rounded-full border border-gray-200 text-sm font-bold text-gray-500 hover:bg-gray-50 transition-all">
                       Cancelar
                     </button>
                     <button
                       @click="confirmarEliminarCiclo"
                       :disabled="elimLoading || confirmNombreCiclo !== confirmElimCiclo.nombre"
-                      class="flex-1 py-2.5 rounded-xl bg-red-500 text-white text-sm font-black hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                      class="flex-1 py-2.5 rounded-full bg-red-500 text-white text-sm font-black hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
                       {{ elimLoading ? 'Eliminando...' : 'Eliminar definitivamente' }}
                     </button>
@@ -801,6 +849,7 @@ async function guardarNuevoCiclo(familiaId) {
         </Transition>
       </div>
     </Transition>
+    <ImportarCurriculoModal :ciclo="cicloImportando" @cerrar="cicloImportando = null" @importado="onCurriculoImportado" />
   </Teleport>
 </template>
 
@@ -819,12 +868,15 @@ async function guardarNuevoCiclo(familiaId) {
   box-shadow: 0 24px 48px rgba(0,0,0,.14);
   scrollbar-width: thin; scrollbar-color: #e5e7eb transparent;
 }
+@media (max-width: 640px) {
+  .gfcm-card { padding: 1.5rem 1.25rem; }
+}
 .gfcm-card::-webkit-scrollbar       { width: 4px; }
 .gfcm-card::-webkit-scrollbar-thumb { background: #e5e7eb; border-radius: 2px; }
 
 .gfcm-x {
-  flex-shrink: 0; width: 32px; height: 32px;
-  background: #f3f4f6; border: none; border-radius: .5rem; color: #9ca3af;
+  flex-shrink: 0; width: 36px; height: 36px;
+  background: #f3f4f6; border: none; border-radius: 9999px; color: #9ca3af;
   display: flex; align-items: center; justify-content: center;
   cursor: pointer; transition: background .15s, color .15s;
 }
@@ -836,21 +888,21 @@ async function guardarNuevoCiclo(familiaId) {
   outline: none; transition: all .15s; appearance: none;
 }
 .gfcm-input::placeholder { color: #9CA3AF; }
-.gfcm-input:focus { border-color: #00A859; box-shadow: 0 0 0 3px rgba(0,168,89,.1); }
+.gfcm-input:focus { border-color: v-bind('theme.hex'); box-shadow: 0 0 0 3px v-bind('theme.hexSoft'); }
 
 .gfcm-btn-green {
   display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
-  padding: .55rem 1.1rem; background: #00A859; color: #fff;
-  border: none; border-radius: .75rem; font-weight: 900; font-size: .7rem;
+  padding: .55rem 1.1rem; background: v-bind('theme.hex'); color: #fff;
+  border: none; border-radius: 9999px; font-weight: 900; font-size: .7rem;
   letter-spacing: .1em; text-transform: uppercase; cursor: pointer; transition: all .15s;
 }
-.gfcm-btn-green:hover:not(:disabled) { background: #009950; }
+.gfcm-btn-green:hover:not(:disabled) { filter: brightness(0.92); }
 .gfcm-btn-green:disabled { opacity: .5; cursor: not-allowed; }
 
 .gfcm-btn-dark {
   display: inline-flex; align-items: center; justify-content: center; gap: .4rem;
   padding: .55rem 1.1rem; background: #1F2937; color: #fff;
-  border: none; border-radius: .75rem; font-weight: 900; font-size: .7rem;
+  border: none; border-radius: 9999px; font-weight: 900; font-size: .7rem;
   letter-spacing: .1em; text-transform: uppercase; cursor: pointer; transition: all .15s;
 }
 .gfcm-btn-dark:hover:not(:disabled) { background: #374151; }
@@ -859,7 +911,7 @@ async function guardarNuevoCiclo(familiaId) {
 .gfcm-btn-ghost {
   display: inline-flex; align-items: center; justify-content: center;
   padding: .55rem .9rem; background: #fff; color: #6b7280;
-  border: 1.5px solid #e5e7eb; border-radius: .75rem; font-weight: 900; font-size: .7rem;
+  border: 1.5px solid #e5e7eb; border-radius: 9999px; font-weight: 900; font-size: .7rem;
   letter-spacing: .1em; text-transform: uppercase; cursor: pointer; transition: all .15s;
 }
 .gfcm-btn-ghost:hover { border-color: #d1d5db; color: #374151; }

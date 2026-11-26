@@ -1,0 +1,355 @@
+<!-- Contactos → Retos a medida → «Formularios de docentes» (solicitudes de retos): DuaLab envía a un
+     docente el formulario para que pida los retos que quiere trabajar, y aquí se siguen hasta tener
+     retos y encuentro. El enlace sale por correo y además se puede copiar para pasarlo por otro canal.
+     Los correos de los docentes están en el submenú del panel («Correos de docentes»).
+     Backend: SolicitudRetoController. -->
+<script setup>
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import CabeceraSeccion from '../../src/components/CabeceraSeccion.vue'
+import FiltrosPanel from '../../src/components/FiltrosPanel.vue'
+import FiltroSegmentado from '../../src/components/FiltroSegmentado.vue'
+import VistaPreviaSolicitud from '../components/VistaPreviaSolicitud.vue'
+import EliminarSolicitudModal from '../components/EliminarSolicitudModal.vue'
+import { useAuthStore, ROLE_SUPERADMIN, ROLE_ADMIN_CENTRAL_DUALAB } from '../../src/stores/auth.js'
+import { listarSolicitudes, crearSolicitud, getRespuestasSolicitudes } from '../../src/services/solicitudRetoService.js'
+import { FASES_SOLICITUD, fechaHora, textoSesion, faltaEncuentro } from '../primerContacto.js'
+
+const route = useRoute()
+const router = useRouter()
+
+const estado = ref(route.query.estado ?? '')
+const buscar = ref(route.query.buscar ?? '')
+const pagina = ref(Number(route.query.page) || 1)
+
+const items = ref([])
+const meta = ref(null)
+const resumen = ref(null)
+const cargando = ref(true)
+const error = ref('')
+
+let peticion = 0
+async function cargar() {
+  const id = ++peticion
+  cargando.value = true
+  error.value = ''
+  try {
+    const { data } = await listarSolicitudes({
+      estado: estado.value || undefined, buscar: buscar.value.trim() || undefined, page: pagina.value,
+    })
+    if (id !== peticion) return
+    items.value = data.data
+    meta.value = data.meta
+    resumen.value = data.resumen
+  } catch (e) {
+    if (id !== peticion) return
+    items.value = []
+    error.value = e.response?.data?.error || 'No se han podido cargar las solicitudes.'
+  } finally {
+    if (id === peticion) cargando.value = false
+  }
+}
+
+function sincronizarUrl() {
+  router.replace({ query: {
+    ...(estado.value && { estado: estado.value }), ...(buscar.value.trim() && { buscar: buscar.value.trim() }),
+    ...(pagina.value > 1 && { page: pagina.value }),
+  } })
+}
+
+// Correos del profesorado sin leer (info@, «Correos de docentes»): por solicitud, en un chip de su
+// tarjeta (el total va en el panel lateral). Si la web no responde, no se muestran.
+const correosNuevos = ref({ total: 0, porSolicitud: {} })
+async function cargarCorreosNuevos() {
+  try {
+    const { data } = await getRespuestasSolicitudes({ estado: 'nuevo', per_page: 50 })
+    const porSolicitud = {}
+    for (const c of data.data ?? []) if (c.solicitud?.id) porSolicitud[c.solicitud.id] = (porSolicitud[c.solicitud.id] ?? 0) + 1
+    correosNuevos.value = { total: data.meta?.total ?? 0, porSolicitud }
+  } catch { /* no es crítico */ }
+}
+onMounted(cargarCorreosNuevos)
+
+let espera
+watch(buscar, () => { clearTimeout(espera); espera = setTimeout(() => { pagina.value = 1; sincronizarUrl(); cargar() }, 350) })
+watch(estado, () => { pagina.value = 1; sincronizarUrl(); cargar() })
+function irAPagina(n) { pagina.value = n; sincronizarUrl(); cargar() }
+onMounted(cargar)
+
+const opcionesEstado = computed(() => {
+  const n = resumen.value?.por_estado ?? {}
+  return [
+    { value: '', label: 'Todas' },
+    { value: 'pendiente', label: 'Esperando al docente', count: n.pendiente },
+    { value: 'respondida', label: 'Respondidas', count: n.respondida },
+    { value: 'descartada', label: 'Descartadas', count: n.descartada },
+  ]
+})
+const hayFiltros = computed(() => !!(estado.value || buscar.value.trim()))
+function limpiar() { estado.value = ''; buscar.value = '' }
+
+const viendoComoDocente = ref(false)
+const datosVistaPrevia = ref({})
+const auth = useAuthStore()
+// Gestionan las solicitudes (empresa, generar, publicar, papelera): superadmin y Admin Central DuaLab
+const gestiona = computed(() => [ROLE_SUPERADMIN, ROLE_ADMIN_CENTRAL_DUALAB].includes(auth.userRole))
+
+// ── Avisos: retos antiguos en la recámara (nunca se borran solos) y lo que espera en la papelera,
+//    que la purga automática borra del todo pasado el plazo. La Papelera solo la abre el superadmin. ──
+const esSuperadmin = computed(() => auth.userRole === ROLE_SUPERADMIN)
+const recamara = computed(() => resumen.value?.recamara ?? null)
+const papelera = computed(() => resumen.value?.papelera ?? null)
+const plural = (n, uno, varios) => `${n} ${n === 1 ? uno : varios}`
+const textoPapelera = computed(() => {
+  const p = papelera.value
+  if (!p || !(p.solicitudes || p.retos)) return ''
+  const partes = [p.solicitudes && plural(p.solicitudes, 'formulario', 'formularios'), p.retos && plural(p.retos, 'reto', 'retos')].filter(Boolean)
+  const proxima = p.proxima_purga ? new Date(p.proxima_purga).toLocaleDateString('es-ES', { day: 'numeric', month: 'long' }) : ''
+  return `En la papelera: ${partes.join(' y ')}. Se borran del todo solos a los ${p.dias} días${proxima ? ` (el primero, el ${proxima})` : ''}.`
+})
+
+// ── Menú «⋯» de cada tarjeta (como en las tarjetas de propuestas) ──
+// Uno abierto a la vez; se cierra al pulsar fuera o con Escape (el foco vuelve a su botón).
+const menuAbierto = ref(null)   // id de la solicitud
+// Hacia arriba si no cabe debajo: la última tarjeta lo dejaba bajo la barra inferior (AppCredit, 2.5rem)
+const menuArriba = ref(false)
+function alternarMenu(s, e) {
+  if (menuAbierto.value === s.id) return cerrarMenu()
+  const espacioDebajo = window.innerHeight - e.currentTarget.getBoundingClientRect().bottom
+  menuArriba.value = espacioDebajo < 180
+  menuAbierto.value = s.id
+}
+function cerrarMenu(devolverFoco = false) {
+  const id = menuAbierto.value
+  menuAbierto.value = null
+  if (devolverFoco && id) document.getElementById(`menu-solicitud-${id}`)?.focus()
+}
+function alPulsarFuera(e) { if (!e.target.closest('[data-menu-solicitud]')) cerrarMenu() }
+function alPulsarTecla(e) { if (e.key === 'Escape') cerrarMenu(true) }
+watch(menuAbierto, (id, anterior) => {
+  if (!!id === !!anterior) return
+  const metodo = id ? 'addEventListener' : 'removeEventListener'
+  document[metodo]('click', alPulsarFuera, true)
+  document[metodo]('keydown', alPulsarTecla)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', alPulsarFuera, true)
+  document.removeEventListener('keydown', alPulsarTecla)
+})
+// Desde el modal de envío: el formulario con lo que ya se ha escrito (nombre y centro)
+function verFormularioNuevo() {
+  datosVistaPrevia.value = { nombreDocente: nueva.value.nombre_docente.trim(), centroNombre: nueva.value.centro_nombre.trim() }
+  viendoComoDocente.value = true
+}
+function verComoDocente(s) {
+  cerrarMenu()
+  datosVistaPrevia.value = { nombreDocente: s.nombre_docente, centroNombre: s.centro_nombre }
+  viendoComoDocente.value = true
+}
+
+// ── Borrado seguro (a la papelera) ──
+const aEliminar = ref(null)
+const avisoLista = ref('')
+function pedirEliminar(s) { cerrarMenu(); aEliminar.value = s }
+function eliminada() {
+  avisoLista.value = `La solicitud de ${aEliminar.value.nombre_docente} está en la papelera. Puedes restaurarla en Red DuaLab → Papelera.`
+  aEliminar.value = null
+  cargar()
+}
+
+// ── Enviar una solicitud nueva ──────────────────────────────────────────────
+const creando = ref(false)
+const nueva = ref({ nombre_docente: '', email_docente: '', centro_nombre: '', notas: '' })
+const errores = ref({})
+const enviando = ref(false)
+const enlace = ref('')
+const copiado = ref(false)
+
+function abrirNueva() {
+  nueva.value = { nombre_docente: '', email_docente: '', centro_nombre: '', notas: '' }
+  errores.value = {}; enlace.value = ''; copiado.value = false
+  creando.value = true
+}
+
+async function enviarNueva() {
+  if (enviando.value) return
+  enviando.value = true
+  errores.value = {}
+  try {
+    const { data } = await crearSolicitud({ ...nueva.value, notas: nueva.value.notas.trim() || null })
+    enlace.value = data.enlace
+    cargar()
+  } catch (e) {
+    errores.value = e.response?.status === 422 ? e.response.data.errors : { general: ['No se ha podido enviar. Inténtalo de nuevo.'] }
+  } finally {
+    enviando.value = false
+  }
+}
+
+async function copiar() {
+  try {
+    await navigator.clipboard.writeText(enlace.value)
+    copiado.value = true
+  } catch {
+    copiado.value = false
+  }
+}
+</script>
+
+<template>
+  <div class="relative min-h-screen pt-16 font-sans text-azul-noche">
+    <div class="relative z-10 mx-auto max-w-[90rem] space-y-4 px-4 pb-10 pt-5 sm:px-6 lg:px-8">
+      <CabeceraSeccion antetitulo="Retos a medida" titulo="Formularios de" destacado="docentes" color="text-rol"
+                       :volver="{ name: 'inicio' }" volver-label="Espacios"
+                       subtitulo="Envía a un docente el formulario para que nos pida los retos que quiere trabajar; con sus respuestas los preparamos."
+                       acciones-debajo>
+        <div class="flex flex-wrap gap-2 lg:justify-end">
+          <button type="button" class="accion-principal" @click="abrirNueva">Enviar formulario</button>
+        </div>
+      </CabeceraSeccion>
+
+      <!-- Correos sin leer de los docentes: aviso con enlace (el panel lateral también los cuenta) -->
+      <RouterLink v-if="correosNuevos.total" :to="{ name: 'respuestas-solicitudes' }"
+                  class="flex items-center gap-2 rounded-2xl border border-[#FF8920]/40 bg-[#FF8920]/10 px-4 py-3 text-sm font-semibold text-[#B45309] transition hover:bg-[#FF8920]/15">
+        <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+        <span class="min-w-0 flex-1">{{ correosNuevos.total }} {{ correosNuevos.total === 1 ? 'correo de docente sin leer' : 'correos de docentes sin leer' }}</span>
+        <span aria-hidden="true">→</span>
+      </RouterLink>
+
+      <!-- Retos que llevan tiempo en la recámara: solo aviso, la decisión es de DuaLab -->
+      <p v-if="recamara?.antiguos" class="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800" role="status">
+        <svg class="mt-0.5 h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <span class="min-w-0 flex-1">
+          {{ plural(recamara.antiguos, 'reto lleva', 'retos llevan') }} más de {{ recamara.dias }} días en la recámara. No se borran solos: sus formularios llevan la marca «en la recámara +{{ recamara.dias }} días»; ábrelos y decide si publicarlos, avisar al docente o enviarlos a la papelera.
+        </span>
+      </p>
+      <!-- Lo que está en la papelera y cuándo lo borra la purga automática -->
+      <component :is="esSuperadmin ? RouterLink : 'p'" v-if="textoPapelera" v-bind="esSuperadmin ? { to: { name: 'papelera' } } : { role: 'status' }"
+                 class="flex items-start gap-2 rounded-2xl border border-borde bg-white px-4 py-3 text-sm font-semibold text-texto-secundario"
+                 :class="esSuperadmin && 'transition hover:border-rol/40'">
+        <svg class="mt-0.5 h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.9 12.1A2 2 0 0116.1 21H7.9a2 2 0 01-2-1.9L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+        <span class="min-w-0 flex-1">{{ textoPapelera }} {{ esSuperadmin ? 'Ábrela para restaurar algo antes.' : 'Para restaurar algo antes, pídeselo al superadmin.' }}</span>
+        <span v-if="esSuperadmin" aria-hidden="true">→</span>
+      </component>
+
+      <FiltrosPanel v-model:busqueda="buscar" placeholder="Buscar por docente, email o centro…"
+                    :resultados="meta?.total ?? null" :unidad="['formulario', 'formularios']"
+                    :hay-activos="hayFiltros" @limpiar="limpiar">
+        <FiltroSegmentado v-model="estado" label="Estado" :opciones="opcionesEstado" />
+      </FiltrosPanel>
+
+      <p v-if="error" class="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700" role="alert">{{ error }}</p>
+      <p v-if="avisoLista" class="rounded-2xl border border-borde bg-white px-4 py-3 text-sm font-semibold text-texto-secundario" role="status">{{ avisoLista }}</p>
+      <p v-if="cargando && !items.length" class="py-10 text-center text-sm text-texto-secundario" role="status">Cargando…</p>
+      <p v-else-if="!error && !items.length" class="rounded-2xl border border-borde bg-white px-4 py-8 text-center text-sm text-texto-secundario">
+        {{ hayFiltros ? 'No hay formularios con estos filtros.' : 'Aún no has enviado ningún formulario. Pulsa «Enviar formulario» para empezar.' }}
+      </p>
+
+      <ul v-else class="space-y-2" :class="cargando && 'opacity-60'" :aria-busy="cargando">
+        <li v-for="s in items" :key="s.id" class="relative" :class="{ 'z-10': menuAbierto === s.id }">
+          <RouterLink :to="{ name: 'solicitud-reto-ficha', params: { id: s.id }, query: route.query }"
+                      class="flex flex-col gap-2 rounded-2xl border bg-white p-4 shadow-sm transition hover:border-rol/40 sm:flex-row sm:items-center sm:gap-4 sm:p-5"
+                      :style="gestiona ? 'padding-right: 3.75rem' : null"
+                      :class="s.fase === 'respondida' ? 'border-alumnos/40' : 'border-borde'">
+            <span class="flex min-w-0 flex-1 flex-col">
+              <span class="min-w-0 truncate font-heading text-base font-bold">{{ s.nombre_docente }}</span>
+              <span class="mt-0.5 min-w-0 truncate text-sm text-texto-secundario">{{ s.centro_nombre }} · {{ s.email_docente }}</span>
+              <span class="mt-2 flex flex-wrap gap-1.5">
+                <span v-if="s.sesion?.fecha" class="rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-semibold text-texto-secundario">Sesión {{ textoSesion(s.sesion) }}</span>
+                <span v-if="faltaEncuentro(s)" class="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-bold text-amber-800">Falta encuentro</span>
+                <span v-if="s.num_retos" class="rounded-full bg-centros/10 px-2.5 py-0.5 text-xs font-bold text-centros">{{ s.num_retos }} {{ s.num_retos === 1 ? 'reto' : 'retos' }}</span>
+                <span v-if="s.retos_recamara_antiguos" class="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-bold text-amber-800">{{ s.retos_recamara_antiguos }} en la recámara +{{ recamara?.dias ?? 60 }} días</span>
+                <span v-if="s.empresa" class="min-w-0 truncate rounded-full bg-empresas/10 px-2.5 py-0.5 text-xs font-bold text-empresas-dark">{{ s.empresa.nombre }}</span>
+              </span>
+            </span>
+            <span class="flex shrink-0 flex-wrap items-center justify-between gap-2 sm:flex-col sm:items-end sm:justify-center">
+              <span v-if="correosNuevos.porSolicitud[s.id]" class="inline-flex items-center gap-1 rounded-full bg-[#FF8920]/15 px-2.5 py-0.5 text-xs font-bold text-[#B45309]">
+                <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                {{ correosNuevos.porSolicitud[s.id] }} {{ correosNuevos.porSolicitud[s.id] === 1 ? 'correo nuevo' : 'correos nuevos' }}
+              </span>
+              <span class="rounded-full px-2.5 py-0.5 text-xs font-bold" :class="FASES_SOLICITUD[s.fase]?.clases">{{ FASES_SOLICITUD[s.fase]?.texto ?? s.fase }}</span>
+              <span class="text-xs text-texto-secundario">{{ fechaHora(s.respondido_at || s.created_at) }}</span>
+            </span>
+          </RouterLink>
+          <div v-if="gestiona" data-menu-solicitud class="absolute right-3 top-3 sm:top-1/2 sm:-translate-y-1/2">
+            <button :id="`menu-solicitud-${s.id}`" type="button" @click="alternarMenu(s, $event)"
+                    :aria-expanded="menuAbierto === s.id" aria-haspopup="menu" :aria-label="`Más acciones de la solicitud de ${s.nombre_docente}`"
+                    class="inline-flex h-9 w-9 items-center justify-center rounded-full border border-borde bg-white text-texto-secundario transition-colors hover:bg-gray-50"
+                    :class="{ 'bg-gray-50': menuAbierto === s.id }">
+              <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.6"/><circle cx="10" cy="10" r="1.6"/><circle cx="16" cy="10" r="1.6"/></svg>
+            </button>
+            <div v-if="menuAbierto === s.id" role="menu" :class="menuArriba ? 'bottom-full mb-1' : 'top-full mt-1'"
+                 class="absolute right-0 z-30 w-[min(15rem,calc(100vw-3rem))] rounded-xl border border-borde bg-white py-1 shadow-lg">
+              <RouterLink role="menuitem" :to="{ name: 'solicitud-reto-ficha', params: { id: s.id }, query: route.query }"
+                          class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Abrir la ficha</RouterLink>
+              <button type="button" role="menuitem" @click="verComoDocente(s)"
+                      class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Ver cómo lo ve el docente</button>
+              <button type="button" role="menuitem" @click="pedirEliminar(s)"
+                      class="block w-full px-4 py-2 text-left text-sm text-red-700 hover:bg-red-50">Mover a la papelera</button>
+            </div>
+          </div>
+        </li>
+      </ul>
+
+      <nav v-if="meta && meta.last_page > 1" class="flex flex-wrap items-center justify-center gap-2" aria-label="Páginas">
+        <button type="button" class="accion-secundaria" :disabled="pagina <= 1 || cargando" @click="irAPagina(pagina - 1)">Anterior</button>
+        <span class="text-sm text-texto-secundario">Página {{ meta.current_page }} de {{ meta.last_page }}</span>
+        <button type="button" class="accion-secundaria" :disabled="pagina >= meta.last_page || cargando" @click="irAPagina(pagina + 1)">Siguiente</button>
+      </nav>
+    </div>
+
+    <VistaPreviaSolicitud :abierto="viendoComoDocente" :datos="datosVistaPrevia" @cerrar="viendoComoDocente = false" />
+    <EliminarSolicitudModal :visible="!!aEliminar" :solicitud="aEliminar" @cerrar="aEliminar = null" @eliminada="eliminada" />
+
+    <!-- Modal: enviar el formulario a un docente -->
+    <Teleport to="body">
+      <div v-if="creando" class="fixed inset-0 z-[60] flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4"
+           @keydown.esc="creando = false" @click.self="creando = false">
+        <section role="dialog" aria-modal="true" aria-labelledby="nueva-solicitud-titulo"
+                 class="flex max-h-[92dvh] w-full max-w-xl flex-col overflow-hidden rounded-t-[2rem] bg-white shadow-2xl sm:rounded-[2rem]">
+          <header class="flex items-center gap-3 border-b border-borde px-4 py-3 sm:px-6 sm:py-4">
+            <h2 id="nueva-solicitud-titulo" class="min-w-0 flex-1 truncate font-heading text-lg font-bold">{{ enlace ? 'Formulario enviado' : 'Enviar formulario a un docente' }}</h2>
+            <button type="button" class="accion-icono" aria-label="Cerrar" @click="creando = false">
+              <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </header>
+
+          <div v-if="enlace" class="space-y-3 overflow-y-auto px-4 py-5 sm:px-6">
+            <p class="text-sm">Le hemos enviado el correo a <strong class="break-all">{{ nueva.email_docente }}</strong>. Si prefieres pasárselo por otro canal, copia el enlace: es personal y caduca en 21 días.</p>
+            <p class="break-all rounded-xl bg-[#F8FAFC] px-3 py-2 font-mono text-xs">{{ enlace }}</p>
+            <div class="flex flex-wrap justify-end gap-2">
+              <button type="button" class="accion-secundaria" @click="copiar">{{ copiado ? 'Copiado' : 'Copiar enlace' }}</button>
+              <button type="button" class="accion-principal" @click="creando = false">Hecho</button>
+            </div>
+          </div>
+
+          <form v-else class="space-y-3 overflow-y-auto px-4 py-5 sm:px-6" novalidate @submit.prevent="enviarNueva">
+            <div class="flex flex-col gap-2 rounded-xl bg-[#F8FAFC] p-3 sm:flex-row sm:items-center">
+              <p class="min-w-0 flex-1 text-xs text-texto-secundario">El docente recibirá un correo con el enlace al formulario (no necesita cuenta). La empresa la eliges tú después.</p>
+              <button type="button" class="accion-secundaria self-start sm:self-auto" @click="verFormularioNuevo">Ver el formulario</button>
+            </div>
+            <div v-for="campo in [
+              { k: 'nombre_docente', t: 'Nombre del docente', tipo: 'text', max: 150 },
+              { k: 'email_docente', t: 'Email', tipo: 'email', max: 255 },
+              { k: 'centro_nombre', t: 'Centro educativo', tipo: 'text', max: 255 },
+            ]" :key="campo.k">
+              <label :for="'ns-' + campo.k" class="field-label">{{ campo.t }}</label>
+              <input :id="'ns-' + campo.k" v-model="nueva[campo.k]" :type="campo.tipo" :maxlength="campo.max" class="field-input" :aria-invalid="!!errores[campo.k]" required />
+              <p v-if="errores[campo.k]" class="mt-1 text-xs text-red-600">{{ errores[campo.k][0] }}</p>
+            </div>
+            <div>
+              <label for="ns-notas" class="field-label">Notas internas (opcional)</label>
+              <textarea id="ns-notas" v-model="nueva.notas" maxlength="2000" rows="2" class="field-input" placeholder="Solo las ve DuaLab"></textarea>
+            </div>
+            <p v-if="errores.general" class="text-sm font-semibold text-red-600" role="alert">{{ errores.general[0] }}</p>
+            <div class="flex justify-end">
+              <button type="submit" class="accion-principal" :disabled="enviando || !nueva.nombre_docente.trim() || !nueva.email_docente.trim() || !nueva.centro_nombre.trim()">
+                {{ enviando ? 'Enviando…' : 'Enviar' }}
+              </button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </Teleport>
+  </div>
+</template>

@@ -6,22 +6,37 @@
   "scripts": {
     "dev": "vite --open",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dev:comercial": "vite --config vite.comercial.config.js --open",
+    "build:comercial": "vite build --config vite.comercial.config.js",
+    "dev:nexo": "vite --config vite.nexo.config.js --open",
+    "build:nexo": "vite build --config vite.nexo.config.js",
+    "dev:central": "vite --config vite.central.config.js --open",
+    "build:central": "vite build --config vite.central.config.js",
+    "iconos": "pwa-assets-generator && cp pwa/pwa-192x192.png pwa/pwa-512x512.png pwa/maskable-icon-512x512.png pwa/favicon.ico public/ && cp pwa/pwa-64x64.png public/favicon.png && cp pwa/apple-touch-icon-180x180.png public/apple-touch-icon.png",
+    "iconos:herramientas": "node pwa/iconos-herramientas.mjs"
   },
   "dependencies": {
+    "@fontsource/caveat": "^5.3.0",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/montserrat": "^5.3.0",
     "@heroicons/vue": "^2.2.0",
     "axios": "^1.13.5",
+    "dompurify": "^3.2.6",
     "jspdf": "^4.2.1",
     "pinia": "^3.0.4",
     "qrcode": "^1.5.4",
-    "vue": "^3.5.25"
+    "vue": "^3.5.25",
+    "vue-router": "^4.6.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
+    "@vite-pwa/assets-generator": "^2.0.0",
     "@vitejs/plugin-vue": "^6.0.2",
     "autoprefixer": "^10.4.27",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.1",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vite-plugin-pwa": "^2.0.0"
   }
 }

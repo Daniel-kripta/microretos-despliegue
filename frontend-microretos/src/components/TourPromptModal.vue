@@ -12,7 +12,7 @@ const emit = defineEmits(['activar', 'omitir'])
     <div v-if="show"
          @click.self="emit('omitir')"
          class="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-      <div class="relative bg-white border border-gray-200 rounded-[2rem] shadow-2xl max-w-sm w-full p-8">
+      <div class="relative bg-white border border-gray-200 rounded-[2rem] shadow-2xl max-w-sm w-full p-6 sm:p-8">
 
         <!-- Icono + título -->
         <div class="flex flex-col items-center text-center gap-4 mb-6">
@@ -24,7 +24,7 @@ const emit = defineEmits(['activar', 'omitir'])
             </svg>
           </div>
           <div>
-            <h2 class="text-lg font-black tracking-tight text-[#121212] leading-tight">{{ titulo }}</h2>
+            <h2 class="text-lg font-black tracking-tight text-azul-noche leading-tight">{{ titulo }}</h2>
             <p class="text-xs text-gray-500 leading-relaxed mt-1">{{ descripcion }}</p>
           </div>
         </div>
@@ -32,7 +32,7 @@ const emit = defineEmits(['activar', 'omitir'])
         <!-- Acciones -->
         <div class="space-y-3">
           <button @click="emit('activar')"
-                  class="w-full flex items-center justify-center gap-2 py-3 px-5 rounded-2xl
+                  class="w-full flex items-center justify-center gap-2 py-3 px-5 rounded-full
                          bg-blue-500 hover:bg-blue-600 active:scale-[.98]
                          text-white font-black text-sm transition-all duration-150 shadow-sm">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -43,7 +43,7 @@ const emit = defineEmits(['activar', 'omitir'])
           </button>
 
           <button @click="emit('omitir')"
-                  class="w-full text-center text-[11px] font-bold text-gray-400
+                  class="w-full min-h-9 text-center text-[11px] font-bold text-gray-400
                          hover:text-gray-600 transition-colors py-1">
             Entrar directamente
           </button>

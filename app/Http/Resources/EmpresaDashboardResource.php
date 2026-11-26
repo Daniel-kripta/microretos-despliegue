@@ -1,0 +1,33 @@
+<?php
+
+namespace App\Http\Resources;
+
+use Illuminate\Http\Request;
+
+/**
+ * Empresa para el dashboard de Base de datos (superadmin): lo mismo que EmpresaResource
+ * más los campos de gestión que solo usa esa vista.
+ *
+ * @property-read bool|null $disponible_para_retos  withExists() de DatosFPController
+ */
+class EmpresaDashboardResource extends EmpresaResource
+{
+    public function toArray(Request $request): array
+    {
+        return parent::toArray($request) + [
+            'fecha_cita'       => $this->fecha_cita,
+            // Usado por BaseDatosDashboard, CentroEducativoModal y EliminarEmpresaModal
+            'familias_nombres' => $this->whenLoaded('familias', fn () => $this->familias->pluck('nombre')->unique()->values()),
+            // Alguna familia con módulos y RA/CE: las plantillas del catálogo sin ella se ocultan a los centros
+            'disponible_para_retos' => $this->whenHas('disponible_para_retos', fn () => (bool) $this->disponible_para_retos),
+            // EliminarEmpresaModal: retos que siguen en la biblioteca tras borrar la empresa
+            'microretos_count' => $this->whenCounted('microretos'),
+            // Etiqueta de origen en Base de datos: 'entrevista' | 'formulario' | null (alta directa)
+            'origen_captacion' => $this->whenHas('captaciones_min_origen_id', fn () => match ((int) $this->resource->getAttribute('captaciones_min_origen_id')) {
+                \App\Models\CaptacionOrigen::ENTREVISTA => 'entrevista',
+                \App\Models\CaptacionOrigen::FORMULARIO => 'formulario',
+                default => null,
+            }),
+        ];
+    }
+}

@@ -6,6 +6,8 @@ use App\Http\Requests\StoreEncuentroColaboradorRequest;
 use App\Http\Requests\UpdateEncuentroColaboradorRequest;
 use App\Models\Encuentro;
 use App\Models\User;
+use App\Services\ModulosDocenteService;
+use App\Services\NotificacionDocenteService;
 use Illuminate\Http\Request;
 
 class EncuentroColaboradorController extends Controller
@@ -28,8 +30,10 @@ class EncuentroColaboradorController extends Controller
 
     /**
      * GET /api/encuentros/{id}/colaboradores/candidatos
-     * Docentes del mismo centro que el propietario, sin contar al propio propietario
-     * ni a los que ya son colaboradores — para el selector del frontend.
+     * Compañeros del mismo centro que el propietario, sin contar al propio propietario ni a
+     * los que ya son colaboradores — para el selector del frontend. Los docentes solo si
+     * comparten con el proyecto la familia y algún módulo (los que tienen asignados en su
+     * perfil); los admins del centro, siempre (ya ven todo su centro).
      */
     public function candidatos(Request $request, $id)
     {
@@ -42,12 +46,19 @@ class EncuentroColaboradorController extends Controller
 
         $yaColaboradores = $encuentro->colaboradores()->pluck('users.id');
 
+        $proyecto = $encuentro->microproyecto;
+        $modulos  = app(ModulosDocenteService::class);
+
         $docentes = User::where('centro_educativo_id', $centroId)
             ->whereIn('role', [User::ROLE_DOCENTE, User::ROLE_ADMIN])
             ->where('id', '!=', $encuentro->user_id)
             ->whereNotIn('id', $yaColaboradores)
+            ->with('modulos.cicloFormativo:id,familia_id')
             ->orderBy('name')
-            ->get(['id', 'name']);
+            ->get(['id', 'name', 'role'])
+            ->filter(fn (User $u) => $u->isAdmin() || $modulos->comparteConProyecto($u, $proyecto))
+            ->map(fn (User $u) => ['id' => $u->id, 'name' => $u->name])
+            ->values();
 
         return response()->json($docentes);
     }
@@ -60,9 +71,21 @@ class EncuentroColaboradorController extends Controller
         $encuentro = $this->encuentroGestionablePor($request, $id);
         $validated = $request->validated();
 
-        $encuentro->colaboradores()->syncWithoutDetaching([
+        $cambios = $encuentro->colaboradores()->syncWithoutDetaching([
             $validated['user_id'] => ['puede_editar' => $validated['puede_editar'] ?? false],
         ]);
+
+        // Solo se avisa a quien entra nuevo (no al reenviar a alguien que ya estaba)
+        if (in_array((int) $validated['user_id'], array_map('intval', $cambios['attached']), true)) {
+            /** @var User $invitador  ruta bajo auth:sanctum */
+            $invitador = $request->user();
+            app(NotificacionDocenteService::class)->invitacionEncuentro(
+                $encuentro,
+                User::findOrFail((int) $validated['user_id']),
+                $invitador,
+                (bool) ($validated['puede_editar'] ?? false),
+            );
+        }
 
         return response()->json(
             $encuentro->colaboradores()->get(['users.id', 'users.name'])->map(fn($u) => [

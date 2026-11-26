@@ -1,6 +1,9 @@
 <script setup>
 import { ref, watch, computed } from 'vue'
 import api from '../api.js'
+import { useRoleTheme } from '../composables/useRoleTheme.js'
+
+const { theme } = useRoleTheme()
 
 const props = defineProps({
   show: Boolean,
@@ -89,11 +92,11 @@ async function toggleBoeModulo(cicloId, moduloId) {
     <div v-if="show"
          class="fixed inset-0 z-[9000] flex items-start justify-center p-4 pt-10 bg-black/60 backdrop-blur-sm"
          @click.self="cerrar">
-      <div class="relative bg-white rounded-[2rem] shadow-2xl w-full max-w-2xl max-h-[85vh]
+      <div class="relative bg-white rounded-[2rem] shadow-2xl w-full max-w-2xl max-h-[calc(100dvh-5rem)]
                   flex flex-col border border-gray-100 overflow-hidden">
 
         <!-- Cabecera fija -->
-        <div class="flex items-center gap-3 px-7 py-5 border-b border-gray-100 shrink-0">
+        <div class="flex items-center gap-3 px-4 sm:px-7 py-5 border-b border-gray-100 shrink-0">
           <div class="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-200
                       flex items-center justify-center shrink-0">
             <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -102,11 +105,11 @@ async function toggleBoeModulo(cicloId, moduloId) {
             </svg>
           </div>
           <div class="flex-1 min-w-0">
-            <h2 class="font-black text-lg text-[#1F2937]">Catálogo BOE — Solo lectura</h2>
+            <h2 class="font-black text-lg text-azul-noche">Catálogo BOE — Solo lectura</h2>
             <p class="text-xs text-gray-400">Familias · Ciclos · Módulos · Resultados de Aprendizaje · Criterios de Evaluación</p>
           </div>
           <button @click="cerrar"
-                  class="w-8 h-8 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center
+                  class="w-9 h-9 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center
                          text-gray-400 hover:text-gray-600 transition-all shrink-0">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
@@ -116,30 +119,30 @@ async function toggleBoeModulo(cicloId, moduloId) {
 
         <!-- Contadores -->
         <div v-if="!cargandoBoe && totalFamilias > 0"
-             class="px-7 py-2 border-b border-gray-100 shrink-0 flex items-center gap-3">
+             class="px-4 sm:px-7 py-2 border-b border-gray-100 shrink-0 flex items-center gap-3">
           <div class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-100">
             <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
             <span class="text-[11px] font-black text-indigo-600">{{ totalFamilias }}</span>
             <span class="text-[11px] text-indigo-400">familias</span>
           </div>
-          <div class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#00A859]/8 border border-[#00A859]/20">
-            <span class="w-1.5 h-1.5 rounded-full bg-[#00A859] shrink-0" />
-            <span class="text-[11px] font-black text-[#00A859]">{{ totalCiclos }}</span>
-            <span class="text-[11px] text-[#00A859]/70">ciclos</span>
+          <div class="flex items-center gap-1.5 px-3 py-1 rounded-full border" :class="[theme.bg5, theme.border20]">
+            <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="theme.bg" />
+            <span class="text-[11px] font-black" :class="theme.text">{{ totalCiclos }}</span>
+            <span class="text-[11px]" :class="theme.text50">ciclos</span>
           </div>
         </div>
 
         <!-- Leyenda de relaciones BD -->
-        <div class="px-7 py-2.5 bg-indigo-50/60 border-b border-indigo-100 shrink-0 flex flex-wrap gap-x-4 gap-y-1">
+        <div class="hidden sm:flex px-4 sm:px-7 py-2.5 bg-indigo-50/60 border-b border-indigo-100 shrink-0 flex-wrap gap-x-4 gap-y-1">
           <span class="text-[10px] font-bold text-indigo-500 uppercase tracking-widest">Relaciones BD:</span>
           <span class="text-[10px] text-gray-500">
             <span class="font-bold text-indigo-400">modulos</span>
             <span class="mx-1 text-gray-300">→</span>
-            <span class="font-bold text-[#00A859]">resultados_aprendizaje</span>
+            <span class="font-bold" :class="theme.text">resultados_aprendizaje</span>
             <span class="text-gray-400 ml-1">( idmodulo )</span>
           </span>
           <span class="text-[10px] text-gray-500">
-            <span class="font-bold text-[#00A859]">resultados_aprendizaje</span>
+            <span class="font-bold" :class="theme.text">resultados_aprendizaje</span>
             <span class="mx-1 text-gray-300">→</span>
             <span class="font-bold text-amber-500">criterios_evaluacion</span>
             <span class="text-gray-400 ml-1">( idmoduloRA )</span>
@@ -147,7 +150,7 @@ async function toggleBoeModulo(cicloId, moduloId) {
         </div>
 
         <!-- Cuerpo con scroll -->
-        <div class="overflow-y-auto flex-1 px-6 py-4">
+        <div class="overflow-y-auto flex-1 px-4 sm:px-6 py-4">
 
           <!-- Cargando familias -->
           <div v-if="cargandoBoe" class="flex flex-col items-center justify-center py-16 gap-3">
@@ -202,7 +205,7 @@ async function toggleBoeModulo(cicloId, moduloId) {
                     <!-- Cabecera ciclo -->
                     <button
                       @click="toggleBoeCiclo(familia.id, ciclo.id)"
-                      class="w-full flex items-center gap-3 pl-8 pr-5 py-3 text-left
+                      class="w-full flex items-center gap-3 pl-4 sm:pl-8 pr-5 py-3 text-left
                              hover:bg-gray-50/60 transition-colors duration-150"
                     >
                       <div class="w-2 h-2 rounded-full bg-indigo-400 shrink-0" />
@@ -221,7 +224,7 @@ async function toggleBoeModulo(cicloId, moduloId) {
 
                     <!-- Módulos del ciclo -->
                     <div v-if="boeCicloExp[`${familia.id}-${ciclo.id}`]"
-                         class="pl-12 pr-5 pb-3 pt-1">
+                         class="pl-6 sm:pl-12 pr-5 pb-3 pt-1">
 
                       <!-- Cargando módulos -->
                       <div v-if="boeModulosMap[ciclo.id] === undefined"
@@ -293,13 +296,13 @@ async function toggleBoeModulo(cicloId, moduloId) {
                               </div>
 
                               <div v-for="ra in boeRaCeMap[modulo.id].ra" :key="ra.id"
-                                   class="rounded-xl border border-[#00A859]/20 bg-[#00A859]/4 overflow-hidden">
+                                   class="rounded-xl border overflow-hidden" :class="[theme.border20, theme.bg5]">
 
                                 <!-- Cabecera RA -->
                                 <div class="flex items-start gap-2 px-3 py-2.5">
                                   <div class="flex items-center gap-1.5 shrink-0 mt-0.5">
-                                    <span class="text-[9px] font-black uppercase tracking-widest text-[#00A859]
-                                                 bg-[#00A859]/10 px-2 py-0.5 rounded-full">
+                                    <span class="text-[9px] font-black uppercase tracking-widest
+                                                 px-2 py-0.5 rounded-full" :class="[theme.text, theme.bg5]">
                                       RA{{ ra.orden }}
                                     </span>
                                     <span class="text-[9px] text-gray-300">#{{ ra.id }}</span>
@@ -314,7 +317,7 @@ async function toggleBoeModulo(cicloId, moduloId) {
                                   BD: criterios_evaluacion.idmoduloRA = ra.id (resultados_aprendizaje.id)
                                 -->
                                 <div v-if="ra.criterios?.length"
-                                     class="border-t border-[#00A859]/15 px-3 pb-2.5 pt-2 bg-white/60">
+                                     class="border-t px-3 pb-2.5 pt-2 bg-white/60" :class="theme.border15">
                                   <div class="flex items-center gap-1.5 mb-1.5">
                                     <span class="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
                                     <span class="text-[9px] font-black uppercase tracking-widest text-amber-600">
@@ -335,7 +338,7 @@ async function toggleBoeModulo(cicloId, moduloId) {
 
                                 <!-- RA sin CE -->
                                 <div v-else
-                                     class="border-t border-[#00A859]/10 px-3 py-1.5 bg-white/40">
+                                     class="border-t px-3 py-1.5 bg-white/40" :class="theme.border15">
                                   <span class="text-[9px] text-gray-400 italic">Sin criterios de evaluación registrados</span>
                                 </div>
                               </div>
@@ -352,10 +355,10 @@ async function toggleBoeModulo(cicloId, moduloId) {
         </div>
 
         <!-- Footer fijo -->
-        <div class="shrink-0 px-7 py-4 border-t border-gray-100 flex items-center gap-3">
+        <div class="shrink-0 px-4 sm:px-7 py-4 border-t border-gray-100 flex items-center gap-3">
           <div class="flex-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             <div class="flex items-center gap-1.5">
-              <span class="w-2 h-2 rounded-full bg-[#00A859]" />
+              <span class="w-2 h-2 rounded-full" :class="theme.bg" />
               <span class="text-[9px] font-bold text-gray-400 uppercase tracking-widest">RA — resultados_aprendizaje</span>
             </div>
             <div class="flex items-center gap-1.5">
@@ -364,7 +367,7 @@ async function toggleBoeModulo(cicloId, moduloId) {
             </div>
           </div>
           <button @click="cerrar"
-                  class="px-5 py-2 rounded-xl bg-gray-100 text-gray-600 text-xs font-black
+                  class="min-h-9 px-5 py-2 rounded-full bg-gray-100 text-gray-600 text-xs font-black
                          uppercase tracking-widest hover:bg-gray-200 transition-all">
             Cerrar
           </button>

@@ -7,6 +7,8 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Str;
 use App\Models\MicroproyectoRecurso;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Microproyecto extends Model
 {
@@ -15,6 +17,12 @@ class Microproyecto extends Model
     // Heurística única para convertir "clases" (duración de fase) en calendario —
     // toda sugerencia/validación de fecha_fin de sesiones pasa por aquí.
     public const SEMANAS_POR_CLASE = 1;
+
+    // Etapa (columna `etapa`, ver CLAUDE.md «Etapas»): propuesta del Taller de ideas o plan de
+    // proyecto de las prácticas. No es fillable: la fija quien crea (store / PlanProyectoService).
+    public const ETAPA_TALLER = 'taller';
+    public const ETAPA_PLAN   = 'plan';
+    public const ETAPAS       = [self::ETAPA_TALLER, self::ETAPA_PLAN];
     protected $fillable = [
         'uuid', 'user_id', 'microreto_id', 'empresa_id', 'centro_id', 'familia_id', 'ciclo_id',
         'titulo', 'curso',
@@ -24,7 +32,8 @@ class Microproyecto extends Model
         'objetivos', 'kpis', 'validacion_empresa',
         'paso_actual', 'estado', 'token_empresa', 'empresa_validado',
         'empresa_no_valida_aun', 'enviado_a_empresa_mail', 'docente_validado',
-        'imagen_portada_id',
+        'imagen_portada_id', 'es_demo', 'visible_publico',
+        'horas_estimadas', 'expectativas_empresa',
     ];
 
     protected $casts = [
@@ -45,6 +54,9 @@ class Microproyecto extends Model
         'empresa_no_valida_aun'   => 'boolean',
         'enviado_a_empresa_mail'  => 'boolean',
         'docente_validado'        => 'boolean',
+        'es_demo'                 => 'boolean',
+        'visible_publico'         => 'boolean',
+        'horas_estimadas'         => 'integer',
     ];
 
     protected static function booted(): void
@@ -59,36 +71,69 @@ class Microproyecto extends Model
         });
     }
 
-    public function recursos()
+    public function scopeTaller($query)
+    {
+        return $query->where('etapa', self::ETAPA_TALLER);
+    }
+
+    public function scopePlan($query)
+    {
+        return $query->where('etapa', self::ETAPA_PLAN);
+    }
+
+    public function esPlan(): bool
+    {
+        return $this->etapa === self::ETAPA_PLAN;
+    }
+
+    /** Propuesta del taller de la que sale este plan (null si parte de otro reto) */
+    public function origen(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'origen_id');
+    }
+
+    /** Planes de proyecto que amplían esta propuesta */
+    public function planes(): HasMany
+    {
+        return $this->hasMany(self::class, 'origen_id');
+    }
+
+    /** @return HasMany<MicroproyectoRecurso, $this> */
+    public function recursos(): HasMany
     {
         return $this->hasMany(MicroproyectoRecurso::class)->orderBy('created_at');
     }
 
-    public function imagenPortada()
+    /** @return BelongsTo<MicroproyectoRecurso, $this> */
+    public function imagenPortada(): BelongsTo
     {
         return $this->belongsTo(MicroproyectoRecurso::class, 'imagen_portada_id');
     }
 
-    public function microreto()
+    /** @return BelongsTo<Microreto, $this> */
+    public function microreto(): BelongsTo
     {
         return $this->belongsTo(Microreto::class);
     }
 
-    public function encuentros()
+    /** @return HasMany<Encuentro, $this> */
+    public function encuentros(): HasMany
     {
         return $this->hasMany(Encuentro::class);
     }
 
+    // FK explícita: sin ella Laravel infiere 'docente_id' (por el nombre del método), que no existe
+    /** @return \Illuminate\Database\Eloquent\Relations\BelongsTo<\App\Models\User, $this> */
     public function docente()
     {
-        return $this->belongsTo(\App\Models\User::class);
+        return $this->belongsTo(\App\Models\User::class, 'user_id');
     }
 
     // El proyecto es visible si: eres el docente que lo creó, o tienes acceso (propio o
     // colaborador) a alguno de sus encuentros. Admin ve todo su centro; superadmin, todo.
     public function esVisiblePara(\App\Models\User $user): bool
     {
-        if ($user->isSuperAdmin()) {
+        if ($user->isSuperAdmin() || $user->trabajaEnPracticas()) {
             return true;
         }
 
@@ -111,6 +156,11 @@ class Microproyecto extends Model
             return true;
         }
 
+        // Gestión de prácticas: los planes de proyecto sí (validar, cronograma); las propuestas del taller no
+        if ($user->trabajaEnPracticas()) {
+            return $this->esPlan();
+        }
+
         if ($user->isAdmin()) {
             return $user->centro_educativo_id !== null && $this->centro_id === $user->centro_educativo_id;
         }
@@ -130,6 +180,21 @@ class Microproyecto extends Model
         return count($this->diseno_microproyecto['clases'] ?? []);
     }
 
+    // Nombres de los módulos que trabaja el proyecto: los elegidos en el asistente
+    // (modulos_seleccionados: [{id, nombre}]) o, en proyectos antiguos sin ellos, los
+    // que aparecen en la evaluación oficial (RA/CE por módulo). Lo usan los Resources
+    // de encuentros para mostrar y agrupar por módulo.
+    /** @return array<int, string> */
+    public function nombresModulos(): array
+    {
+        $nombres = collect($this->modulos_seleccionados ?? [])->pluck('nombre');
+        if ($nombres->filter()->isEmpty()) {
+            $nombres = collect($this->evaluacion_oficial ?? [])->pluck('modulo');
+        }
+
+        return $nombres->filter()->map(fn ($n) => trim((string) $n))->unique()->values()->all();
+    }
+
     // Fecha fin sugerida/mínima a partir de una fecha de inicio, según el total de
     // clases estimadas. Null si el proyecto no tiene fases con duración definida.
     public function fechaFinSugerida(Carbon $fechaInicio): ?Carbon
@@ -140,22 +205,26 @@ class Microproyecto extends Model
         return $fechaInicio->copy()->addWeeks($totalClases * self::SEMANAS_POR_CLASE);
     }
 
-    public function empresa()
+    /** @return BelongsTo<Empresa, $this> */
+    public function empresa(): BelongsTo
     {
         return $this->belongsTo(Empresa::class);
     }
 
-    public function centroEducativo()
+    /** @return BelongsTo<CentroEducativo, $this> */
+    public function centroEducativo(): BelongsTo
     {
         return $this->belongsTo(CentroEducativo::class, 'centro_id');
     }
 
-    public function familia()
+    /** @return BelongsTo<Familia, $this> */
+    public function familia(): BelongsTo
     {
         return $this->belongsTo(Familia::class);
     }
 
-    public function cicloFormativo()
+    /** @return BelongsTo<CicloFormativo, $this> */
+    public function cicloFormativo(): BelongsTo
     {
         return $this->belongsTo(CicloFormativo::class, 'ciclo_id');
     }

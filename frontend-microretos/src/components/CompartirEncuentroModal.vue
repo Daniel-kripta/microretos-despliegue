@@ -75,7 +75,9 @@ async function quitarColaborador(colaborador) {
   try {
     await api.delete(`/encuentros/${props.encuentro.id}/colaboradores/${colaborador.id}`)
     colaboradores.value = colaboradores.value.filter(c => c.id !== colaborador.id)
-    candidatos.value.push({ id: colaborador.id, name: colaborador.name })
+    // Se recargan del backend: solo vuelve a ser candidato si comparte familia y módulo con el proyecto
+    const { data } = await api.get(`/encuentros/${props.encuentro.id}/colaboradores/candidatos`)
+    candidatos.value = data
   } catch (e) {
     error.value = 'No se pudo quitar al colaborador.'
   }
@@ -131,8 +133,10 @@ async function quitarColaborador(colaborador) {
 
               <div class="mt-5 pt-4 border-t border-gray-100">
                 <p class="cem-label">Añadir colaborador</p>
-                <div v-if="!candidatos.length" class="text-xs text-gray-400 py-2">
-                  No hay más docentes de tu centro disponibles para añadir.
+                <div v-if="!candidatos.length" class="text-xs text-gray-400 py-2 leading-relaxed">
+                  No hay compañeros disponibles. Solo aparecen docentes de tu centro que impartan algún
+                  módulo de la familia de este proyecto: cada uno los indica en «Mi usuario» (o el
+                  administrador del centro, en Gestión de usuarios).
                 </div>
                 <div v-else class="space-y-2.5">
                   <select v-model="candidatoId" class="cem-select">
@@ -141,7 +145,7 @@ async function quitarColaborador(colaborador) {
                   </select>
                   <label class="cem-checkbox-row">
                     <input type="checkbox" v-model="puedeEditarNuevo" class="cem-checkbox" />
-                    <span>Puede editar (reestructurar equipos, generar códigos, eliminar)</span>
+                    <span>Puede editar (reestructurar grupos, generar códigos, eliminar)</span>
                   </label>
                   <button type="button" @click="anadirColaborador" :disabled="!candidatoId || enviando"
                           class="cem-btn-primary w-full">
@@ -183,15 +187,18 @@ async function quitarColaborador(colaborador) {
 }
 .cem-card {
   position: relative; background: #fff; border: 1px solid #fde68a;
-  border-radius: 2rem; padding: 2.25rem; width: 100%; max-width: 480px;
+  border-radius: 2rem; padding: 1.25rem; width: 100%; max-width: 480px;
   max-height: 90vh; overflow-y: auto;
   box-shadow: 0 0 0 1px rgba(245,158,11,.08), 0 24px 48px rgba(0,0,0,.2), 0 0 80px rgba(245,158,11,.06);
   scrollbar-width: thin; scrollbar-color: #fde68a transparent;
 }
+@media (min-width: 640px) {
+  .cem-card { padding: 2.25rem; }
+}
 .cem-card::-webkit-scrollbar { width: 5px; }
 .cem-card::-webkit-scrollbar-thumb { background: #fde68a; border-radius: 3px; }
 
-.cem-header   { display: flex; align-items: flex-start; gap: 1rem; }
+.cem-header   { display: flex; align-items: flex-start; gap: 1rem; padding-right: 2.5rem; }
 .cem-icon-box { flex-shrink: 0; width: 52px; height: 52px; background: #fffbeb; border: 1.5px solid #fde68a; border-radius: 1rem; display: flex; align-items: center; justify-content: center; }
 .cem-title    { font-size: 1.2rem; font-weight: 900; color: #1F2937; letter-spacing: -.025em; line-height: 1.2; }
 .cem-sub      { font-size: .78rem; color: #6b7280; margin-top: .3rem; font-weight: 500; }
@@ -204,12 +211,13 @@ async function quitarColaborador(colaborador) {
 }
 .cem-toggle {
   font-size: .65rem; font-weight: 900; text-transform: uppercase; letter-spacing: .08em;
-  padding: .35rem .6rem; border-radius: .6rem; background: #f3f4f6; color: #6b7280;
+  padding: .35rem .6rem; border-radius: 9999px; background: #f3f4f6; color: #6b7280;
   border: none; cursor: pointer; white-space: nowrap; transition: all .15s;
+  min-height: 36px; /* objetivo táctil */
 }
 .cem-toggle-on { background: #d1fae5; color: #047857; }
 .cem-remove {
-  width: 26px; height: 26px; border-radius: .5rem; background: #fef2f2; color: #f87171;
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: 9999px; background: #fef2f2; color: #f87171;
   border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .15s;
 }
 .cem-remove:hover { background: #fee2e2; color: #dc2626; }
@@ -225,7 +233,7 @@ async function quitarColaborador(colaborador) {
 .cem-btn-primary {
   display: flex; align-items: center; justify-content: center; gap: .5rem;
   padding: .9rem 1.5rem; background: #f59e0b; color: #fff; border: none;
-  border-radius: 1rem; font-weight: 900; font-size: .7rem; letter-spacing: .12em;
+  border-radius: 9999px; font-weight: 900; font-size: .7rem; letter-spacing: .12em;
   text-transform: uppercase; cursor: pointer; box-shadow: 0 6px 20px rgba(245,158,11,.25); transition: all .2s;
 }
 .cem-btn-primary:hover:not(:disabled)  { background: #d97706; transform: translateY(-1px); }
@@ -234,8 +242,8 @@ async function quitarColaborador(colaborador) {
 .cem-alert-error { display: flex; align-items: center; gap: .75rem; background: #fef2f2; border: 1px solid #fecaca; border-radius: 1rem; padding: .75rem 1rem; color: #dc2626; font-size: .78rem; font-weight: 700; }
 
 .cem-x {
-  position: absolute; top: 1.25rem; right: 1.25rem; width: 32px; height: 32px;
-  background: #fffbeb; border: none; border-radius: .5rem; color: #f59e0b;
+  position: absolute; top: 1.25rem; right: 1.25rem; width: 36px; height: 36px;
+  background: #fffbeb; border: none; border-radius: 9999px; color: #f59e0b;
   display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .2s;
 }
 .cem-x:hover { background: #fef3c7; color: #d97706; }

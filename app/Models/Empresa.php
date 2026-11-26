@@ -5,6 +5,9 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Empresa extends Model
 {
@@ -35,6 +38,7 @@ class Empresa extends Model
         'centro_educativo',  // legacy — se mantiene hasta completar backfill
         'centro_id',         // FK (nueva)
         'tamano',
+        'nivel_digitalizacion',
         'dia_a_normal',
         'friccion_area',
         'friccion_problema',
@@ -45,27 +49,59 @@ class Empresa extends Model
         'expectativas_alumno',
     ];
 
+    // Valores de nivel_digitalizacion (orden de menor a mayor)
+    public const NIVELES_DIGITALIZACION = ['Bajo', 'Medio', 'Alto'];
+
+    // id_externo (clave del paquete de importación) no es fillable: solo lo fija el comando
+    // catalogo:importar-paquete, y las copias (replicate) no lo heredan.
+
     protected $casts = [
         'es_simulada' => 'boolean',
+        'es_catalogo' => 'boolean', // catálogo DuaLab (T2): no fillable, solo lo fija el backend
+        // Área y 4 puntuaciones 0-4 (ver BibliotecaRetos). No fillable: solo lo fija empresas:diagnosticar-madurez
+        'diagnostico_madurez' => 'array',
     ];
 
-    public function centroEducativo()
+    /** @return BelongsTo<CentroEducativo, $this> */
+    public function centroEducativo(): BelongsTo
     {
         return $this->belongsTo(CentroEducativo::class, 'centro_id');
     }
 
-    public function familias()
+    /**
+     * Centros en los que el superadmin ha colocado una empresa captada (centro_id = NULL).
+     *
+     * @return BelongsToMany<CentroEducativo, $this>
+     */
+    public function centrosAsignados(): BelongsToMany
     {
-        return $this->belongsToMany(Familia::class, 'empresa_familia', 'empresa_id', 'familia_id');
+        return $this->belongsToMany(CentroEducativo::class, 'centro_empresa', 'empresa_id', 'centro_id')
+            ->withTimestamps();
     }
 
-    public function microretos()
+    /** @return HasMany<EmpresaCaptacion, $this> Captaciones validadas como esta empresa (entrevista, formulario web) */
+    public function captaciones(): HasMany
+    {
+        return $this->hasMany(EmpresaCaptacion::class, 'empresa_id');
+    }
+
+    /** @return BelongsToMany<Familia, $this> */
+    public function familias(): BelongsToMany
+    {
+        // interes: para qué quiere la empresa al alumnado de esa familia (ver EmpresaFamiliaService)
+        return $this->belongsToMany(Familia::class, 'empresa_familia', 'empresa_id', 'familia_id')
+            ->withPivot('interes');
+    }
+
+    /** @return HasMany<Microreto, $this> */
+    public function microretos(): HasMany
     {
         return $this->hasMany(Microreto::class, 'empresa_id');
     }
 
     // Empresas del centro del usuario: docente y admin ven solo las de su centro
-    // (por centro_id normalizado, o por el nombre legacy si el backfill no llegó);
+    // (por centro_id normalizado, por el nombre legacy si el backfill no llegó, o porque el
+    // superadmin colocó ahí una empresa captada — centro_empresa);
     // superadmin no debería llamar a este scope (ve todas sin filtro).
     public function scopeDelCentroDe($query, \App\Models\User $user)
     {
@@ -80,7 +116,51 @@ class Empresa extends Model
             if ($centroNombre) {
                 $q->orWhere('centro_educativo', $centroNombre);
             }
+            $q->orWhereHas('centrosAsignados', fn ($c) => $c->where('centro_educativo.id', $user->centro_educativo_id));
         });
+    }
+
+    // Plantillas del catálogo DuaLab que los centros pueden usar: al menos una de sus familias
+    // tiene módulos y RA/CE. Las demás no permitirían completar un reto y no se ofrecen.
+    // Con $ciclosCentro (CicloFormativo::idsDelCentro), solo cuentan los ciclos de ese centro.
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<Empresa>  $query
+     * @param  \Illuminate\Support\Collection<array-key, mixed>|null  $ciclosCentro
+     * @return \Illuminate\Database\Eloquent\Builder<Empresa>
+     */
+    public function scopeCatalogoUsable($query, ?\Illuminate\Support\Collection $ciclosCentro = null)
+    {
+        return $query->where('es_catalogo', true)
+            ->whereHas('familias', fn ($q) => $q->conDatosParaRetos($ciclosCentro));
+    }
+
+    // Excluye las plantillas del catálogo que no se pueden usar (ver scopeCatalogoUsable);
+    // las empresas normales no se ven afectadas.
+    /**
+     * @param  \Illuminate\Database\Eloquent\Builder<Empresa>  $query
+     * @return \Illuminate\Database\Eloquent\Builder<Empresa>
+     */
+    public function scopeSinCatalogoInutilizable($query)
+    {
+        return $query->where(fn ($q) => $q->where('es_catalogo', false)
+            ->orWhereHas('familias', fn ($f) => $f->conDatosParaRetos()));
+    }
+
+    /** @return BelongsTo<Empresa, $this> Plantilla del catálogo de la que es copia (T2) */
+    public function copiadaDe(): BelongsTo
+    {
+        return $this->belongsTo(Empresa::class, 'copiada_de_id');
+    }
+
+    // Nombre no repetido entre las empresas del centro: añade " (2)", " (3)"...
+    public static function nombreLibreEnCentro(?int $centroId, string $nombre): string
+    {
+        $base = mb_substr($nombre, 0, 240);
+        $candidato = $base;
+        for ($n = 2; static::where('centro_id', $centroId)->where('nombre_comercial', $candidato)->exists(); $n++) {
+            $candidato = "{$base} ({$n})";
+        }
+        return $candidato;
     }
 
     // Comprueba si esta empresa concreta pertenece al centro del usuario
@@ -96,6 +176,10 @@ class Empresa extends Model
         }
 
         $centroNombre = $user->centroEducativo?->nombre;
-        return $centroNombre !== null && $this->centro_educativo === $centroNombre;
+        if ($centroNombre !== null && $this->centro_educativo === $centroNombre) {
+            return true;
+        }
+
+        return $this->centrosAsignados()->where('centro_educativo.id', $user->centro_educativo_id)->exists();
     }
 }

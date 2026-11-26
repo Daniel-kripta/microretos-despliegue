@@ -3,7 +3,10 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\DatosFPController;
 use App\Http\Controllers\MicroretoIAController;
+use App\Http\Controllers\EmpresaFicticiaController;
 use App\Http\Controllers\AdminAuthController;
+use App\Http\Controllers\PasswordResetController;
+use App\Http\Controllers\SoporteController;
 use App\Http\Controllers\DemoController;
 use App\Http\Controllers\MicroretoTokenController;
 use App\Http\Controllers\MicroproyectoController;
@@ -14,7 +17,33 @@ use App\Http\Controllers\UploadController;
 use App\Http\Controllers\PapeleraController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\EquipoPublicoController;
+use App\Http\Controllers\FormularioEmpresaController;
 use App\Http\Controllers\EquipoGestionController;
+use App\Http\Controllers\DocenteNotaController;
+use App\Http\Controllers\DocenteTareaController;
+use App\Http\Controllers\NotificacionController;
+use App\Http\Controllers\AlumnadoController;
+use App\Http\Controllers\ModulosDocenteController;
+use App\Http\Controllers\PublicMicroretoCatalogoController;
+use App\Http\Controllers\PublicMicroproyectoCatalogoController;
+use App\Http\Controllers\CurriculoController;
+use App\Http\Controllers\ComercialCentroController;
+use App\Http\Controllers\IntegracionFrontofficeController;
+use App\Http\Controllers\ComercialEmpresaController;
+use App\Http\Controllers\CaptacionAdminController;
+use App\Http\Controllers\ValoracionEmpresaController;
+use App\Http\Controllers\ValoracionEmpresaCentralController;
+use App\Http\Controllers\DestacadoCentralController;
+use App\Http\Controllers\PrimerContactoController;
+use App\Http\Controllers\PrimerContactoCorreoController;
+use App\Http\Controllers\PlanProyectoController;
+use App\Http\Controllers\AgendaPracticasController;
+use App\Http\Controllers\RegistroHorasController;
+use App\Http\Controllers\ActividadCentralController;
+use App\Http\Controllers\ConsultaCentralController;
+use App\Http\Controllers\SolicitudRetoController;
+use App\Http\Controllers\SolicitudRetoCorreoController;
+use App\Http\Controllers\SolicitudRetoPublicaController;
 
 /*
 |--------------------------------------------------------------------------
@@ -28,6 +57,26 @@ use App\Http\Controllers\EquipoGestionController;
 Route::middleware('throttle:publico-lectura')->group(function () {
     Route::get('/familias', [DatosFPController::class, 'getFamilias']);
 });
+
+// Formulario de la entrevista que el comercial envía por correo a la empresa (app comercial,
+// /formulario/{token}): sin sesión, el token es la credencial (FormularioEmpresaService)
+Route::middleware('throttle:formulario-empresa')->prefix('public/formulario-empresa/{token}')
+    ->where(['token' => '[A-Za-z0-9]{64}'])->group(function () {
+        Route::get('/',         [FormularioEmpresaController::class, 'show']);
+        Route::put('/empresa',  [FormularioEmpresaController::class, 'guardarEmpresa']);
+        Route::put('/',         [FormularioEmpresaController::class, 'guardar']);
+        Route::post('/firma',   [FormularioEmpresaController::class, 'firmar'])->middleware('throttle:10,1,formulario-firma');
+    });
+
+// Solicitud de retos que DuaLab envía al docente (app DuaLab, /solicitud-reto/{token}): sin
+// sesión, el token es la credencial (SolicitudRetoService). Con el enlace del aviso, sus retos.
+Route::middleware('throttle:solicitud-reto')->prefix('public/solicitud-reto/{token}')
+    ->where(['token' => '[A-Za-z0-9]{64}'])->group(function () {
+        Route::get('/',        [SolicitudRetoPublicaController::class, 'show']);
+        Route::put('/',        [SolicitudRetoPublicaController::class, 'guardar']);
+        Route::post('/enviar', [SolicitudRetoPublicaController::class, 'enviar'])->middleware('throttle:10,1,solicitud-reto-enviar');
+        Route::get('/retos',   [SolicitudRetoPublicaController::class, 'retos']);
+    });
 
 // Acceso público por token temporal (QR para alumnado — ficha del microreto)
 Route::middleware('throttle:microreto-publico')
@@ -57,6 +106,8 @@ Route::middleware('throttle:workspace-lectura')->group(function () {
     Route::delete('/equipo/{token}/tareas/{tarea}',        [EquipoPublicoController::class, 'destroyTarea'])
         ->whereNumber('tarea');
     Route::post('/equipo/{token}/reflexiones',             [EquipoPublicoController::class, 'storeReflexion']);
+    Route::put('/equipo/{token}/miembros/{miembroId}/alias', [EquipoPublicoController::class, 'actualizarAliasMiembro'])
+        ->whereNumber('miembroId');
 });
 
 Route::middleware('throttle:workspace-prototipos')->group(function () {
@@ -93,6 +144,13 @@ Route::middleware('throttle:startup-landing')->group(function () {
     Route::post('/startup/landing/{token}/validar', [MicroproyectoController::class, 'validarEmpresa']);
 });
 
+// Valoración final de la empresa sobre la propuesta de un encuentro creativo (acceso por token
+// que caduca). Cupo por IP: con uno por token, probar tokens al azar no tendría límite.
+Route::middleware('throttle:valoracion-empresa')->group(function () {
+    Route::get('/valoracion-empresa/{token}',  [ValoracionEmpresaController::class, 'showPublico'])->where('token', '[A-Za-z0-9]{20,64}');
+    Route::post('/valoracion-empresa/{token}', [ValoracionEmpresaController::class, 'responder'])->where('token', '[A-Za-z0-9]{20,64}');
+});
+
 // Datos académicos (ciclos, módulos) — throttle estándar
 Route::middleware('throttle:datos-academicos')->group(function () {
     Route::get('/familias/{familia}/ciclos',  [DatosFPController::class, 'getCiclos']);
@@ -101,15 +159,49 @@ Route::middleware('throttle:datos-academicos')->group(function () {
     Route::get('/centros',                    [DatosFPController::class, 'getCentros']);
 });
 
-Route::get('/demos', [DemoController::class, 'index']);
-Route::get('/demos/{familia}/microretos', [DemoController::class, 'microretos'])
-    ->where('familia', '[a-zA-ZÀ-ÿ0-9 ,.\-]{1,100}');
-Route::get('/demos/{familia}', [DemoController::class, 'show'])
-    ->where('familia', '[a-zA-ZÀ-ÿ0-9 ,.\-]{1,100}');
+// Demos públicas: mismo límite que el resto de lecturas públicas
+Route::middleware('throttle:publico-lectura')->group(function () {
+    Route::get('/demos', [DemoController::class, 'index']);
+    Route::get('/demos/{familia}/microretos', [DemoController::class, 'microretos'])
+        ->where('familia', '[a-zA-ZÀ-ÿ0-9 ,.\-]{1,100}');
+    Route::get('/demos/{familia}', [DemoController::class, 'show'])
+        ->where('familia', '[a-zA-ZÀ-ÿ0-9 ,.\-]{1,100}');
+});
+
+// Escaparate público de microretos (frontoffice dualab.es / info.dualab.es) — solo
+// lectura, solo retos marcados visible_publico=true. Rutas específicas antes de la
+// paramétrica {uuid} para que "familias" no se interprete como un uuid.
+Route::middleware('throttle:catalogo-publico')->group(function () {
+    Route::get('/public/microretos/familias', [PublicMicroretoCatalogoController::class, 'familias']);
+    Route::get('/public/microretos/{uuid}',    [PublicMicroretoCatalogoController::class, 'show']);
+    Route::get('/public/microretos',           [PublicMicroretoCatalogoController::class, 'index']);
+
+    // Proyectos completados marcados visible_publico=true — misma política de acceso.
+    Route::get('/public/microproyectos/{uuid}/equipos', [PublicMicroproyectoCatalogoController::class, 'equipos']);
+    Route::get('/public/microproyectos/{uuid}',          [PublicMicroproyectoCatalogoController::class, 'show']);
+    Route::get('/public/microproyectos',                 [PublicMicroproyectoCatalogoController::class, 'index']);
+});
 
 // Auth pública — throttle estricto para prevenir fuerza bruta
 Route::middleware('throttle:admin-login')
     ->post('/admin/login', [AdminAuthController::class, 'login']);
+
+// "¿Has olvidado tu contraseña?" — además del throttle por IP, el broker limita a
+// 1 enlace por email cada 5 minutos (config/auth.php → passwords.users.throttle)
+Route::middleware('throttle:5,1,forgot-password')
+    ->post('/password/forgot', [PasswordResetController::class, 'forgot']);
+Route::middleware('throttle:5,1,reset-password')
+    ->post('/password/reset', [PasswordResetController::class, 'reset']);
+
+// "Contacta con soporte" (pública: quien no consigue entrar también tiene que poder escribir)
+Route::middleware('throttle:soporte')
+    ->post('/soporte', [SoporteController::class, 'store']);
+
+// Webhook del frontoffice (dualab.es/contacto → captaciones). Sin sesión: lo protege la firma
+// HMAC del cuerpo (VerificarFirmaFrontoffice). La comprobación de firma va antes del throttle
+// para que nadie sin el secreto gaste el cupo de los envíos legítimos.
+Route::middleware(['firma.frontoffice', 'throttle:60,1,frontoffice-webhook'])
+    ->post('/integraciones/frontoffice/formularios', [IntegracionFrontofficeController::class, 'recibir']);
 
 
 // --- RUTAS PROTEGIDAS (requieren token Sanctum) ---
@@ -118,15 +210,21 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Auth
     Route::post('/admin/logout',          [AdminAuthController::class, 'logout']);
-    Route::middleware('throttle:5,1')
+    // Todo `throttle:N,M` lleva un prefijo propio (3.er argumento): sin él, la clave del
+    // contador es solo el id del usuario y TODAS las rutas con throttle comparten cupo
+    // (6 consultas a /notificaciones/no-leidas agotaban el 5/min de /generar-microreto → 429).
+    Route::middleware('throttle:5,1,verify-password')
         ->post('/admin/verify-password', [AdminAuthController::class, 'verifyPassword']);
 
     // Perfil propio (accesible por todos los roles autenticados)
     Route::get('/perfil',   [AdminAuthController::class, 'getPerfil']);
     Route::patch('/perfil', [AdminAuthController::class, 'updatePerfil']);
+    // Módulos que imparte el propio docente (limitan a quién puede invitar como colaborador)
+    Route::get('/perfil/modulos', [ModulosDocenteController::class, 'mios']);
+    Route::middleware('throttle:30,1,perfil-modulos')->put('/perfil/modulos', [ModulosDocenteController::class, 'actualizarMios']);
 
-    // Biblioteca de microretos (lectura — todos los roles autenticados)
-    Route::middleware('throttle:60,1')->group(function () {
+    // Biblioteca de microretos (lectura). El controlador acota qué ve cada rol (limitarAlcance)
+    Route::middleware(['rol:superadmin,admin,docente,empresa', 'throttle:60,1,microretos-lectura'])->group(function () {
         Route::get('/microretos',      [MicroretoIAController::class, 'index']);
         Route::get('/microretos/{id}', [MicroretoIAController::class, 'show']);
     });
@@ -137,11 +235,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::middleware('superadmin')->group(function () {
 
         // Centros educativos
-        Route::post('/centros',                      [DatosFPController::class, 'guardarCentro']);
-        Route::put('/centros/{id}',                  [DatosFPController::class, 'actualizarCentro']);
-        Route::delete('/centros/{id}',                [DatosFPController::class, 'eliminarCentro']);
-        Route::post('/centros/{id}/empresas/asociar', [DatosFPController::class, 'asociarEmpresas']);
-        Route::post('/centros/imagen',                [UploadController::class, 'imagenCentro']);
+        Route::post('/centros',                        [DatosFPController::class, 'guardarCentro']);
+        Route::post('/centros/{id}/impacto-cambio',     [DatosFPController::class, 'impactoCambioCentro']);
+        Route::put('/centros/{id}',                    [DatosFPController::class, 'actualizarCentro']);
+        Route::delete('/centros/{id}',                  [DatosFPController::class, 'eliminarCentro']);
+        Route::post('/centros/{id}/empresas/asociar',   [DatosFPController::class, 'asociarEmpresas']);
+        Route::post('/centros/imagen',                  [UploadController::class, 'imagenCentro']);
 
         // Familias profesionales
         Route::post('/familias',       [DatosFPController::class, 'storeFamilia']);
@@ -152,6 +251,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/ciclos',         [DatosFPController::class, 'storeCiclo']);
         Route::put('/ciclos/{id}',     [DatosFPController::class, 'updateCiclo']);
         Route::delete('/ciclos/{id}',  [DatosFPController::class, 'destroyCiclo']);
+        // Currículo del ciclo (módulos, RA y CE) desde CSV; throttle propio: procesa archivos grandes
+        Route::post('/ciclos/{id}/curriculo/importar', [CurriculoController::class, 'importar'])
+            ->whereNumber('id')->middleware('throttle:20,1,curriculo-importar');
 
         // Papelera
         Route::prefix('papelera')->group(function () {
@@ -165,15 +267,19 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // Empresas — lectura (propio centro para docente/admin) para todos los roles autenticados.
-    // Alta/edición/estado: admin (acotado a su propio centro, ver DatosFPController) o superadmin
+    // Alta/estado: admin (acotado a su propio centro, ver DatosFPController) o superadmin
     // — se usa tanto desde "Base de datos" como desde el alta inline en el Generador de Retos.
+    // La edición (PUT) está en el grupo 'docente': la acota EmpresaPolicy::update.
     // El dashboard global (todos los centros) y el borrado son solo superadmin: es catálogo
     // cross-centro, no trabajo del día a día de un centro concreto.
-    Route::get('/empresas',                [DatosFPController::class, 'getEmpresas']);
-    Route::get('/empresas/{id}/familias',  [DatosFPController::class, 'getFamiliasPorEmpresa']);
+    // admin_central_dualab: Central → Usuarios, para asignar empresa a una cuenta
+    Route::get('/empresas',                [DatosFPController::class, 'getEmpresas'])
+        ->middleware('rol:superadmin,admin_central_dualab,admin,docente,empresa');
+    // whereNumber: sin él capturaba /empresas/ficticia-ia/familias (registrada más abajo)
+    Route::get('/empresas/{id}/familias',  [DatosFPController::class, 'getFamiliasPorEmpresa'])->whereNumber('id')
+        ->middleware('rol:superadmin,admin,docente,empresa');
     Route::middleware('admin')->group(function () {
         Route::post('/empresas',               [DatosFPController::class, 'guardarEmpresa']);
-        Route::put('/empresas/{id}',           [DatosFPController::class, 'actualizarEmpresa']);
         Route::patch('/empresas/{id}/estado',  [DatosFPController::class, 'actualizarEstadoEmpresa']);
     });
     Route::middleware('superadmin')->group(function () {
@@ -184,16 +290,81 @@ Route::middleware('auth:sanctum')->group(function () {
     // ── Solo docente (+ admin): generación IA, microretos, sesiones, uploads, startup ──
     Route::middleware('docente')->group(function () {
 
-        // Generación IA: throttle estricto (5/min por usuario)
-        Route::middleware('throttle:5,1')->group(function () {
-            Route::post('/generar-microreto',    [MicroretoIAController::class, 'generar']);
-            Route::post('/simular-info-empresa', [MicroretoIAController::class, 'simularInfoEmpresa']);
+        // Notificaciones in-app y notas personales (vistas Notificaciones y Calendario).
+        // Siempre sobre el usuario autenticado; el contador se consulta al navegar.
+        // Rutas fijas antes que las paramétricas.
+        Route::middleware('throttle:60,1,docente-panel')->group(function () {
+            Route::get('/notificaciones',                [NotificacionController::class, 'index']);
+            Route::get('/notificaciones/no-leidas',      [NotificacionController::class, 'contadorNoLeidas']);
+            Route::post('/notificaciones/leer-todas',    [NotificacionController::class, 'marcarTodasLeidas']);
+            Route::patch('/notificaciones/{id}/leida',   [NotificacionController::class, 'marcarLeida'])
+                ->whereUuid('id');
+
+            Route::get('/notas',            [DocenteNotaController::class, 'index']);
+            Route::post('/notas',           [DocenteNotaController::class, 'store']);
+            Route::patch('/notas/{nota}',   [DocenteNotaController::class, 'update'])->whereNumber('nota');
+            Route::delete('/notas/{nota}',  [DocenteNotaController::class, 'destroy'])->whereNumber('nota');
+
+            Route::get('/tareas',             [DocenteTareaController::class, 'index']);
+            Route::post('/tareas',            [DocenteTareaController::class, 'store']);
+            Route::patch('/tareas/{tarea}',   [DocenteTareaController::class, 'update'])->whereNumber('tarea');
+            Route::delete('/tareas/{tarea}',  [DocenteTareaController::class, 'destroy'])->whereNumber('tarea');
         });
+
+        // Listado de alumnado participante (por encuentros visibles para el usuario).
+        // Respuesta pesada (equipos, fases, tareas…): throttle propio más bajo.
+        Route::get('/alumnado', [AlumnadoController::class, 'index'])->middleware('throttle:30,1,alumnado');
+
+        // Generación IA: throttle estricto (5/min por usuario)
+        Route::middleware('throttle:5,1,ia-generacion')->group(function () {
+            Route::post('/generar-microreto',        [MicroretoIAController::class, 'generar']);
+            Route::post('/simular-info-empresa',     [MicroretoIAController::class, 'simularInfoEmpresa']);
+            // Empresa ficticia completa (datos + diagnóstico) desde el Generador: la IA genera
+            // una propuesta que el usuario revisa antes de guardarla (ver rutas de abajo).
+            Route::post('/empresas/ficticia-ia/propuesta', [EmpresaFicticiaController::class, 'propuesta']);
+        });
+
+        // Confirmar (guardar) o descartar la propuesta de empresa ficticia generada con IA.
+        Route::middleware('throttle:30,1,ficticia-ia')->group(function () {
+            Route::post('/empresas/ficticia-ia',                     [EmpresaFicticiaController::class, 'store']);
+            // Ruta fija antes que las paramétricas de /empresas/ficticia-ia/propuesta/{token}
+            Route::get('/empresas/ficticia-ia/familias',             [EmpresaFicticiaController::class, 'familiasDisponibles']);
+            Route::get('/empresas/ficticia-ia/propuesta/{token}',    [EmpresaFicticiaController::class, 'verPropuesta'])
+                ->whereUuid('token');
+            Route::delete('/empresas/ficticia-ia/propuesta/{token}', [EmpresaFicticiaController::class, 'descartar'])
+                ->whereUuid('token');
+        });
+
+        // Catálogo DuaLab de empresas ficticias (T2): lectura y copia al propio centro.
+        // Rutas específicas antes que /empresas/{id}/... (no colisionan: prefijo 'catalogo').
+        Route::get('/empresas/catalogo',             [EmpresaFicticiaController::class, 'catalogo']);
+        Route::post('/empresas/catalogo/{id}/usar',  [EmpresaFicticiaController::class, 'usarEnCentro'])
+            ->whereNumber('id')
+            ->middleware('throttle:30,1,catalogo-usar');
+
+        // Datos de ficha de una empresa: docente solo sus ficticias, admin las de su centro,
+        // superadmin todas (EmpresaPolicy::update). Alta y estado siguen siendo de admin.
+        Route::put('/empresas/{id}', [DatosFPController::class, 'actualizarEmpresa'])
+            ->whereNumber('id')
+            ->middleware('throttle:30,1,empresa-editar');
+
+        // Diagnóstico de empresa desde el Generador (P1–P4): solo ficticias de su centro,
+        // las reales están protegidas (ver EmpresaPolicy::actualizarDiagnostico).
+        Route::patch('/empresas/{id}/diagnostico', [DatosFPController::class, 'actualizarDiagnosticoEmpresa'])
+            ->whereNumber('id')
+            ->middleware('throttle:30,1,empresa-diagnostico');
+
+        // Interés de la empresa en una familia (paso 3 del Generador): solo superadmin
+        // (EmpresaPolicy::actualizarInteres).
+        Route::patch('/empresas/{id}/interes', [DatosFPController::class, 'actualizarInteresEmpresa'])
+            ->whereNumber('id')
+            ->middleware('throttle:30,1,empresa-interes');
 
         // Guardado y borrado de microretos
         Route::post('/guardar-microreto-bd',    [MicroretoIAController::class, 'guardarEnBD']);
         Route::post('/guardar-microretos-lote', [MicroretoIAController::class, 'guardarLote']);
         Route::delete('/microretos/{id}',       [MicroretoIAController::class, 'destroy']);
+        Route::patch('/microretos/{id}/visible-publico', [MicroretoIAController::class, 'toggleVisiblePublico']);
 
         // Tokens QR temporales
         Route::get('/microretos/{id}/token',    [MicroretoTokenController::class, 'get']);
@@ -209,7 +380,11 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/encuentros/{id}/crear-codigo',       [EncuentroController::class, 'crearCodigo'])->whereNumber('id');
         Route::post('/encuentros/{id}/codigo-ia',          [EncuentroController::class, 'generarCodigoIa'])->whereNumber('id');
         Route::patch('/encuentros/{id}/reestructurar-equipos', [EncuentroController::class, 'reestructurarEquipos'])->whereNumber('id');
+        Route::patch('/encuentros/{id}/miembros/{miembroId}/alias', [EncuentroController::class, 'actualizarAliasMiembro'])->whereNumber('id')->whereNumber('miembroId');
         Route::get('/encuentros/{id}/workspace',           [EncuentroController::class, 'workspace'])->whereNumber('id');
+        // Valoración final de la empresa (P3): el docente solo ve el estado y la respuesta; la envía
+        // DuaLab desde Central (ValoracionEmpresaCentralController)
+        Route::get('/encuentros/{id}/valoracion-empresa',           [ValoracionEmpresaController::class, 'show'])->whereNumber('id');
         // Ruta específica antes de la paramétrica {id} de abajo
         Route::get('/encuentros/{id}/colaboradores/candidatos', [EncuentroColaboradorController::class, 'candidatos'])->whereNumber('id');
         Route::get('/encuentros/{id}/colaboradores',             [EncuentroColaboradorController::class, 'index'])->whereNumber('id');
@@ -221,7 +396,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/encuentros/{id}',                  [EncuentroController::class, 'destroy']);
 
         // Subida y gestión de recursos (Cloudinary)
-        Route::middleware('throttle:30,1')->group(function () {
+        Route::middleware('throttle:30,1,upload')->group(function () {
             Route::get('/upload/recursos',           [UploadController::class, 'listar']);
             Route::post('/upload/recurso',           [UploadController::class, 'recurso']);
             Route::delete('/upload/recurso',         [UploadController::class, 'destroy']);
@@ -229,21 +404,35 @@ Route::middleware('auth:sanctum')->group(function () {
         });
 
         // Módulo Empresas — contacto y validación
-        Route::middleware('throttle:10,1')
+        Route::middleware('throttle:empresas-acceso')
             ->post('/empresas/verificar-acceso', [EmpresaContactoController::class, 'verificarAcceso']);
         Route::post('/empresas/{id}/contactar',          [EmpresaContactoController::class, 'contactar']);
         Route::post('/empresas/{id}/enviar-validacion',  [EmpresaContactoController::class, 'enviarValidacion']);
 
-        // StartUp Day — microproyectos
+        // Taller de Ideas — microproyectos
         Route::get('/startup/proyectos',           [MicroproyectoController::class, 'index']);
         Route::post('/startup/proyectos',          [MicroproyectoController::class, 'store']);
         Route::get('/startup/proyectos/{uuid}',                 [MicroproyectoController::class, 'show']);
         Route::put('/startup/proyectos/{uuid}',                 [MicroproyectoController::class, 'update']);
         Route::post('/startup/proyectos/{uuid}/validar-docente',[MicroproyectoController::class, 'validarDocente']);
+        Route::patch('/startup/proyectos/{uuid}/visible-publico',[MicroproyectoController::class, 'toggleVisiblePublico']);
         Route::delete('/startup/proyectos/{uuid}',              [MicroproyectoController::class, 'destroy']);
 
-        // StartUp Day — IA: sugerencia de RA/CE y KPIs
-        Route::middleware('throttle:10,1')->group(function () {
+        // Plan de proyecto (etapa 2, P4): crearlo (desde una propuesta o un reto) y su cronograma.
+        // Listado y edición: los de la propuesta (/startup/proyectos?etapa=plan y el asistente).
+        Route::post('/planes',                    [PlanProyectoController::class, 'store']);
+        Route::post('/planes/{uuid}/cronograma',  [PlanProyectoController::class, 'storeCronograma'])->whereUuid('uuid');
+        // Agenda de prácticas: avance de los grupos de cada cronograma (docente: los suyos; superadmin/Central: todos)
+        Route::get('/agenda-practicas',           [AgendaPracticasController::class, 'index'])->middleware('throttle:60,1,agenda-practicas');
+        // Horas de prácticas (A3): las anotan docente y DuaLab; cupo propio para las escrituras
+        Route::get('/agenda-practicas/{id}/horas',    [RegistroHorasController::class, 'index'])->whereNumber('id');
+        Route::middleware('throttle:60,1,registro-horas')->group(function () {
+            Route::post('/agenda-practicas/{id}/horas',   [RegistroHorasController::class, 'store'])->whereNumber('id');
+            Route::delete('/agenda-practicas/horas/{id}', [RegistroHorasController::class, 'destroy'])->whereNumber('id');
+        });
+
+        // Taller de Ideas — IA: sugerencia de RA/CE y KPIs
+        Route::middleware('throttle:10,1,startup-ia')->group(function () {
             Route::post('/startup/sugerir-ra-ce',           [MicroproyectoController::class, 'sugerirRaCe']);
             Route::post('/startup/sugerir-kpis',            [MicroproyectoController::class, 'sugerirKpis']);
             Route::post('/startup/sugerir-objetivos',       [MicroproyectoController::class, 'sugerirObjetivos']);
@@ -254,6 +443,10 @@ Route::middleware('auth:sanctum')->group(function () {
         // ── Gestión de equipos (docente) ──────────────────────────────────────
         // Nota: la creación de equipos y el listado con progreso viven en
         // EncuentroController (crearCodigo/workspace) — no duplicar aquí.
+        Route::get('/startup/proyectos/{uuid}/equipos',         [EncuentroController::class, 'equiposDeProyecto']);
+        // Workspace de un grupo en solo lectura para el docente (por id y con su sesión, sin token)
+        Route::get('/startup/equipos/{id}/workspace',          [EquipoPublicoController::class, 'showDocente'])
+            ->whereNumber('id');
         Route::get('/startup/proyectos/{uuid}/pantalla-acceso',[EquipoGestionController::class, 'pantallaAcceso']);
         Route::delete('/startup/equipos/{id}',                 [EquipoGestionController::class, 'destroy'])
             ->whereNumber('id');
@@ -265,18 +458,176 @@ Route::middleware('auth:sanctum')->group(function () {
             ->whereNumber('id');
 
         // Diagnóstico final IA — mismo throttle que el resto de llamadas de generación (arriba)
-        Route::middleware('throttle:10,1')
+        Route::middleware('throttle:10,1,diagnostico-final')
             ->post('/startup/equipos/{id}/diagnostico-final', [EquipoGestionController::class, 'diagnosticoFinal'])
+            ->whereNumber('id');
+        // Edición manual del diagnóstico — sin llamada externa, basta el throttle global
+        Route::patch('/startup/equipos/{id}/diagnostico-final', [EquipoGestionController::class, 'actualizarDiagnosticoFinal'])
             ->whereNumber('id');
     });
 
+    // ── app comercial (comercial.dualab.es): comercial (+ superadmin) ──────────
+    // El comercial no pasa por el grupo 'docente': solo ve las empresas que capta él
+    // (EmpresaCaptacionPolicy::ver). Rutas fijas antes que las paramétricas.
+    Route::middleware('comercial')->prefix('comercial')->group(function () {
+        Route::middleware('throttle:60,1,comercial-lectura')->group(function () {
+            Route::get('/textos-legales',          [ComercialEmpresaController::class, 'textosLegales']);
+            Route::get('/empresas',                [ComercialEmpresaController::class, 'index']);
+            Route::get('/empresas/{id}',           [ComercialEmpresaController::class, 'show'])->whereNumber('id');
+            Route::get('/empresas/{id}/borradores', [ComercialEmpresaController::class, 'borradores'])->whereNumber('id');
+            Route::get('/papelera',                [ComercialEmpresaController::class, 'papelera']);
+        });
+        // A la papelera: pide la contraseña, así que cupo bajo contra fuerza bruta
+        Route::middleware('throttle:5,1,comercial-papelera')
+            ->delete('/empresas/{id}', [ComercialEmpresaController::class, 'destroy'])->whereNumber('id');
+        Route::middleware('throttle:30,1,comercial-escritura')
+            ->patch('/papelera/{id}/restaurar', [ComercialEmpresaController::class, 'restaurar'])->whereNumber('id');
+        Route::middleware('throttle:30,1,comercial-escritura')->group(function () {
+            Route::post('/empresas',                  [ComercialEmpresaController::class, 'store']);
+            Route::put('/empresas/{id}',              [ComercialEmpresaController::class, 'update'])->whereNumber('id');
+            Route::patch('/empresas/{id}/diagnostico', [ComercialEmpresaController::class, 'diagnostico'])->whereNumber('id');
+        });
+        // Llamada a OpenAI: mismo cupo que la generación del Generador de Retos
+        Route::middleware('throttle:5,1,comercial-ia')
+            ->post('/empresas/{id}/generar-retos', [ComercialEmpresaController::class, 'generarRetos'])->whereNumber('id');
+        // Ideas de la IA para la entrevista y dictado de pago: cupos propios, no el de generar retos
+        Route::middleware('throttle:10,1,comercial-sugerencias')
+            ->post('/empresas/{id}/sugerencias', [ComercialEmpresaController::class, 'sugerencias'])->whereNumber('id');
+        Route::middleware('throttle:20,1,comercial-dictado')
+            ->post('/transcribir', [ComercialEmpresaController::class, 'transcribir']);
+        // Formulario por correo: cada envío manda un email
+        Route::middleware('throttle:5,1,comercial-formulario')->group(function () {
+            Route::post('/formularios',                [ComercialEmpresaController::class, 'crearFormulario']);
+            Route::post('/empresas/{id}/formulario',   [ComercialEmpresaController::class, 'enviarFormulario'])->whereNumber('id');
+            Route::delete('/empresas/{id}/formulario', [ComercialEmpresaController::class, 'anularFormulario'])->whereNumber('id');
+        });
+        Route::middleware('throttle:10,1,comercial-firma')
+            ->post('/empresas/{id}/firma', [ComercialEmpresaController::class, 'firmar'])->whereNumber('id');
+
+        // Entrevista a centros educativos (ruta fija antes que la paramétrica)
+        Route::middleware('throttle:60,1,comercial-lectura')->group(function () {
+            Route::get('/centros/textos-legales', [ComercialCentroController::class, 'textosLegales']);
+            Route::get('/centros',                [ComercialCentroController::class, 'index']);
+            Route::get('/centros/{id}',           [ComercialCentroController::class, 'show'])->whereNumber('id');
+        });
+        Route::middleware('throttle:30,1,comercial-escritura')
+            ->post('/centros', [ComercialCentroController::class, 'store']);
+    });
+
+    // ── DuaLab Central → Alumnado destacado para prácticas (P3b, solo superadmin) ──────
+    Route::middleware(['practicas', 'throttle:60,1,central-destacados'])->prefix('central/destacados')->group(function () {
+        Route::get('/',                    [DestacadoCentralController::class, 'index']);
+        Route::put('/miembros/{id}',       [DestacadoCentralController::class, 'marcar'])->whereNumber('id');
+    });
+
+    // ── DuaLab Central → Primer contacto: formularios y correo de la web por su API firmada
+    //    (red_dualab, central_dualab y superadmin) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-primer-contacto'])->prefix('central/primer-contacto')->group(function () {
+        Route::get('/formularios',         [PrimerContactoController::class, 'index']);
+        Route::get('/formularios/{id}',    [PrimerContactoController::class, 'show'])->whereNumber('id');
+        Route::patch('/formularios/{id}',  [PrimerContactoController::class, 'update'])->whereNumber('id');
+
+        // Correo de info@ (específicas antes de las paramétricas)
+        Route::post('/correo/enviar',                     [PrimerContactoCorreoController::class, 'enviar'])->middleware('throttle:20,1,central-correo-enviar');
+        Route::post('/correo/envios/{id}/reintentar',     [PrimerContactoCorreoController::class, 'reintentar'])->whereNumber('id');
+        Route::delete('/correo/envios/{id}',              [PrimerContactoCorreoController::class, 'descartar'])->whereNumber('id');
+        // Papelera del correo: la ve y la borra del todo solo el superadmin (como Red DuaLab → Papelera)
+        Route::middleware('superadmin')->group(function () {
+            Route::get('/correo/papelera',                [PrimerContactoCorreoController::class, 'papelera']);
+            Route::delete('/correo/papelera',             [PrimerContactoCorreoController::class, 'vaciarPapelera']);
+            Route::delete('/correo/{id}',                 [PrimerContactoCorreoController::class, 'destroy'])->whereNumber('id');
+        });
+        Route::get('/correo',                             [PrimerContactoCorreoController::class, 'index']);
+        Route::get('/correo/{id}',                        [PrimerContactoCorreoController::class, 'show'])->whereNumber('id');
+        Route::patch('/correo/{id}',                      [PrimerContactoCorreoController::class, 'update'])->whereNumber('id');
+        Route::get('/correo/{correo}/adjuntos/{adjunto}', [PrimerContactoCorreoController::class, 'adjunto'])->whereNumber(['correo', 'adjunto']);
+    });
+
+    // ── DuaLab Central → Historial: qué se hizo, quién y cuándo (superadmin y admin_central_dualab) ──
+    Route::middleware(['admin.central', 'throttle:60,1,central-historial'])->group(function () {
+        Route::get('/central/historial', [ActividadCentralController::class, 'index']);
+        Route::get('/central/historial/envios/{id}', [ActividadCentralController::class, 'envio'])->whereNumber('id');
+    });
+
+    // ── DuaLab Central → Red DuaLab → Empresas y Centros: consulta de solo lectura (editar es de Base de datos) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-consulta'])->prefix('central')->group(function () {
+        Route::get('/empresas', [ConsultaCentralController::class, 'empresas']);
+        Route::get('/centros',  [ConsultaCentralController::class, 'centros']);
+    });
+
+    // ── DuaLab Central → Red DuaLab → Empresas → «Enviar soluciones a las empresas»: DuaLab envía a la
+    //    empresa el enlace para valorar las soluciones de los grupos (red_dualab, central_dualab, superadmin) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-valoraciones'])->prefix('central/valoraciones-empresa')->group(function () {
+        Route::get('/',                 [ValoracionEmpresaCentralController::class, 'index']);
+        Route::post('/{id}',            [ValoracionEmpresaCentralController::class, 'solicitar'])->whereNumber('id');
+        Route::patch('/{id}/enviada',   [ValoracionEmpresaCentralController::class, 'marcarEnviada'])->whereNumber('id');
+        Route::post('/{id}/enviar',     [ValoracionEmpresaCentralController::class, 'enviar'])->whereNumber('id')->middleware('throttle:20,1,central-valoraciones-correo');
+    });
+
+    // ── DuaLab Central → Primer contacto → Solicitudes de retos de docentes (red_dualab, central_dualab
+    //    y superadmin; los datos para el generador, solo superadmin, que es quien genera) ──
+    Route::middleware(['primer.contacto', 'throttle:60,1,central-solicitudes-reto'])->prefix('central/solicitudes-reto')->group(function () {
+        Route::get('/',                [SolicitudRetoController::class, 'index']);
+        // Respuestas de los docentes en info@ (por la referencia del asunto); específica antes de /{id}
+        Route::get('/correos',         [SolicitudRetoCorreoController::class, 'index']);
+        Route::get('/para-generador',  [SolicitudRetoController::class, 'paraGenerador'])->middleware('admin.central');
+        Route::get('/{id}',            [SolicitudRetoController::class, 'show'])->whereNumber('id');
+        Route::get('/{id}/correos',    [SolicitudRetoCorreoController::class, 'deSolicitud'])->whereNumber('id');
+        Route::get('/{id}/retos',      [SolicitudRetoController::class, 'retos'])->whereNumber('id');
+        Route::patch('/{id}',          [SolicitudRetoController::class, 'update'])->whereNumber('id');
+        // Gestión de las peticiones (superadmin y admin_central_dualab): empresa, generar y publicar retos
+        Route::middleware('admin.central')->group(function () {
+            Route::get('/{id}/generador',   [SolicitudRetoController::class, 'generador'])->whereNumber('id');
+            Route::get('/{id}/generacion',  [SolicitudRetoController::class, 'generacion'])->whereNumber('id');
+            Route::get('/{id}/empresas',    [SolicitudRetoController::class, 'empresas'])->whereNumber('id');
+            Route::post('/{id}/publicar',   [SolicitudRetoController::class, 'publicar'])->whereNumber('id');
+            // A la papelera; restaurarla o borrarla del todo es de la Papelera, solo superadmin
+            Route::delete('/{id}',          [SolicitudRetoController::class, 'destroy'])->whereNumber('id');
+            // Un reto de la recámara a la papelera (los publicados en un centro, no)
+            Route::delete('/{id}/retos/{uuid}', [SolicitudRetoController::class, 'eliminarReto'])->whereNumber('id')->whereUuid('uuid');
+        });
+        // Envían correo: cupo propio
+        Route::middleware('throttle:20,1,central-solicitudes-reto-correo')->group(function () {
+            Route::post('/',               [SolicitudRetoController::class, 'store']);
+            Route::post('/{id}/reenviar',  [SolicitudRetoController::class, 'reenviar'])->whereNumber('id');
+            Route::post('/{id}/avisar',    [SolicitudRetoController::class, 'avisar'])->whereNumber('id');
+            // Autorizar a trabajarlos: los publica en el centro del docente (gestión de las peticiones)
+            Route::post('/{id}/autorizar', [SolicitudRetoController::class, 'autorizar'])->whereNumber('id')->middleware('admin.central');
+        });
+    });
+
+    // ── Revisión de lo captado por comerciales (Central → Red DuaLab: red_dualab, central_dualab y superadmin) ──
+    Route::middleware(['red.dualab', 'throttle:60,1,captacion-admin'])->prefix('captacion')->group(function () {
+        Route::get('/resumen',                          [CaptacionAdminController::class, 'resumen']);
+        Route::get('/empresas',                         [CaptacionAdminController::class, 'empresas']);
+        Route::put('/empresas/{id}/validar',            [CaptacionAdminController::class, 'validar'])->whereNumber('id');
+        Route::post('/empresas/{id}/descartar',         [CaptacionAdminController::class, 'descartarEmpresa'])->whereNumber('id');
+        Route::get('/empresas/{id}/coincidencias',      [CaptacionAdminController::class, 'coincidenciasEmpresa'])->whereNumber('id');
+        Route::get('/centros',                          [CaptacionAdminController::class, 'centros']);
+        Route::put('/centros/{id}/validar',             [CaptacionAdminController::class, 'validarCentro'])->whereNumber('id');
+        Route::post('/centros/{id}/descartar',          [CaptacionAdminController::class, 'descartarCentro'])->whereNumber('id');
+        Route::get('/centros/{id}/coincidencias',       [CaptacionAdminController::class, 'coincidenciasCentro'])->whereNumber('id');
+        Route::get('/borradores',                       [CaptacionAdminController::class, 'borradores']);
+        Route::get('/borradores/{uuid}',                [CaptacionAdminController::class, 'borrador'])->whereUuid('uuid');
+        Route::post('/borradores/{uuid}/publicar',      [CaptacionAdminController::class, 'publicar'])->whereUuid('uuid');
+        Route::delete('/borradores/{uuid}',             [CaptacionAdminController::class, 'descartar'])->whereUuid('uuid');
+        Route::get('/firmas/{uuid}/imagen',             [CaptacionAdminController::class, 'imagenFirma'])->whereUuid('uuid');
+        // A la papelera: acción crítica, superadmin y admin_central_dualab
+        Route::middleware('admin.central')->group(function () {
+            Route::delete('/empresas/{id}',             [CaptacionAdminController::class, 'eliminarEmpresa'])->whereNumber('id');
+            Route::delete('/centros/{id}',              [CaptacionAdminController::class, 'eliminarCentro'])->whereNumber('id');
+            Route::delete('/borradores/{uuid}/papelera', [CaptacionAdminController::class, 'eliminarBorrador'])->whereUuid('uuid');
+        });
+    });
+
     // ── Gestión de usuarios (solo admin) ─────────────────────────────
-    Route::middleware('admin')->prefix('admin/usuarios')->group(function () {
+    // Superadmin, admin_central_dualab (todas las cuentas menos superadmin) y admin de centro (las de su centro)
+    Route::middleware('usuarios')->prefix('admin/usuarios')->group(function () {
         Route::get('/',                       [AdminUserController::class, 'index']);
         Route::post('/',                      [AdminUserController::class, 'store']);
         Route::get('/papelera',               [AdminUserController::class, 'papelera']);
         // Throttle propio: implica cambio de contraseña de otra cuenta, más restrictivo que el resto del CRUD
-        Route::middleware('throttle:20,1')
+        Route::middleware('throttle:20,1,admin-usuario-editar')
             ->patch('/{user}',                [AdminUserController::class, 'update']);
         Route::patch('/{user}/activar',       [AdminUserController::class, 'activar']);
         Route::patch('/{user}/bloquear',      [AdminUserController::class, 'toggleBloquear']);
@@ -284,297 +635,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/{id}/restaurar',        [AdminUserController::class, 'restaurar']);
         Route::delete('/{id}/destruir',       [AdminUserController::class, 'destruir']);
         Route::patch('/{user}/centro',        [AdminUserController::class, 'asociarCentro'])->middleware('superadmin');
+        Route::get('/{user}/modulos',         [ModulosDocenteController::class, 'delDocente']);
+        Route::middleware('throttle:30,1,admin-usuario-modulos')
+            ->put('/{user}/modulos',          [ModulosDocenteController::class, 'actualizarDelDocente']);
     });
 
-});
-
-
-// -------- IMPORTACIONES (protegidas con auth) ---------
-Route::middleware('auth:sanctum')->get('/importar-excel', function () {
-    $path = storage_path('app/agraria.csv'); ///////////////////////////////////////
-    if (!file_exists($path)) return "No se encuentra el archivo agraria.csv en storage/app/";
-
-    $familiaImport = 'Agraria'; /////////////////////////////////////
-    $familiaId     = \App\Models\Familia::where('nombre', $familiaImport)->value('id');
-
-    $file     = fopen($path, 'r');
-    $contador = 0;
-
-    // Ignoramos las primeras 4 líneas (cabeceras)
-    for ($i = 0; $i < 4; $i++) fgetcsv($file, 0, ',', '"');
-
-    \Illuminate\Support\Facades\DB::transaction(function () use ($file, $familiaImport, $familiaId, &$contador) {
-        while (($data = fgetcsv($file, 0, ',', '"')) !== false) {
-            if (empty($data[4])) continue;
-
-            $empresa = \App\Models\Empresa::create([
-                'cif'               => $data[2]  ?? null,
-                'nombre_comercial'  => $data[4],
-                'telefono'          => $data[5]  ?? null,
-                'estado_contacto'   => $data[6]  ?? null,
-                'fecha_cita'        => $data[7]  ?? null,
-                'persona_contacto'  => $data[8]  ?? null,
-                'email_general'     => $data[9]  ?? null,
-                'posicion_contacto' => $data[10] ?? null,
-                'sector'            => $data[11] ?? null,
-                'actividad'         => $data[12] ?? null,
-                'horario_atencion'  => $data[13] ?? null,
-                'direccion'         => $data[14] ?? null,
-                'numero'            => $data[15] ?? null,
-                'otros_direccion'   => $data[16] ?? null,
-                'codigo_postal'     => $data[17] ?? null,
-                'municipio'         => $data[18] ?? null,
-                'provincia'         => $data[19] ?? null,
-                'web'               => $data[20] ?? null,
-                'proyecto_asociado' => $data[21] ?? null,
-            ]);
-
-            \Illuminate\Support\Facades\DB::table('empresa_familia')->insert([
-                'empresa_id' => $empresa->id,
-                'familia'    => $familiaImport,
-                'familia_id' => $familiaId,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-
-            $contador++;
-        }
-    });
-
-    fclose($file);
-    return "¡BINGO! Se han importado correctamente {$contador} empresas.";
-});
-
-/* 
-
-Route::get('/importar-excel-nuevo', function () {
-    // 1. CAMBIA AQUÍ el nombre de tu archivo CSV
-    $path = storage_path('app/madera_2.csv'); ////////////////////////////////////////////
-    if (!file_exists($path)) return "No se encuentra el archivo en storage/app/";
-
-    $file = fopen($path, 'r');
-
-    // Como en tu foto las cabeceras están en la fila 1, solo ignoramos 1 línea
-    fgetcsv($file, 0, ',', '"');
-
-    $contador = 0;
-
-    // Leemos línea por línea
-    while (($data = fgetcsv($file, 0, ',', '"')) !== false) {
-        
-        // Si la columna 0 (Nombre) está vacía, saltamos esta fila
-        if (!isset($data[0]) || empty(trim($data[0]))) continue; 
-
-        // 2. Mapeo adaptado a tu nueva imagen
-        $empresa = \App\Models\Empresa::create([
-            'nombre_comercial'  => trim($data[0]),
-            'direccion'         => trim($data[1]) ?? null,
-            'cif'               => trim($data[2]) ?? null,
-            'provincia'         => trim($data[3]) ?? null,
-            'municipio'         => trim($data[4]) ?? null,
-            'sector'            => trim($data[5]) ?? null,
-            'email_general'     => trim($data[6]) ?? null,
-            'telefono'          => trim($data[7]) ?? null,
-            'estado_contacto'   => trim($data[8]) ?? null, // Usamos la columna "NOTA" para esto
-            
-            // --- ASIGNAMOS EL CENTRO EDUCATIVO ---
-            // 3. CAMBIA AQUÍ el nombre del nuevo colegio
-            'centro_educativo'  => 'IES Aguas Nuevas', 
-        ]);
-
-        // 4. La vinculamos a la Familia Profesional
-        // Viendo tu Excel, casi todas son Agrarias, así que lo puedes dejar fijo aquí
-        \Illuminate\Support\Facades\DB::table('empresa_familia')->insert([
-            'empresa_id' => $empresa->id,
-            'familia'    => 'Madera, Mueble y Corcho' //////////////////////////////////////////////////////////
-        ]);
-
-        $contador++;
-    }
-
-    fclose($file);
-    return "¡BINGO! Se han importado correctamente {$contador} nuevas empresas.";
-}); */
-
-/* Route::get('/importar-excel-3', function () {
-    // 1. CAMBIA AQUÍ el nombre de tu nuevo archivo CSV
-    $path = storage_path('app/madera_2.csv'); ///////////////////////////////////////77
-    if (!file_exists($path)) return "No se encuentra el archivo en storage/app/";
-
-    $file = fopen($path, 'r');
-
-    // Ignoramos la primera línea (cabeceras rojas)
-    fgetcsv($file, 0, ',', '"');
-
-    $contador = 0;
-
-    // Leemos línea por línea
-    while (($data = fgetcsv($file, 0, ',', '"')) !== false) {
-        
-        // El Nombre Comercial está en la columna D (índice 3). Si está vacía, saltamos.
-        if (!isset($data[3]) || empty(trim($data[3]))) continue; 
-
-        // 2. Mapeo adaptado a la estructura de tu nuevo Excel (Filas amarillas)
-        $empresa = \App\Models\Empresa::create([
-            'cif'               => trim($data[2] ?? null),  // C
-            'nombre_comercial'  => trim($data[3] ?? null),  // D
-            'razon_social'      => trim($data[4] ?? null),  // E
-            'telefono'          => trim($data[5] ?? null),  // F
-            'estado_contacto'   => trim($data[6] ?? null),  // G
-            'fecha_cita'        => trim($data[7] ?? null),  // H
-            'persona_contacto'  => trim($data[8] ?? null),  // I
-            'email_general'     => trim($data[9] ?? null),  // J
-            'web'               => trim($data[10] ?? null), // K
-            'posicion_contacto' => trim($data[11] ?? null), // L
-            'sector'            => trim($data[12] ?? null), // M
-            'actividad'         => trim($data[13] ?? null), // N
-            'horario_atencion'  => trim($data[14] ?? null), // O
-            'direccion'         => trim($data[15] ?? null), // P
-            'numero'            => trim($data[16] ?? null), // Q
-            'otros_direccion'   => trim($data[17] ?? null), // R
-            'codigo_postal'     => trim($data[18] ?? null), // S
-            'municipio'         => trim($data[19] ?? null), // T
-            'provincia'         => trim($data[20] ?? null), // U (Asumiendo que está en la U)
-            
-            // --- ASIGNAMOS EL CENTRO EDUCATIVO ---
-            
-            'centro_educativo'  => 'IES Nombre Del Centro', 
-        ]);
-
-        // 4. La vinculamos a la Familia Profesional
-        // Veo en la imagen sectores como "Madera, Mueble y Corcho" o el ciclo "CFGM - SMR" (Informática)
-        \Illuminate\Support\Facades\DB::table('empresa_familia')->insert([
-            'empresa_id' => $empresa->id,
-            'familia'    => 'Madera, Mueble y Corcho' // //////////////////////////////////77
-        ]);
-
-        $contador++;
-    }
-
-    fclose($file);
-    return "¡BINGO! Se han importado correctamente {$contador} nuevas empresas con la nueva estructura.";
-}); */
-
-
-
-/* Route::get('/importar-excel-4', function () {
-    // 1. CAMBIA AQUÍ el nombre de tu nuevo archivo CSV
-    $path = storage_path('app/transporte_2.csv');  //////////////////////////////////////
-    if (!file_exists($path)) return "No se encuentra el archivo en storage/app/";
-
-    $file = fopen($path, 'r');
-
-    // Ignoramos la primera línea (cabeceras)
-    fgetcsv($file, 0, ',', '"');
-
-    $contador = 0;
-
-    // Leemos línea por línea
-    while (($data = fgetcsv($file, 0, ',', '"')) !== false) {
-        
-        // El Nombre Comercial está en la columna D (índice 3). Si está vacía, saltamos.
-        if (!isset($data[3]) || empty(trim($data[3]))) continue; 
-
-        // 2. Mapeo adaptado a la estructura de tu nuevo Excel (Filas Rosas/Naranjas)
-        $empresa = \App\Models\Empresa::create([
-            'cif'               => trim($data[2] ?? null),  // Col C
-            'nombre_comercial'  => trim($data[3] ?? null),  // Col D
-            
-            // Faltan Razón Social en el Excel, pasamos directo al teléfono
-            'telefono'          => trim($data[4] ?? null),  // Col E
-            'estado_contacto'   => trim($data[5] ?? null),  // Col F
-            'fecha_cita'        => trim($data[6] ?? null),  // Col G
-            'persona_contacto'  => trim($data[7] ?? null),  // Col H
-            'email_general'     => trim($data[8] ?? null),  // Col I
-            'web'               => trim($data[9] ?? null),  // Col J
-            
-            // Falta "Posición", pasamos directo al Sector
-            'sector'            => trim($data[10] ?? null), // Col K
-            'actividad'         => trim($data[11] ?? null), // Col L
-            'horario_atencion'  => trim($data[12] ?? null), // Col M
-            'direccion'         => trim($data[13] ?? null), // Col N
-            'numero'            => trim($data[14] ?? null), // Col O
-            'otros_direccion'   => trim($data[15] ?? null), // Col P
-            'codigo_postal'     => trim($data[16] ?? null), // Col Q
-            'municipio'         => trim($data[17] ?? null), // Col R
-            'provincia'         => trim($data[18] ?? null), // Col S
-            
-           
-            'centro_educativo'  => 'IES Aguas Nuevas', 
-        ]);
-
-        // 4. La vinculamos a la Familia Profesional
-        // Viendo el Excel, el sector es Transporte y Mantenimiento
-        \Illuminate\Support\Facades\DB::table('empresa_familia')->insert([
-            'empresa_id' => $empresa->id,
-            'familia'    => 'Transporte y Mantenimiento de Vehículos' // <--- CAMBIA ESTO si es necesario
-        ]);
-
-        $contador++;
-    }
-
-    fclose($file);
-    return "¡BINGO! Se han importado correctamente {$contador} nuevas empresas (Formato Transporte).";
-}); */
-
-Route::middleware('auth:sanctum')->get('/importar-excel-5', function () {
-    // 1. CAMBIA AQUÍ el nombre de tu archivo CSV de Energías
-    $path = storage_path('app/energia_2.csv'); 
-    if (!file_exists($path)) return "No se encuentra el archivo en storage/app/";
-
-    $file = fopen($path, 'r');
-
-    // Ignoramos la primera línea (cabeceras)
-    fgetcsv($file, 0, ',', '"');
-
-    $contador = 0;
-
-    // Leemos línea por línea
-    while (($data = fgetcsv($file, 0, ',', '"')) !== false) {
-        
-        // ¡OJO! Ahora el Nombre Comercial cae en el índice 4 por el desfase del CSV
-        if (!isset($data[4]) || empty(trim($data[4]))) continue; 
-
-        // 2. Mapeo corregido con el desfase exacto del log de SQL
-        $empresa = \App\Models\Empresa::create([
-            'cif'               => trim($data[3] ?? null),
-            'nombre_comercial'  => trim($data[4] ?? null),
-            'razon_social'      => trim($data[5] ?? null),
-            'telefono'          => trim($data[6] ?? null),
-            'estado_contacto'   => trim($data[7] ?? null),
-            'fecha_cita'        => trim($data[8] ?? null),
-            'persona_contacto'  => trim($data[9] ?? null),
-            'email_general'     => trim($data[10] ?? null),
-            'web'               => trim($data[11] ?? null), // ¡Ahora sí cae en el campo TEXT!
-            'posicion_contacto' => trim($data[12] ?? null),
-            'sector'            => trim($data[13] ?? null), // Aquí pondrá "Energía"
-            'actividad'         => trim($data[14] ?? null),
-            'horario_atencion'  => trim($data[15] ?? null),
-            'direccion'         => trim($data[16] ?? null),
-            'numero'            => trim($data[17] ?? null),
-            'otros_direccion'   => trim($data[18] ?? null),
-            'codigo_postal'     => trim($data[19] ?? null),
-            'municipio'         => trim($data[20] ?? null),
-            'provincia'         => trim($data[21] ?? null),
-            
-            
-            'centro_educativo'  => 'IES Aguas Nuevas', 
-        ]);
-
-        // 4. Asignamos la Familia Profesional (con FK normalizada)
-        $familiaImport5 = 'Energía y Agua';
-        $familiaId5 = \App\Models\Familia::where('nombre', $familiaImport5)->value('id');
-        \Illuminate\Support\Facades\DB::table('empresa_familia')->insert([
-            'empresa_id' => $empresa->id,
-            'familia'    => $familiaImport5,
-            'familia_id' => $familiaId5,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
-
-        $contador++;
-    }
-
-    fclose($file);
-    return "¡BINGO! Se han importado correctamente {$contador} nuevas empresas del sector Energía.";
 });

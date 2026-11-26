@@ -1,9 +1,13 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import IconoFase from './IconoFase.vue'
+import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../api.js'
 import { useMicroproyectoPdfExport } from '../composables/useMicroproyectoPdfExport.js'
 import { duracionPorFase, FASES_PROYECTO, COLOR_MAP_FASES } from '../config/fasesProyecto.js'
+import MicroretoModal from './MicroretoModal.vue'
+import EquiposSeguimiento from './EquiposSeguimiento.vue'
+import { useRoleTheme } from '../composables/useRoleTheme.js'
 
 const props = defineProps({
   proyectoUuid: { type: String, default: null },
@@ -11,6 +15,14 @@ const props = defineProps({
 const emit = defineEmits(['close'])
 
 const router = useRouter()
+const { theme } = useRoleTheme()
+
+const paletteExtra = {
+  centros:          { hoverBorderText: 'hover:border-centros hover:text-centros', hoverBorder: 'hover:border-centros/30', hoverBorderBgDoc: 'hover:border-centros/30 hover:bg-centros/5', groupHoverBgDoc: 'group-hover/doc:bg-centros/20', groupHoverTextDoc: 'group-hover/doc:text-centros' },
+  empresas:         { hoverBorderText: 'hover:border-empresas hover:text-empresas', hoverBorder: 'hover:border-empresas/30', hoverBorderBgDoc: 'hover:border-empresas/30 hover:bg-empresas/5', groupHoverBgDoc: 'group-hover/doc:bg-empresas/20', groupHoverTextDoc: 'group-hover/doc:text-empresas' },
+  administraciones: { hoverBorderText: 'hover:border-administraciones hover:text-administraciones', hoverBorder: 'hover:border-administraciones/30', hoverBorderBgDoc: 'hover:border-administraciones/30 hover:bg-administraciones/5', groupHoverBgDoc: 'group-hover/doc:bg-administraciones/20', groupHoverTextDoc: 'group-hover/doc:text-administraciones' },
+  primary:          { hoverBorderText: 'hover:border-primary-600 hover:text-primary-700', hoverBorder: 'hover:border-primary-600/30', hoverBorderBgDoc: 'hover:border-primary-600/30 hover:bg-primary-600/5', groupHoverBgDoc: 'group-hover/doc:bg-primary-600/20', groupHoverTextDoc: 'group-hover/doc:text-primary-700' },
+}
 
 const abierto  = computed(() => Boolean(props.proyectoUuid))
 const proyecto = ref(null)
@@ -23,7 +35,7 @@ const recursosAbierto = ref(false)
 const modalRecurso    = ref(null)
 
 const raCeAbierto  = ref(false)
-const urlCopiada   = ref(false)
+const microretoModalId = ref(null)
 
 watch(() => props.proyectoUuid, async (uuid) => {
   if (!uuid) return
@@ -62,19 +74,6 @@ const raCeBlocks = computed(() => {
   return [...mapa.entries()].map(([modulo, items]) => ({ modulo, items }))
 })
 
-const landingUrl = computed(() => {
-  if (!proyecto.value?.token_empresa) return ''
-  const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  const base = isLocal ? window.location.origin : 'https://dualab.es'
-  return `${base}/startup/landing/${proyecto.value.token_empresa}`
-})
-
-async function copiarUrl() {
-  await navigator.clipboard.writeText(landingUrl.value)
-  urlCopiada.value = true
-  setTimeout(() => { urlCopiada.value = false }, 2000)
-}
-
 function abrirRecurso(item) {
   const filename = (item.filename || '').toLowerCase()
   let tipo = 'otro'
@@ -90,20 +89,12 @@ function getEstadoBadge(p) {
     return { label: 'En edición', cls: 'bg-amber-50 border-amber-200 text-amber-700', dot: 'bg-amber-400' }
   if (p.estado === 'archivado')
     return { label: 'Archivado', cls: 'bg-gray-100 border-gray-200 text-gray-400', dot: 'bg-gray-400' }
-  if (p.estado === 'validado') {
-    if (p.empresa_validado && p.docente_validado)
-      return { label: 'Validado · Completo', cls: 'bg-[#00A859]/10 border-[#00A859]/30 text-[#00A859]', dot: 'bg-[#00A859]' }
-    if (p.empresa_validado)
-      return { label: 'Validado · Empresa', cls: 'bg-[#00A859]/10 border-[#00A859]/30 text-[#00A859]', dot: 'bg-[#00A859]' }
-    if (p.docente_validado)
-      return { label: 'Validado · Docente', cls: 'bg-emerald-50 border-emerald-300 text-emerald-700', dot: 'bg-emerald-500' }
-    return { label: 'Validado', cls: 'bg-[#00A859]/10 border-[#00A859]/30 text-[#00A859]', dot: 'bg-[#00A859]' }
-  }
-  if (p.empresa_no_valida_aun)
-    return { label: 'Propuesta · No validar aún', cls: 'bg-red-50 border-red-300 text-red-700', dot: 'bg-red-400' }
-  if (p.enviado_a_empresa_mail)
-    return { label: 'Propuesta · Enviada, esperando', cls: 'bg-blue-50 border-blue-200 text-blue-700', dot: 'bg-blue-400' }
-  return { label: 'Propuesta · Pendiente enviar', cls: 'bg-violet-50 border-violet-300 text-violet-700', dot: 'bg-violet-400' }
+  if (p.estado === 'completado')
+    return { label: 'Completado', cls: 'bg-sky-50 border-sky-300 text-sky-700', dot: 'bg-sky-500' }
+  // La valida el docente; las validadas antes por la empresa lo indican en el bloque de validación
+  if (p.estado === 'validado')
+    return { label: 'Validado', cls: 'bg-emerald-50 border-emerald-300 text-emerald-700', dot: 'bg-emerald-500' }
+  return { label: 'Sin validar', cls: 'bg-violet-50 border-violet-300 text-violet-700', dot: 'bg-violet-400' }
 }
 
 const { descargarPDF } = useMicroproyectoPdfExport()
@@ -111,6 +102,34 @@ const { descargarPDF } = useMicroproyectoPdfExport()
 function cerrar() {
   emit('close')
 }
+
+// ── Accesibilidad (como ModalTaller, GUIA_DISENO §6.4) ──────────────────────
+// Diálogo con nombre, foco dentro, Escape cierra y el foco vuelve a donde estaba. Si hay abierto
+// algo por encima (ficha del reto o un recurso), Escape es de eso. Se guarda el overflow anterior
+// del body: esta ficha también se abre encima del diagnóstico, que ya lo bloquea.
+const panel = ref(null)
+let focoPrevio = null
+let overflowPrevio = ''
+function alTeclear(e) {
+  if (e.key !== 'Escape' || microretoModalId.value || modalRecurso.value) return
+  e.stopPropagation()
+  cerrar()
+}
+watch(abierto, async (v, antes) => {
+  if (v) {
+    focoPrevio = document.activeElement
+    overflowPrevio = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', alTeclear, true)
+    await nextTick()
+    panel.value?.focus()
+  } else if (antes) {
+    document.removeEventListener('keydown', alTeclear, true)
+    document.body.style.overflow = overflowPrevio
+    focoPrevio?.focus?.()
+  }
+}, { immediate: true })
+onUnmounted(() => document.removeEventListener('keydown', alTeclear, true))
 
 function irAPaginaCompleta() {
   router.push({ name: 'startup-day-detalle', params: { uuid: proyecto.value.uuid } })
@@ -126,47 +145,67 @@ function irAPaginaCompleta() {
 
         <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="cerrar" />
 
-        <div class="relative z-10 bg-[#f4f6fa] rounded-3xl shadow-2xl w-full max-w-4xl my-4
-                    max-h-[92vh] flex flex-col overflow-hidden">
+        <div ref="panel" role="dialog" aria-modal="true" tabindex="-1"
+             :aria-label="proyecto?.titulo ? `Ficha del reto ajustado: ${proyecto.titulo}` : 'Ficha del reto ajustado'"
+             class="relative z-10 bg-[#f4f6fa] rounded-[2rem] shadow-2xl w-full max-w-4xl my-4
+                    max-h-[92vh] flex flex-col overflow-hidden outline-none">
 
           <!-- Barra superior sticky -->
-          <div class="flex items-center justify-between px-5 py-3 bg-white border-b border-gray-100 shrink-0">
+          <div class="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-5 py-3 bg-white border-b border-gray-100 shrink-0">
             <div class="flex items-center gap-2.5 min-w-0">
-              <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full
-                          bg-[#00A859]/10 border border-[#00A859]/20 shrink-0">
-                <span class="w-2 h-2 rounded-full bg-[#00A859]" />
-                <span class="text-[10px] font-black uppercase tracking-widest text-[#00A859]">StartUp Day</span>
+              <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border shrink-0"
+                   :class="[theme.bg5, theme.border20]">
+                <span class="w-2 h-2 rounded-full" :class="theme.bg" />
+                <span class="text-[10px] font-black uppercase tracking-widest" :class="theme.text">Reto ajustado</span>
               </div>
               <span v-if="proyecto"
-                    :class="['inline-flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border shrink-0', getEstadoBadge(proyecto).cls]">
+                    :class="['hidden sm:inline-flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border shrink-0', getEstadoBadge(proyecto).cls]">
                 <span :class="['w-1.5 h-1.5 rounded-full shrink-0', getEstadoBadge(proyecto).dot]" />
                 {{ getEstadoBadge(proyecto).label }}
               </span>
               <p v-if="proyecto" class="font-black text-[#1F2937] text-sm truncate">{{ proyecto.titulo }}</p>
             </div>
-            <div class="flex items-center gap-2 shrink-0">
+            <!-- En móvil, "Ficha reto original" y "Página completa" quedan solo con icono (círculo)
+                 para que el ✕ nunca se salga de la barra -->
+            <div class="flex items-center gap-2 shrink-0 ml-auto">
               <button v-if="proyecto"
                       @click="descargarPDF(proyecto)"
-                      class="px-3 py-1.5 rounded-xl bg-[#00A859] text-[10px] font-black uppercase tracking-widest
-                             text-white shadow-sm hover:bg-[#009048] transition-all flex items-center gap-1.5">
+                      class="min-h-9 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest
+                             text-white shadow-sm transition-all flex items-center gap-1.5"
+                      :class="[theme.bg, theme.bgHover]">
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
                         d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2"/>
                 </svg>
                 PDF
               </button>
-              <button v-if="proyecto" @click="irAPaginaCompleta"
-                      class="px-3 py-1.5 rounded-xl bg-gray-50 border border-gray-200
+              <button v-if="proyecto?.microreto_id"
+                      @click="microretoModalId = proyecto.microreto_id"
+                      class="w-9 h-9 justify-center sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 rounded-full border-2
+                             text-[10px] font-black uppercase tracking-widest
+                             hover:text-white transition-all flex items-center gap-1.5"
+                      :class="[theme.bg5, theme.border, theme.text, theme.bgHover]"
+                      aria-label="Ficha reto original"
+                      title="Ver la ficha del reto original del que deriva este reto ajustado">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
+                        d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                </svg>
+                <span class="hidden sm:inline">Ficha reto original</span>
+              </button>
+              <button v-if="proyecto" @click="irAPaginaCompleta" aria-label="Página completa"
+                      class="w-9 h-9 justify-center sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 rounded-full bg-gray-50 border border-gray-200
                              text-[10px] font-black uppercase tracking-widest text-gray-500
-                             hover:border-[#00A859] hover:text-[#5a7a00] transition-all flex items-center gap-1.5">
-                Página completa
+                             transition-all flex items-center gap-1.5"
+                      :class="paletteExtra[theme.key].hoverBorderText">
+                <span class="hidden sm:inline">Página completa</span>
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
                         d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
                 </svg>
               </button>
-              <button @click="cerrar"
-                      class="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center
+              <button @click="cerrar" aria-label="Cerrar"
+                      class="w-9 h-9 shrink-0 rounded-full bg-gray-100 flex items-center justify-center
                              text-gray-400 hover:bg-gray-200 transition-all">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
@@ -180,15 +219,15 @@ function irAPaginaCompleta() {
 
             <!-- Spinner -->
             <div v-if="cargando" class="flex flex-col items-center justify-center py-24">
-              <svg class="animate-spin w-10 h-10 text-[#00A859] mb-3" viewBox="0 0 24 24">
+              <svg class="animate-spin w-10 h-10 mb-3" :class="theme.text" viewBox="0 0 24 24">
                 <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
               </svg>
-              <p class="text-[#00A859] font-black tracking-widest uppercase text-xs">Cargando...</p>
+              <p class="font-black tracking-widest uppercase text-xs" :class="theme.text">Cargando...</p>
             </div>
 
             <!-- Error -->
             <div v-else-if="error" class="text-center py-24 text-gray-400">
-              <p class="text-sm">No se pudo cargar el proyecto.</p>
+              <p class="text-sm">No se pudo cargar el reto ajustado.</p>
             </div>
 
             <template v-else-if="proyecto">
@@ -201,9 +240,12 @@ function irAPaginaCompleta() {
                   <div class="notebook-hole" /><div class="notebook-hole" />
                 </div>
 
-                <h1 class="text-xl md:text-2xl font-black tracking-tight text-[#121212] mb-5 leading-tight">
+                <h1 class="text-xl md:text-2xl font-black tracking-tight text-azul-noche mb-2 leading-tight">
                   {{ proyecto.titulo }}
                 </h1>
+                <p v-if="proyecto.diseno_reto?.pregunta_reto" class="text-sm md:text-base font-bold italic mb-5 leading-snug" :class="theme.text">
+                  "{{ proyecto.diseno_reto.pregunta_reto }}"
+                </p>
 
                 <!-- Meta-band -->
                 <div v-if="proyecto.empresa_nombre || proyecto.centro_nombre || proyecto.ciclo_nombre" class="meta-band">
@@ -233,7 +275,7 @@ function irAPaginaCompleta() {
                   </div>
                   <div v-if="proyecto.ciclo_nombre" class="meta-cell">
                     <div class="w-9 h-9 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center shrink-0">
-                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" class="text-[#00A859]" style="width:1.1rem;height:1.1rem">
+                      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" :class="theme.text" style="width:1.1rem;height:1.1rem">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                               d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z"/>
                       </svg>
@@ -245,77 +287,25 @@ function irAPaginaCompleta() {
                   </div>
                 </div>
 
-                <!-- Panel de estado (solo lectura) -->
+                <!-- Panel de estado (solo lectura). La empresa ya no valida al inicio: solo se
+                     conserva el aviso de las que validó antes con el enlace (2026-11-23) -->
                 <div v-if="proyecto.estado === 'propuesta' || proyecto.estado === 'validado'" class="mb-6 space-y-3">
-                  <div class="bg-white border border-gray-100 rounded-2xl p-4 shadow-sm">
-                    <p class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-3">Enlace de validación empresa</p>
-                    <div class="flex items-center gap-2">
-                      <p class="flex-1 text-xs text-gray-400 truncate font-mono bg-gray-50 border border-gray-100 rounded-xl px-3 py-2 min-w-0">{{ landingUrl }}</p>
-                      <button @click="copiarUrl"
-                              :class="['shrink-0 px-3 py-2 rounded-xl text-xs font-bold border transition-all',
-                                        urlCopiada ? 'bg-[#00A859]/10 text-[#00A859] border-[#00A859]/20' : 'bg-white text-gray-500 border-gray-200 hover:border-[#00A859] hover:text-[#00A859]']">
-                        {{ urlCopiada ? '¡Copiado!' : 'Copiar' }}
-                      </button>
-                    </div>
-                  </div>
-
                   <div v-if="proyecto.empresa_validado"
-                       class="flex items-center gap-3 px-4 py-3.5 rounded-2xl bg-[#00A859]/8 border border-[#00A859]/25 shadow-sm">
-                    <div class="w-9 h-9 rounded-xl bg-[#00A859]/15 border border-[#00A859]/25 flex items-center justify-center shrink-0">
-                      <svg class="w-5 h-5 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                       class="flex items-center gap-3 px-4 py-3.5 rounded-2xl border shadow-sm"
+                       :class="[theme.bg5, theme.border20]">
+                    <div class="w-9 h-9 rounded-xl border flex items-center justify-center shrink-0"
+                         :class="[theme.bgSoft, theme.border20]">
+                      <svg class="w-5 h-5" :class="theme.text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
                       </svg>
                     </div>
                     <div>
-                      <p class="text-sm font-black text-[#00A859]">La empresa ha validado el proyecto</p>
-                      <p class="text-[10px] text-[#00A859]/70 mt-0.5">
+                      <p class="text-sm font-black" :class="theme.text">La empresa validó el reto ajustado</p>
+                      <p class="text-[10px] mt-0.5" :class="theme.text50">
                         {{ proyecto.empresa_nombre || proyecto.datos_empresa?.nombre }} respondió con validación positiva.
                       </p>
                     </div>
                   </div>
-                  <div v-else-if="proyecto.empresa_no_valida_aun"
-                       class="flex items-start gap-3 px-4 py-3.5 rounded-2xl bg-red-50 border border-red-300 shadow-sm">
-                    <div class="w-9 h-9 rounded-xl bg-red-100 border border-red-200 flex items-center justify-center shrink-0 mt-0.5">
-                      <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                      </svg>
-                    </div>
-                    <div>
-                      <p class="text-sm font-black text-red-700">La empresa contestó: "No validar aún"</p>
-                      <p class="text-[10px] text-red-500 mt-0.5">
-                        {{ proyecto.empresa_nombre || proyecto.datos_empresa?.nombre }} revisó el proyecto pero indicó que aún no puede validarlo.
-                      </p>
-                    </div>
-                  </div>
-                  <div v-else-if="proyecto.enviado_a_empresa_mail"
-                       class="flex items-center gap-3 px-4 py-3.5 rounded-2xl bg-blue-50 border border-blue-200 shadow-sm">
-                    <div class="w-9 h-9 rounded-xl bg-blue-100 border border-blue-200 flex items-center justify-center shrink-0">
-                      <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-                      </svg>
-                    </div>
-                    <div class="flex-1 min-w-0">
-                      <p class="text-sm font-black text-blue-700">Enlace enviado a la empresa · Pendiente de respuesta</p>
-                      <p class="text-[10px] text-blue-500 mt-0.5 truncate">
-                        Esperando que {{ proyecto.empresa_nombre || proyecto.datos_empresa?.nombre || 'la empresa' }} acceda y responda.
-                      </p>
-                    </div>
-                  </div>
-                  <div v-else class="flex items-center gap-3 px-4 py-3.5 rounded-2xl bg-violet-50 border border-violet-300 shadow-sm">
-                    <div class="w-9 h-9 rounded-xl bg-white border border-violet-200 flex items-center justify-center shrink-0">
-                      <svg class="w-5 h-5 text-violet-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                      </svg>
-                    </div>
-                    <div class="flex-1 min-w-0">
-                      <p class="text-sm font-black text-violet-700">Propuesta pendiente de enviar a empresa</p>
-                      <p class="text-[10px] text-gray-400 mt-0.5">
-                        El enlace está generado pero aún no se ha confirmado el envío a
-                        {{ proyecto.empresa_nombre || proyecto.datos_empresa?.nombre || 'la empresa' }}.
-                      </p>
-                    </div>
-                  </div>
-
                   <div v-if="proyecto.docente_validado"
                        class="flex items-center gap-3 px-4 py-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 shadow-sm">
                     <div class="w-9 h-9 rounded-xl bg-emerald-100 border border-emerald-200 flex items-center justify-center shrink-0">
@@ -324,8 +314,8 @@ function irAPaginaCompleta() {
                       </svg>
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="text-sm font-black text-emerald-700">Validado por docente</p>
-                      <p class="text-[10px] text-emerald-600/70 mt-0.5">Validación pedagógica aprobada por el docente responsable.</p>
+                      <p class="text-sm font-black text-emerald-700">Validado por el docente</p>
+                      <p class="text-[10px] text-emerald-600/70 mt-0.5">Listo para llevarlo al aula en un encuentro.</p>
                     </div>
                   </div>
                   <div v-else class="flex items-center gap-3 px-4 py-3.5 rounded-2xl bg-gray-50 border border-gray-100 shadow-sm">
@@ -335,8 +325,8 @@ function irAPaginaCompleta() {
                       </svg>
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="text-sm font-black text-gray-500">Pendiente de validación docente</p>
-                      <p class="text-[10px] text-gray-400 mt-0.5">Gestiona el envío y la validación desde la página completa del proyecto.</p>
+                      <p class="text-sm font-black text-gray-500">Sin validar</p>
+                      <p class="text-[10px] text-gray-400 mt-0.5">Valídalo desde la página completa del reto ajustado.</p>
                     </div>
                   </div>
                 </div>
@@ -350,7 +340,7 @@ function irAPaginaCompleta() {
                     <div class="space-y-0.5 text-xs text-gray-400">
                       <p v-if="proyecto.datos_empresa.sector">{{ proyecto.datos_empresa.sector }}</p>
                       <p v-if="proyecto.datos_empresa.persona_contacto">{{ proyecto.datos_empresa.persona_contacto }}</p>
-                      <p v-if="proyecto.datos_empresa.email">{{ proyecto.datos_empresa.email }}</p>
+                      <p v-if="proyecto.datos_empresa.email" class="break-all">{{ proyecto.datos_empresa.email }}</p>
                       <p v-if="proyecto.datos_empresa.descripcion" class="mt-2 leading-relaxed text-gray-500">{{ proyecto.datos_empresa.descripcion }}</p>
                     </div>
                   </div>
@@ -358,12 +348,13 @@ function irAPaginaCompleta() {
                   <div v-if="proyecto.datos_centro?.docente_nombre" class="card-section">
                     <p class="section-label">Docente responsable</p>
                     <div class="flex items-center gap-3">
-                      <div class="w-8 h-8 rounded-full bg-[#00A859]/10 border border-[#00A859]/20 flex items-center justify-center shrink-0 text-[#00A859] font-black text-sm">
+                      <div class="w-8 h-8 rounded-full border flex items-center justify-center shrink-0 font-black text-sm"
+                           :class="[theme.bg5, theme.border20, theme.text]">
                         {{ proyecto.datos_centro.docente_nombre.charAt(0).toUpperCase() }}
                       </div>
-                      <div>
+                      <div class="min-w-0">
                         <p class="text-sm font-bold text-[#1F2937]">{{ proyecto.datos_centro.docente_nombre }}</p>
-                        <a v-if="proyecto.datos_centro.docente_email" :href="`mailto:${proyecto.datos_centro.docente_email}`" class="text-xs text-[#00A859] hover:underline">
+                        <a v-if="proyecto.datos_centro.docente_email" :href="`mailto:${proyecto.datos_centro.docente_email}`" class="text-xs hover:underline break-all" :class="theme.text">
                           {{ proyecto.datos_centro.docente_email }}
                         </a>
                       </div>
@@ -373,15 +364,6 @@ function irAPaginaCompleta() {
                     </div>
                   </div>
 
-                  <div v-if="proyecto.equipo?.alumnos?.length" class="card-section sm:col-span-2">
-                    <p class="section-label">Equipo ({{ proyecto.equipo.alumnos.length }} personas)</p>
-                    <div class="flex flex-wrap gap-1.5">
-                      <span v-for="a in proyecto.equipo.alumnos" :key="a.nombre"
-                            class="text-xs bg-gray-50 border border-gray-200 px-2.5 py-1 rounded-full text-gray-600">
-                        {{ a.nombre }}<span v-if="a.rol" class="text-gray-400"> · {{ a.rol }}</span>
-                      </span>
-                    </div>
-                  </div>
                 </div>
 
                 <!-- ═══ Currículo ═══ -->
@@ -391,14 +373,15 @@ function irAPaginaCompleta() {
                     <p class="section-label">Módulos ({{ proyecto.modulos_seleccionados.length }})</p>
                     <div class="flex flex-wrap gap-1.5">
                       <span v-for="m in proyecto.modulos_seleccionados" :key="m.id"
-                            class="text-xs bg-[#00A859]/8 border border-[#00A859]/15 text-[#00A859] px-2.5 py-1 rounded-full">
+                            class="text-xs border px-2.5 py-1 rounded-full"
+                            :class="[theme.bg5, theme.border15, theme.text]">
                         {{ m.nombre }}
                       </span>
                     </div>
                   </div>
 
                   <div v-if="raCeBlocks.length" class="card-section sm:col-span-2">
-                    <button @click="raCeAbierto = !raCeAbierto" type="button" class="w-full flex items-center justify-between text-left">
+                    <button @click="raCeAbierto = !raCeAbierto" type="button" class="w-full min-h-9 flex items-center justify-between text-left">
                       <p class="section-label">Resultados de Aprendizaje y Criterios de Evaluación</p>
                       <svg :class="['w-4 h-4 text-gray-400 transition-transform duration-200 shrink-0', raCeAbierto ? 'rotate-180' : '']"
                            fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -409,7 +392,7 @@ function irAPaginaCompleta() {
                                 leave-active-class="transition-all duration-150 ease-in" leave-to-class="opacity-0 -translate-y-1">
                       <div v-if="raCeAbierto" class="pt-3 space-y-4">
                         <div v-for="block in raCeBlocks" :key="block.modulo" class="border border-gray-100 rounded-xl p-3.5">
-                          <p class="text-[10px] font-black uppercase tracking-widest text-[#00A859] mb-2">{{ block.modulo }}</p>
+                          <p class="text-[10px] font-black uppercase tracking-widest mb-2" :class="theme.text">{{ block.modulo }}</p>
                           <div v-for="(item, i) in block.items" :key="i" :class="{ 'mt-3 pt-3 border-t border-gray-50': i > 0 }">
                             <p class="text-sm font-semibold text-[#1F2937] mb-1.5">{{ item.ra }}</p>
                             <ul v-if="item.ce?.length" class="space-y-1 pl-1">
@@ -428,50 +411,62 @@ function irAPaginaCompleta() {
                 </div>
 
                 <!-- ═══ El reto ═══ -->
-                <p v-if="proyecto.diseno_reto?.descripcion || proyecto.fundamentacion?.contexto" class="group-header">El reto</p>
+                <div v-if="proyecto.diseno_reto?.descripcion || proyecto.fundamentacion?.contexto"
+                     class="flex flex-wrap items-center justify-between gap-2">
+                  <p class="group-header !mb-0">El reto</p>
+                  <button v-if="proyecto.microreto_id" @click="microretoModalId = proyecto.microreto_id"
+                          class="min-h-9 px-3 py-1.5 rounded-full border-2 text-[10px] font-black
+                                 uppercase tracking-wider hover:text-white transition-all mb-3"
+                          :class="[theme.bg5, theme.border, theme.text, theme.bgHover]">
+                    📎 Ver ficha reto original
+                  </button>
+                </div>
                 <div v-if="proyecto.diseno_reto?.descripcion || proyecto.fundamentacion?.contexto" class="grid gap-4 sm:grid-cols-2 mb-6">
-                  <div v-if="proyecto.fundamentacion?.contexto || proyecto.fundamentacion?.justificacion || proyecto.fundamentacion?.innovacion"
-                       class="card-section sm:col-span-2">
-                    <p class="section-label">Fundamentación</p>
-                    <div v-if="proyecto.fundamentacion.contexto" class="mb-3">
-                      <p class="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">Contexto de partida</p>
-                      <p class="text-sm text-gray-600 leading-relaxed">{{ proyecto.fundamentacion.contexto }}</p>
-                    </div>
-                    <div v-if="proyecto.fundamentacion.justificacion" class="mb-3">
-                      <p class="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">Justificación pedagógica</p>
-                      <p class="text-sm text-gray-600 leading-relaxed">{{ proyecto.fundamentacion.justificacion }}</p>
-                    </div>
-                    <div v-if="proyecto.fundamentacion.innovacion">
-                      <p class="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">Elemento innovador</p>
-                      <p class="text-sm text-gray-600 leading-relaxed">{{ proyecto.fundamentacion.innovacion }}</p>
-                    </div>
-                  </div>
-
                   <div v-if="proyecto.diseno_reto?.descripcion" class="card-section sm:col-span-2">
-                    <p class="section-label">Diseño del reto</p>
-                    <p v-if="proyecto.diseno_reto.pregunta_reto" class="text-sm font-bold text-[#00A859] mb-2 italic">
+                    <p class="reto-section-title">Diseño del reto</p>
+                    <p v-if="proyecto.diseno_reto.pregunta_reto"
+                       class="text-sm font-bold italic mb-3 pl-3 py-2 border-l-4 rounded-r-lg"
+                       :class="[theme.text, theme.border20, theme.bg5]">
                       "{{ proyecto.diseno_reto.pregunta_reto }}"
                     </p>
                     <p class="text-sm text-gray-600 leading-relaxed">{{ proyecto.diseno_reto.descripcion }}</p>
                     <div v-if="proyecto.diseno_reto.restricciones" class="mt-3 pt-3 border-t border-gray-100">
-                      <p class="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">Restricciones</p>
+                      <p class="reto-subsection-label">Restricciones</p>
                       <p class="text-xs text-gray-500">{{ proyecto.diseno_reto.restricciones }}</p>
                     </div>
                     <div v-if="proyecto.diseno_reto.entregables" class="mt-3 pt-3 border-t border-gray-100">
-                      <p class="text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">Entregables</p>
+                      <p class="reto-subsection-label">Entregables</p>
                       <p class="text-xs text-gray-500">{{ proyecto.diseno_reto.entregables }}</p>
+                    </div>
+                  </div>
+
+                  <div v-if="proyecto.fundamentacion?.contexto || proyecto.fundamentacion?.justificacion || proyecto.fundamentacion?.innovacion"
+                       class="card-section sm:col-span-2">
+                    <p class="reto-section-title">Fundamentación</p>
+                    <div v-if="proyecto.fundamentacion.contexto" class="mb-3">
+                      <p class="reto-subsection-label">Contexto de partida</p>
+                      <p class="text-sm text-gray-600 leading-relaxed">{{ proyecto.fundamentacion.contexto }}</p>
+                    </div>
+                    <div v-if="proyecto.fundamentacion.justificacion" class="mb-3">
+                      <p class="reto-subsection-label">Justificación pedagógica</p>
+                      <p class="text-sm text-gray-600 leading-relaxed">{{ proyecto.fundamentacion.justificacion }}</p>
+                    </div>
+                    <div v-if="proyecto.fundamentacion.innovacion">
+                      <p class="reto-subsection-label">Elemento innovador</p>
+                      <p class="text-sm text-gray-600 leading-relaxed">{{ proyecto.fundamentacion.innovacion }}</p>
                     </div>
                   </div>
                 </div>
 
                 <!-- ═══ Propuesta ═══ -->
-                <p v-if="proyecto.diseno_microproyecto?.fases?.length || proyecto.diseno_microproyecto?.metodologia" class="group-header">Propuesta</p>
+                <p v-if="proyecto.diseno_microproyecto?.fases?.length || proyecto.diseno_microproyecto?.metodologia" class="group-header">Metodología y fases</p>
                 <div v-if="proyecto.diseno_microproyecto?.fases?.length || proyecto.diseno_microproyecto?.metodologia" class="grid gap-4 sm:grid-cols-2 mb-6">
                   <div v-if="proyecto.diseno_microproyecto?.fases?.length" class="card-section">
-                    <p class="section-label">Fases del proyecto</p>
+                    <p class="section-label">Fases del trabajo en el aula</p>
                     <ol class="space-y-2.5">
                       <li v-for="(f, i) in proyecto.diseno_microproyecto.fases" :key="i" class="flex items-start gap-2.5 text-sm">
-                        <span class="w-5 h-5 rounded-full bg-[#00A859]/10 text-[#00A859] font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5">{{ i + 1 }}</span>
+                        <span class="w-5 h-5 rounded-full font-black text-[10px] flex items-center justify-center shrink-0 mt-0.5"
+                              :class="[theme.bg5, theme.text]">{{ i + 1 }}</span>
                         <div>
                           <p class="font-bold text-[#1F2937]">{{ f.nombre }}
                             <span v-if="duracionPorFase(proyecto.diseno_microproyecto.clases, i)" class="text-gray-400 font-normal text-xs">
@@ -496,10 +491,10 @@ function irAPaginaCompleta() {
 
                   <div v-if="proyecto.diseno_microproyecto?.clases?.length" class="card-section sm:col-span-2">
                     <p class="section-label">Cronograma — hitos por fase</p>
-                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-2">
+                    <div class="grid grid-cols-1 min-[420px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mt-2">
                       <div v-for="f in FASES_PROYECTO" :key="f.num" class="rounded-2xl border p-3" :class="COLOR_MAP_FASES[f.color]">
                         <div class="flex items-center gap-1.5 mb-1">
-                          <span class="text-base leading-none">{{ f.icono }}</span>
+                          <IconoFase :num="f.num" class="h-4 w-4 shrink-0" />
                           <p class="font-black text-xs text-[#1F2937]">{{ f.label }}</p>
                         </div>
                         <p class="text-[9px] font-bold uppercase tracking-wide opacity-70">
@@ -523,7 +518,7 @@ function irAPaginaCompleta() {
                     <p class="section-label">Objetivos</p>
                     <ul class="space-y-1.5">
                       <li v-for="obj in proyecto.objetivos.lista" :key="obj" class="flex items-start gap-2 text-sm text-gray-600">
-                        <span class="text-[#00A859] shrink-0 mt-0.5 font-bold">›</span> {{ obj }}
+                        <span class="shrink-0 mt-0.5 font-bold" :class="theme.text">›</span> {{ obj }}
                       </li>
                     </ul>
                   </div>
@@ -531,14 +526,14 @@ function irAPaginaCompleta() {
                     <p class="section-label">KPIs ({{ proyecto.kpis.lista.length }})</p>
                     <ul class="space-y-1.5 pt-1">
                       <li v-for="kpi in proyecto.kpis.lista" :key="kpi" class="flex items-start gap-2 text-sm text-gray-600">
-                        <span class="text-[#00A859] shrink-0 mt-0.5">✓</span> {{ kpi }}
+                        <span class="shrink-0 mt-0.5" :class="theme.text">✓</span> {{ kpi }}
                       </li>
                     </ul>
                   </div>
                 </div>
 
-                <!-- ═══ Publicar ═══ -->
-                <p v-if="proyecto.resumen?.texto" class="group-header">Publicar</p>
+                <!-- ═══ Resumen y recursos ═══ -->
+                <p v-if="proyecto.resumen?.texto" class="group-header">Resumen y recursos</p>
                 <div class="grid gap-4 sm:grid-cols-2">
                   <div v-if="proyecto.resumen?.texto" class="card-section sm:col-span-2">
                     <p class="section-label">Resumen ejecutivo</p>
@@ -548,10 +543,12 @@ function irAPaginaCompleta() {
                   <div v-if="videos.length || documentos.length" class="sm:col-span-2">
                     <button @click="recursosAbierto = !recursosAbierto"
                             class="w-full flex items-center justify-between px-5 py-4 bg-white border border-gray-100
-                                   rounded-[1.5rem] shadow-sm hover:border-[#00A859]/30 transition-all">
+                                   rounded-[1.5rem] shadow-sm transition-all"
+                            :class="paletteExtra[theme.key].hoverBorder">
                       <div class="flex items-center gap-3">
-                        <div class="w-8 h-8 rounded-xl bg-[#00A859]/10 border border-[#00A859]/20 flex items-center justify-center shrink-0">
-                          <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <div class="w-8 h-8 rounded-xl border flex items-center justify-center shrink-0"
+                             :class="[theme.bg5, theme.border20]">
+                          <svg class="w-4 h-4" :class="theme.text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                   d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/>
                           </svg>
@@ -579,7 +576,7 @@ function irAPaginaCompleta() {
                             <div v-for="(v, i) in videos" :key="i"
                                  class="flex items-center gap-2 p-2.5 bg-gray-50 rounded-xl border border-gray-100
                                         hover:border-blue-200 hover:bg-blue-50/40 transition-colors group/vid">
-                              <button @click="abrirRecurso(v)" class="w-7 h-7 rounded-lg bg-blue-50 shrink-0 flex items-center justify-center group-hover/vid:bg-blue-100 transition-colors">
+                              <button @click="abrirRecurso(v)" class="w-9 h-9 rounded-full bg-blue-50 shrink-0 flex items-center justify-center group-hover/vid:bg-blue-100 transition-colors">
                                 <svg class="w-3.5 h-3.5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                         d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z"/>
@@ -597,15 +594,17 @@ function irAPaginaCompleta() {
                           <div class="space-y-2">
                             <div v-for="(d, i) in documentos" :key="i"
                                  class="flex items-center gap-2 p-2.5 bg-gray-50 rounded-xl border border-gray-100
-                                        hover:border-[#00A859]/30 hover:bg-[#00A859]/5 transition-colors group/doc">
-                              <button @click="abrirRecurso(d)" class="w-7 h-7 rounded-lg bg-[#00A859]/10 shrink-0 flex items-center justify-center group-hover/doc:bg-[#00A859]/20 transition-colors">
-                                <svg class="w-3.5 h-3.5 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        transition-colors group/doc"
+                                 :class="paletteExtra[theme.key].hoverBorderBgDoc">
+                              <button @click="abrirRecurso(d)" class="w-9 h-9 rounded-full shrink-0 flex items-center justify-center transition-colors"
+                                      :class="[theme.bg5, paletteExtra[theme.key].groupHoverBgDoc]">
+                                <svg class="w-3.5 h-3.5" :class="theme.text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                         d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/>
                                 </svg>
                               </button>
                               <button @click="abrirRecurso(d)" class="flex-1 min-w-0 text-left">
-                                <p class="text-xs font-bold text-gray-700 truncate group-hover/doc:text-[#00A859] transition-colors">{{ d.label || d.filename }}</p>
+                                <p class="text-xs font-bold text-gray-700 truncate transition-colors" :class="paletteExtra[theme.key].groupHoverTextDoc">{{ d.label || d.filename }}</p>
                                 <p class="text-[9px] text-blue-400/80 truncate">Cloudinary · {{ d.filename }}</p>
                               </button>
                             </div>
@@ -616,30 +615,34 @@ function irAPaginaCompleta() {
                   </div>
                 </div>
 
-                <!-- ══ FEEDBACK DE LA EMPRESA ══ -->
-                <div v-if="proyecto.validacion_empresa?.respuestas" class="mt-6">
+                <!-- ══ FEEDBACK DE LA EMPRESA — diferenciado: contenido de fuente externa
+                     (la empresa validadora), no autoría del proyecto. A diferencia de
+                     "Resolución del alumnado", este bloque no sale de la hoja de cuaderno:
+                     sigue siendo parte del expediente del proyecto, solo que su origen es
+                     externo. ══ -->
+                <div v-if="proyecto.validacion_empresa?.respuestas" class="mt-6 empresa-diferenciada">
                   <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
                     <div class="flex items-center gap-3">
                       <div class="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
-                           :class="proyecto.empresa_validado ? 'bg-[#00A859]/10 border border-[#00A859]/20' : 'bg-red-50 border border-red-200'">
-                        <svg class="w-5 h-5" :class="proyecto.empresa_validado ? 'text-[#00A859]' : 'text-red-500'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                           :class="proyecto.empresa_validado ? [theme.bg5, 'border', theme.border20] : 'bg-red-50 border border-red-200'">
+                        <svg class="w-5 h-5" :class="proyecto.empresa_validado ? theme.text : 'text-red-500'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path v-if="proyecto.empresa_validado" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
                           <path v-else stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
                         </svg>
                       </div>
                       <div>
-                        <p class="text-[10px] font-black uppercase tracking-widest text-gray-400">Feedback de la empresa</p>
+                        <p class="text-[10px] font-black uppercase tracking-widest text-amber-600">Fuente externa · Validación de empresa</p>
                         <p class="text-sm font-black text-[#121212]">{{ proyecto.empresa_nombre || proyecto.datos_empresa?.nombre || 'Empresa' }}</p>
                       </div>
                     </div>
                     <span v-if="proyecto.empresa_validado"
-                          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[10px] font-black uppercase tracking-widest
-                                 bg-[#00A859]/10 border-[#00A859]/30 text-[#00A859]">
+                          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[10px] font-black uppercase tracking-widest"
+                          :class="[theme.bg5, theme.border20, theme.text]">
                       <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
                       </svg>
-                      Decisión: Validó la propuesta
+                      Decisión: Validó el reto ajustado
                     </span>
                     <span v-else-if="proyecto.empresa_no_valida_aun"
                           class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[10px] font-black uppercase tracking-widest
@@ -652,12 +655,12 @@ function irAPaginaCompleta() {
                   </div>
 
                   <div class="bg-white border rounded-[1.5rem] shadow-sm overflow-hidden"
-                       :class="proyecto.empresa_validado ? 'border-[#00A859]/20' : proyecto.empresa_no_valida_aun ? 'border-red-200' : 'border-gray-100'">
+                       :class="proyecto.empresa_validado ? theme.border20 : proyecto.empresa_no_valida_aun ? 'border-red-200' : 'border-gray-100'">
                     <div class="grid sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-gray-100">
-                      <div v-for="(val, key) in proyecto.validacion_empresa.respuestas" :key="key" class="px-5 py-4 flex items-start gap-4">
+                      <div v-for="(val, key) in proyecto.validacion_empresa.respuestas" :key="key" class="px-3 sm:px-5 py-4 flex items-start gap-3 sm:gap-4">
                         <div class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mt-0.5"
-                             :class="val === 'Sí' ? 'bg-[#00A859]/10 border border-[#00A859]/20' : val === 'No' ? 'bg-red-50 border border-red-200' : 'bg-amber-50 border border-amber-200'">
-                          <svg class="w-4 h-4" :class="val === 'Sí' ? 'text-[#00A859]' : val === 'No' ? 'text-red-500' : 'text-amber-500'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                             :class="val === 'Sí' ? [theme.bg5, 'border', theme.border20] : val === 'No' ? 'bg-red-50 border border-red-200' : 'bg-amber-50 border border-amber-200'">
+                          <svg class="w-4 h-4" :class="val === 'Sí' ? theme.text : val === 'No' ? 'text-red-500' : 'text-amber-500'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path v-if="val === 'Sí'" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
                             <path v-else-if="val === 'No'" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
                             <path v-else stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -668,11 +671,11 @@ function irAPaginaCompleta() {
                           <p class="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-0.5">
                             {{ key === 'reto_comprensible'   ? '¿El reto es comprensible y realista?'
                              : key === 'objetivos_alineados' ? '¿Los objetivos se alinean con la empresa?'
-                             : key === 'equipo_adecuado'     ? '¿El perfil del equipo es adecuado?'
-                             : key === 'viabilidad'           ? '¿El proyecto es viable en la empresa?'
+                             : key === 'equipo_adecuado'     ? '¿El perfil del grupo es adecuado?'
+                             : key === 'viabilidad'           ? '¿El reto ajustado es viable en la empresa?'
                              : key.replace(/_/g, ' ') }}
                           </p>
-                          <p class="text-base font-black" :class="val === 'Sí' ? 'text-[#00A859]' : val === 'No' ? 'text-red-500' : 'text-amber-600'">{{ val }}</p>
+                          <p class="text-base font-black" :class="val === 'Sí' ? theme.text : val === 'No' ? 'text-red-500' : 'text-amber-600'">{{ val }}</p>
                         </div>
                       </div>
                     </div>
@@ -689,13 +692,32 @@ function irAPaginaCompleta() {
                   </div>
                 </div>
 
-                <div v-if="!proyecto.datos_empresa?.nombre && !proyecto.equipo?.alumnos?.length && !raCeBlocks.length
+                <div v-if="!proyecto.datos_empresa?.nombre && !raCeBlocks.length
                             && !proyecto.diseno_reto?.descripcion && !proyecto.objetivos?.lista?.length"
                      class="text-center py-6 text-gray-400">
-                  <p class="text-xs">Este proyecto aún no tiene secciones rellenas.</p>
+                  <p class="text-xs">Este reto ajustado aún no tiene secciones rellenas.</p>
                 </div>
 
               </div><!-- /notebook-page -->
+
+              <!-- ══ FICHA APARTE — Resolución del alumnado (siempre la última sección, siempre desplegada) ══ -->
+              <div v-if="proyecto.estado === 'completado'" class="ficha-recortable">
+                <div class="ficha-recortable__corte" aria-hidden="true"></div>
+                <div class="ficha-recortable__card">
+                  <div class="flex items-center gap-3 px-5 py-4">
+                    <div class="w-9 h-9 rounded-xl bg-violet-100 border border-violet-200 flex items-center justify-center shrink-0">
+                      <svg class="w-4 h-4 text-violet-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 100-8 4 4 0 000 8zm6 3c0-1.657-2.686-3-6-3s-6 1.343-6 3"/>
+                      </svg>
+                    </div>
+                    <p class="text-[10px] font-black uppercase tracking-[0.25em] text-violet-500">Resolución del alumnado</p>
+                  </div>
+                  <div class="px-5 pb-5 pt-1 border-t border-violet-100">
+                    <EquiposSeguimiento :proyecto-uuid="proyecto.uuid" />
+                  </div>
+                </div>
+              </div>
             </template>
           </div>
         </div>
@@ -712,7 +734,7 @@ function irAPaginaCompleta() {
         <div class="relative max-w-4xl w-full max-h-[85vh] flex flex-col">
           <div class="flex items-center justify-between mb-3">
             <p class="text-white text-sm font-bold truncate">{{ modalRecurso.label }}</p>
-            <button @click="modalRecurso = null" class="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-white hover:bg-white/20 transition-all shrink-0">
+            <button @click="modalRecurso = null" class="w-9 h-9 rounded-full bg-white/10 flex items-center justify-center text-white hover:bg-white/20 transition-all shrink-0">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
               </svg>
@@ -722,12 +744,14 @@ function irAPaginaCompleta() {
           <img v-else-if="modalRecurso.tipo === 'imagen'" :src="modalRecurso.url" class="w-full max-h-[75vh] object-contain rounded-xl" />
           <iframe v-else-if="modalRecurso.tipo === 'pdf'" :src="modalRecurso.url" class="w-full h-[75vh] rounded-xl bg-white" />
           <div v-else class="bg-white rounded-xl p-8 text-center">
-            <a :href="modalRecurso.url" target="_blank" rel="noopener" class="text-[#00A859] font-bold text-sm hover:underline">Abrir en nueva pestaña →</a>
+            <a :href="modalRecurso.url" target="_blank" rel="noopener" class="font-bold text-sm hover:underline" :class="theme.text">Abrir en nueva pestaña →</a>
           </div>
         </div>
       </div>
     </Transition>
   </Teleport>
+
+  <MicroretoModal :microreto-id="microretoModalId" @close="microretoModalId = null" />
 </template>
 
 <style scoped>
@@ -740,7 +764,45 @@ function irAPaginaCompleta() {
   @apply text-[10px] font-black uppercase tracking-[0.2em] text-gray-400;
 }
 .group-header {
-  @apply text-xs font-black uppercase tracking-[0.25em] text-[#00A859] mb-3 pl-3 border-l-4 border-[#00A859]/40;
+  @apply text-xs font-black uppercase tracking-[0.25em] text-centros mb-3 pl-3 border-l-4 border-centros/40;
+}
+.reto-section-title {
+  @apply text-sm font-black uppercase tracking-wider text-centros mb-3 pb-2 border-b-2 border-centros/15;
+}
+.reto-subsection-label {
+  @apply text-[10px] font-black uppercase tracking-wider text-centros mb-1;
+}
+
+/* Ficha de resolución del alumnado: se muestra separada de la hoja de cuaderno del
+   proyecto, como si fuera un recorte aparte grapado detrás — línea de corte punteada,
+   para dejar claro que es un documento distinto (datos de equipos/alumnado, no del
+   proyecto en sí). Siempre desplegada (sin acordeón): al ser la última sección de la
+   ficha, no aporta ocultarla tras un toggle adicional. */
+.ficha-recortable {
+  margin-top: 1.75rem;
+}
+.ficha-recortable__corte {
+  border-top: 2px dashed #c7cddb;
+  margin-bottom: 1.25rem;
+}
+.ficha-recortable__card {
+  background: #fff;
+  border: 2px dashed #ddd6fe;
+  border-radius: 1.5rem;
+  box-shadow: 0 4px 20px -4px rgba(139, 92, 246, 0.1), 0 1px 4px rgba(0, 0, 0, 0.03);
+  overflow: hidden;
+}
+
+/* Feedback de la empresa: dato de fuente externa dentro de la propia ficha (no se
+   saca de la hoja de cuaderno, a diferencia de "Resolución del alumnado" — la empresa
+   valida ESTE proyecto, sigue siendo parte de su expediente). Borde punteado ámbar +
+   fondo muy sutil para diferenciarlo de las secciones de autoría propia sin romper el
+   flujo de la hoja. */
+.empresa-diferenciada {
+  border: 2px dashed #fcd9a8;
+  background: rgba(217, 119, 6, 0.03);
+  border-radius: 1.75rem;
+  padding: 1.25rem;
 }
 
 .notebook-page {
@@ -822,9 +884,13 @@ function irAPaginaCompleta() {
 }
 
 @media (max-width: 640px) {
-  .notebook-page { padding: 1.5rem 1rem 2rem 4.5rem; }
+  /* Margen del "cuaderno" más estrecho: con 4.5rem el contenido se quedaba en ~200px a 360px */
+  .notebook-page { padding: 1.5rem 1rem 2rem 3rem; }
+  .notebook-margin { left: 2.4rem; }
+  .notebook-holes { left: .55rem; }
   .meta-cell { flex: 1 0 100%; border-right: none; border-bottom: 1px solid #dde3ed; }
   .meta-cell:last-child { border-bottom: none; }
+  .empresa-diferenciada { padding: .75rem; }
 }
 
 .proyecto-ficha-modal-enter-active,

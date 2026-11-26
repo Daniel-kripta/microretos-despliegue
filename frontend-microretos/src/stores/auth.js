@@ -8,28 +8,47 @@ export const ROLE_SUPERADMIN = 1
 export const ROLE_DOCENTE    = 2
 export const ROLE_EMPRESA    = 3
 export const ROLE_ADMIN      = 4
+// Comercial: solo usa la app comercial (comercial.dualab.es), ninguna ruta de esta app
+export const ROLE_COMERCIAL  = 5
+// Roles de DuaLab Central, con el nombre del espacio que abren (= User::ROLE_* del backend):
+// red_dualab: solo el espacio «Red DuaLab» (Primer contacto, captaciones, soporte). Antes «atención al cliente».
+export const ROLE_RED_DUALAB = 6
+// gestion_practicas: solo «Seguimiento de prácticas» (planes, agenda, destacados)
+export const ROLE_GESTION_PRACTICAS = 7
+// admin_central_dualab: los dos espacios anteriores y Usuarios (sin superadmins); Base de datos y Papelera, solo superadmin
+export const ROLE_ADMIN_CENTRAL_DUALAB = 8
 
 // Rutas permitidas por rol (nombre de ruta de Vue Router).
-// 'mis-equipos'/'mis-equipos-detalle': antes 'mis-grupos'/'mis-grupos-detalle' — renombradas
-// porque "grupo" ya significa otra cosa en el dominio (Encuentro.grupo = clase/curso, ej. "2ºB").
+// 'mis-grupos'/'mis-grupos-detalle': se llamaron 'mis-grupos'/'mis-grupos-detalle' una temporada;
+// volvieron a "grupos" al pasar el docente a ver los equipos como "grupos" (ver router/index.js).
 export const ROLE_ROUTES = {
   [ROLE_SUPERADMIN]: ['microretos', 'biblioteca', 'detalle-microreto', 'dashboard-docente',
-                      'encuentros-registrados', 'mis-equipos-detalle', 'mis-equipos',
+                      'encuentros-registrados', 'mis-grupos-detalle', 'mis-grupos', 'equipo-workspace-docente',
                       'pantalla-acceso', 'pantalla-acceso-lista', 'startup-day', 'startup-day-crear',
                       'startup-day-editar', 'startup-day-detalle', 'base-datos', 'papelera',
-                      'empresas', 'gestion-usuarios', 'inicio-docente', 'mi-usuario'],
+                      'empresas', 'gestion-usuarios', 'inicio-docente', 'mi-usuario', 'seccion',
+                      'calendario', 'notificaciones', 'biblioteca-diagnosticos',
+                      'alumnado-listado', 'planes', 'planes-crear', 'plan-cronograma', 'agenda-practicas'],
   [ROLE_ADMIN]:      ['microretos', 'biblioteca', 'detalle-microreto', 'dashboard-docente',
-                      'encuentros-registrados', 'mis-equipos-detalle', 'mis-equipos',
+                      'encuentros-registrados', 'mis-grupos-detalle', 'mis-grupos', 'equipo-workspace-docente',
                       'pantalla-acceso', 'pantalla-acceso-lista', 'startup-day', 'startup-day-crear',
                       'startup-day-editar', 'startup-day-detalle', 'gestion-usuarios',
-                      'inicio-docente', 'mi-usuario', 'empresas'],
+                      'inicio-docente', 'mi-usuario', 'empresas', 'seccion',
+                      'calendario', 'notificaciones', 'biblioteca-diagnosticos',
+                      'alumnado-listado', 'planes', 'planes-crear', 'plan-cronograma', 'agenda-practicas'],
   [ROLE_DOCENTE]:    ['microretos', 'biblioteca', 'detalle-microreto', 'dashboard-docente',
-                      'encuentros-registrados', 'mis-equipos-detalle', 'mis-equipos',
+                      'encuentros-registrados', 'mis-grupos-detalle', 'mis-grupos', 'equipo-workspace-docente',
                       'pantalla-acceso', 'pantalla-acceso-lista', 'startup-day', 'startup-day-crear',
                       'startup-day-editar', 'startup-day-detalle', 'empresas', 'inicio-docente',
-                      'mi-usuario'],
+                      'mi-usuario', 'seccion',
+                      'calendario', 'notificaciones', 'biblioteca-diagnosticos',
+                      'alumnado-listado', 'planes', 'planes-crear', 'plan-cronograma', 'agenda-practicas'],
   [ROLE_EMPRESA]:    ['biblioteca', 'detalle-microreto',
                       'startup-day', 'startup-day-detalle', 'mi-usuario'],
+  [ROLE_COMERCIAL]:  [],
+  [ROLE_RED_DUALAB]: [],
+  [ROLE_GESTION_PRACTICAS]: [],
+  [ROLE_ADMIN_CENTRAL_DUALAB]: [],
 }
 
 export const useAuthStore = defineStore('auth', () => {
@@ -38,11 +57,16 @@ export const useAuthStore = defineStore('auth', () => {
   // y no hay sesión", para que el guard del router sepa cuándo puede decidir.
   const isInitialized   = ref(false)
   const isAuthenticated = ref(false)
+  const userId           = ref(null)
   const userRole         = ref(ROLE_NONE)
   const userName         = ref('Administrador')
   const userCentroId     = ref(null)
   const userCentroNombre = ref('')
   const userCentroImg    = ref('')
+  // Si ya indicó los módulos que imparte (aviso del panel docente; ver AvisoModulosDocente)
+  const tieneModulos     = ref(false)
+  // Si se le piden: docente con centro o admin de centro que crea proyectos (lo decide el backend)
+  const imparte          = ref(false)
 
   // La sesión de Laravel expira 'minutos' después del último request que la tocó
   // (sliding, no un instante fijo), así que el backend manda en cada /perfil los
@@ -50,6 +74,9 @@ export const useAuthStore = defineStore('auth', () => {
   // hacer bajar un contador, se ancla aquí (minutosRestantesServidor + medidoEn) y
   // se descuenta localmente con un reloj que tickea cada minuto.
   const minutosRestantesServidor = ref(-1)
+  // "Recordarme": el backend mantiene la sesión con la cookie recaller aunque caduque
+  // la de Laravel, así que ni el cierre por inactividad ni el aviso de caducidad aplican
+  const recordado                = ref(false)
   const medidoEn                 = ref(0)
   const now                      = ref(Date.now())
   setInterval(() => { now.value = Date.now() }, 60_000)
@@ -62,23 +89,31 @@ export const useAuthStore = defineStore('auth', () => {
 
   const clearLocalSession = () => {
     isAuthenticated.value  = false
+    userId.value           = null
     userRole.value         = ROLE_NONE
     userName.value         = 'Administrador'
     userCentroId.value     = null
     userCentroNombre.value = ''
     userCentroImg.value    = ''
+    tieneModulos.value     = false
+    imparte.value          = false
     minutosRestantesServidor.value = -1
+    recordado.value = false
   }
 
   // data = payload de /perfil (data.data) o del login — misma forma en ambos.
   const hidratar = (data) => {
     isAuthenticated.value  = true
+    userId.value           = data.id ?? null
     userRole.value         = Number(data.role ?? ROLE_NONE)
     userName.value         = data.name || 'Administrador'
     userCentroId.value     = data.centro_educativo_id ?? null
     userCentroNombre.value = data.centro_nombre || ''
     userCentroImg.value    = data.centro_img || ''
+    tieneModulos.value     = Boolean(data.tiene_modulos)
+    imparte.value          = Boolean(data.imparte)
     minutosRestantesServidor.value = Number(data.minutos_restantes ?? -1)
+    recordado.value = Boolean(data.recordado)
     medidoEn.value = Date.now()
   }
 
@@ -91,12 +126,20 @@ export const useAuthStore = defineStore('auth', () => {
   const isAdmin      = computed(() => userRole.value === ROLE_ADMIN)
   const isDocente    = computed(() => userRole.value === ROLE_DOCENTE)
   const isEmpresa    = computed(() => userRole.value === ROLE_EMPRESA)
+  const isComercial  = computed(() => userRole.value === ROLE_COMERCIAL)
+  const isRedDualab = computed(() => userRole.value === ROLE_RED_DUALAB)
+  const isGestionPracticas = computed(() => userRole.value === ROLE_GESTION_PRACTICAS)
+  const isAdminCentralDualab = computed(() => userRole.value === ROLE_ADMIN_CENTRAL_DUALAB)
 
   const roleLabel = computed(() => {
     if (userRole.value === ROLE_DOCENTE)    return 'Docente'
     if (userRole.value === ROLE_EMPRESA)    return 'Empresa'
     if (userRole.value === ROLE_ADMIN)      return 'Administrador'
     if (userRole.value === ROLE_SUPERADMIN) return 'Superadministrador'
+    if (userRole.value === ROLE_COMERCIAL)  return 'Comercial'
+    if (userRole.value === ROLE_RED_DUALAB) return 'Red DuaLab'
+    if (userRole.value === ROLE_GESTION_PRACTICAS) return 'Gestión de prácticas'
+    if (userRole.value === ROLE_ADMIN_CENTRAL_DUALAB) return 'Admin Central DuaLab'
     return ''
   })
 
@@ -170,9 +213,9 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
-    isInitialized, isAuthenticated, userRole, userName, userCentroId, userCentroNombre, userCentroImg,
-    minutosRestantes,
-    isSuperAdmin, isAdmin, isDocente, isEmpresa, roleLabel,
+    isInitialized, isAuthenticated, userId, userRole, userName, userCentroId, userCentroNombre, userCentroImg,
+    tieneModulos, imparte, minutosRestantes, recordado,
+    isSuperAdmin, isAdmin, isDocente, isEmpresa, isComercial, isRedDualab, isGestionPracticas, isAdminCentralDualab, roleLabel,
     init, login, logout, ping, updateName, updateCentroImg, canAccess,
   }
 })

@@ -1,31 +1,65 @@
 <script setup>
+import { URL_CENTRAL } from './utils/urlCentral.js'
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { RouterView } from 'vue-router'
 import TopBar from './components/TopBar.vue'
 import SidePanel from './components/SidePanel.vue'
 import AppCredit from './components/AppCredit.vue'
+import TourGuiado from './components/TourGuiado.vue'
 import ComoFuncionaModal from './components/ComoFuncionaModal.vue'
 import LoginModal from './components/LoginModal.vue'
-import { useAuthStore, ROLE_DOCENTE, ROLE_ADMIN, ROLE_EMPRESA } from './stores/auth'
+import { useAuthStore, ROLE_EMPRESA, ROLE_COMERCIAL, ROLE_RED_DUALAB, ROLE_GESTION_PRACTICAS, ROLE_ADMIN_CENTRAL_DUALAB } from './stores/auth'
+import { URL_APP_COMERCIAL } from './utils/urlComercial.js'
+import AvisoCaptacionPendiente from './components/AvisoCaptacionPendiente.vue'
+import AvisoSinConexion from './components/AvisoSinConexion.vue'
 import { useIdleTimer } from './composables/useIdleTimer'
 import { useLoginModal } from './composables/useLoginModal.js'
 import { useUIState } from './composables/useUIState.js'
+import { useRoleTheme } from './composables/useRoleTheme.js'
+import { useNuevaVersion } from './composables/useNuevaVersion.js'
 import api from './api.js'
+import { queryRedirect, redirectVigente } from './utils/redirectLogin.js'
 
 const router    = useRouter()
 const route     = useRoute()
 const authStore = useAuthStore()
+const { theme } = useRoleTheme()
+const { hayNuevaVersion, iniciarComprobacion, recargarLimpio, posponer } = useNuevaVersion()
+const recargando = ref(false)
+const recargarNuevaVersion = () => {
+  recargando.value = true
+  recargarLimpio()
+}
+
+// Color de acción = color del rol (docs/GUIA_DISENO.md §2.1): style.css redefine
+// --color-rol y --color-rol-fuerte según este atributo, y de ahí lo leen
+// .accion-principal, .btn-paso, el foco, etc.
+watch(() => theme.value.key, (key) => {
+  document.documentElement.dataset.rol = key
+}, { immediate: true })
 
 const isPublicRetoRoute = computed(() =>
   route.path.startsWith('/reto/') ||
   route.path.startsWith('/startup/landing/') ||
-  route.path.startsWith('/proyecto/equipo/')
+  route.path.startsWith('/valoracion/') ||
+  route.path.startsWith('/solicitud-reto/') ||
+  route.path.startsWith('/proyecto/equipo/') ||
+  // Workspace de un grupo visto por el docente (solo lectura): a pantalla completa como el del
+  // alumnado; se abre en otra pestaña y su aviso lleva al Detalle del grupo
+  route.name === 'equipo-workspace-docente'
 )
 
 // El panel lateral es navegación de docente/admin/empresa: sin sesión no aporta nada
 // y solo resta ancho útil a las vistas públicas (Home, Unirse, etc.)
-const showSidePanel = computed(() => !isPublicRetoRoute.value && authStore.isAuthenticated)
+// Páginas de acceso a pantalla completa (/, /login, /restablecer-contrasena): sin TopBar
+// ni modal de login encima
+const ACCESO_ROUTES = ['home', 'login', 'restablecer-contrasena']
+const isLoginRoute = computed(() => ACCESO_ROUTES.includes(route.name))
+
+// Tampoco en las páginas de acceso aunque haya sesión (una cuenta comercial en /login, o el
+// instante entre iniciar sesión y llegar al panel): igual que la TopBar
+const showSidePanel = computed(() => !isPublicRetoRoute.value && !isLoginRoute.value && authStore.isAuthenticated)
 
 // ── Login modal: vivía dentro de SidePanel, pero este ya no se monta sin sesión.
 // Se sube a App.vue para que las vistas públicas (Home, etc.) puedan seguir abriéndolo.
@@ -35,8 +69,8 @@ const { triggerWelcome } = useUIState()
 watch(
   () => route.query.redirect,
   (redirect) => {
-    if (redirect && !authStore.isAuthenticated) {
-      destinoTrasLogin.value = String(redirect)
+    if (redirect && !authStore.isAuthenticated && !isLoginRoute.value) {
+      destinoTrasLogin.value = redirectVigente(route.query)
       showLogin.value = true
     }
   },
@@ -45,33 +79,50 @@ watch(
 
 const onLoginSuccess = (data) => {
   const role    = data?.role ?? authStore.userRole
+  // El comercial no tiene nada en esta app: su sitio es la app comercial, que tiene su propia
+  // sesión (SesionPorHerramienta.php). Esta se cierra y allí entra con su cuenta
+  if (role === ROLE_COMERCIAL) {
+    authStore.logout().finally(() => window.location.assign(URL_APP_COMERCIAL))
+    return
+  }
+  // Personal de DuaLab Central (red_dualab, gestion_practicas, admin_central_dualab): su sitio es Central,
+  // con su propia sesión; cada uno a su espacio (admin_central_dualab, que tiene dos, a elegir espacio)
+  if ([ROLE_RED_DUALAB, ROLE_GESTION_PRACTICAS, ROLE_ADMIN_CENTRAL_DUALAB].includes(role)) {
+    const espacio = { [ROLE_RED_DUALAB]: 'red', [ROLE_GESTION_PRACTICAS]: 'practicas' }[role] ?? ''
+    authStore.logout().finally(() => window.location.assign(`${URL_CENTRAL}/${espacio}`))
+    return
+  }
   const destino = destinoTrasLogin.value || rolHome(role)
   destinoTrasLogin.value = null
   router.push(destino).finally(() => triggerWelcome(role, authStore.userName))
 }
 
 function rolHome(role) {
-  if (role === ROLE_DOCENTE || role === ROLE_ADMIN) return '/panel-docente'
   if (role === ROLE_EMPRESA) return '/proyectos'
-  return '/retos/crear'
+  return '/panel-docente'
 }
 
 // ── Sesión caducada (401 del servidor) ────────────────────────────────────────
 const handleTokenExpired = async () => {
   await authStore.logout()
   const currentPath = router.currentRoute.value.fullPath
-  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/')
+  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/') || currentPath.startsWith('/valoracion/')
   if (!isPublic) {
-    router.push({ path: '/', query: { redirect: currentPath } })
+    router.push({ path: '/', query: queryRedirect(currentPath) })
   }
 }
 
 onMounted(async () => {
   window.addEventListener('auth:token-expired', handleTokenExpired)
+  iniciarComprobacion(router)
   // Hidrata la sesión desde la cookie también en rutas públicas — el guard del router
   // solo llama a auth.init() para rutas con requiresAuth, si no la TopBar no reflejaría
   // una sesión válida hasta la primera navegación a una ruta protegida.
   if (!authStore.isInitialized) await authStore.init()
+  // El comercial va a su app, salvo en la pantalla de acceso: allí LoginView le deja elegir
+  // entre ir a la app comercial o cerrar la sesión y entrar con otra cuenta
+  await router.isReady()
+  if (authStore.isComercial && !isLoginRoute.value) { window.location.assign(URL_APP_COMERCIAL); return }
   if (!authStore.userCentroImg && authStore.userCentroId) cargarCentroImg()
 })
 onUnmounted(() => window.removeEventListener('auth:token-expired', handleTokenExpired))
@@ -88,18 +139,19 @@ async function cargarCentroImg() {
 const showIdleWarning = ref(false)
 
 const handleIdle = async () => {
-  if (!authStore.isAuthenticated) return
+  // Con "Recordarme" no se cierra por inactividad: logout() invalidaría la cookie recaller
+  if (!authStore.isAuthenticated || authStore.recordado) return
   showIdleWarning.value = false
   await authStore.logout()
   const currentPath = router.currentRoute.value.fullPath
-  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/')
+  const isPublic = currentPath === '/' || currentPath.startsWith('/reto/') || currentPath.startsWith('/startup/landing/') || currentPath.startsWith('/valoracion/')
   if (!isPublic) {
-    router.push({ path: '/', query: { redirect: currentPath } })
+    router.push({ path: '/', query: queryRedirect(currentPath) })
   }
 }
 
 const handleWarning = () => {
-  if (!authStore.isAuthenticated) return
+  if (!authStore.isAuthenticated || authStore.recordado) return
   showIdleWarning.value = true
 }
 
@@ -144,7 +196,7 @@ const tokenToastRefreshing  = ref(false)
 const tokenToastFeedback    = ref(null) // 'ok' | 'error' | null
 
 const showTokenToast = computed(() => {
-  if (!authStore.isAuthenticated || isPublicRetoRoute.value || tokenToastForceHidden.value) return false
+  if (!authStore.isAuthenticated || authStore.recordado || isPublicRetoRoute.value || tokenToastForceHidden.value) return false
   const m = authStore.minutosRestantes
   if (m < 0 || m > TOAST_THRESHOLD_MINUTES) return false
   if (tokenToastDismissedAt.value !== null && m >= tokenToastDismissedAt.value - 5) return false
@@ -192,13 +244,24 @@ const extenderDesdeToast = async () => {
          style="background: linear-gradient(to bottom, rgba(248,250,252,0) 0%, rgba(248,250,252,0.4) 20%, rgba(248,250,252,0.8) 45%, rgba(248,250,252,0.97) 65%, rgba(248,250,252,1) 80%); z-index: 0;"></div>
   </template>
 
-  <TopBar v-if="!isPublicRetoRoute" />
+  <TopBar v-if="!isPublicRetoRoute && !isLoginRoute" />
   <SidePanel v-if="showSidePanel" />
-  <div :class="showSidePanel ? 'lg:pl-72' : ''" class="relative" style="z-index: 1;">
-    <RouterView />
+  <!-- pb-12: hueco para el pie fijo de AppCredit (fixed bottom-0), que si no tapa el final
+       de todas las vistas y parece que el scroll "se queda pillado" sin llegar abajo -->
+  <div :class="showSidePanel ? 'lg:pl-72' : ''" class="relative pb-12" style="z-index: 1;">
+    <!-- El generador de retos se queda en memoria al salir (KeepAlive) para no perder el trabajo:
+         al volver pregunta si recuperarlo. La key por usuario evita que otra sesión vea el anterior. -->
+    <RouterView v-slot="{ Component, route: ruta }">
+      <KeepAlive include="GeneradorMicroretos" :max="1">
+        <component :is="Component" :key="ruta.name === 'microretos' ? `generador-${authStore.userId}` : undefined" />
+      </KeepAlive>
+    </RouterView>
   </div>
   <AppCredit />
+  <TourGuiado v-if="authStore.isAuthenticated" />
   <ComoFuncionaModal v-if="authStore.isAuthenticated" />
+  <!-- Superadmin: empresas captadas por comerciales sin centro y retos sin validar -->
+  <AvisoCaptacionPendiente v-if="authStore.isSuperAdmin" />
   <LoginModal v-model="showLogin" @login-success="onLoginSuccess" />
 
   <!-- Modal idle: ¿Sigues ahí? -->
@@ -206,7 +269,7 @@ const extenderDesdeToast = async () => {
     <div v-if="showIdleWarning"
       class="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
       <div class="bg-[#1a2332] border border-white/10 rounded-[2rem] shadow-2xl
-                  max-w-sm w-full p-8 text-white text-center">
+                  max-w-sm w-full p-6 sm:p-8 text-white text-center">
 
         <!-- Icono -->
         <div class="w-16 h-16 rounded-full bg-amber-500/15 border border-amber-500/30
@@ -223,20 +286,21 @@ const extenderDesdeToast = async () => {
         </p>
 
         <!-- Contador -->
-        <div class="text-5xl font-black text-amber-400 tabular-nums mb-6">
+        <div class="text-3xl sm:text-5xl font-black text-amber-400 tabular-nums mb-6">
           {{ String(minutosModal).padStart(2, '0') }}:{{ String(segundosModal).padStart(2, '0') }}
         </div>
 
         <div class="flex gap-3">
           <button @click="cerrarSesionIdle"
-            class="flex-1 py-3 rounded-xl font-bold text-xs uppercase tracking-widest
+            class="flex-1 py-3 rounded-full font-bold text-xs uppercase tracking-wide
                    border border-white/10 text-white/40
                    hover:bg-white/5 hover:text-white/60 transition-all">
             Cerrar sesión
           </button>
           <button @click="seguirConectado"
-            class="flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest
-                   bg-[#00A859] hover:bg-[#009950] text-white transition-all shadow-md">
+            class="flex-1 py-3 rounded-full font-black text-xs uppercase tracking-wide
+                   text-white transition-all shadow-md"
+            :class="[theme.bg, theme.bgHover]">
             Seguir conectado
           </button>
         </div>
@@ -244,12 +308,65 @@ const extenderDesdeToast = async () => {
     </div>
   </Transition>
 
+  <!-- Bocadillos de la esquina inferior derecha, apilados para no taparse entre sí -->
+  <div class="fixed bottom-14 right-5 z-[9990] w-[300px] max-w-[calc(100vw-2.5rem)]
+              flex flex-col gap-3 pointer-events-none">
+
+  <AvisoSinConexion />
+
+  <!-- Bocadillo: hay un deploy nuevo y esta pestaña sigue con el código anterior -->
+  <Transition name="toast-slide">
+    <div
+      v-if="hayNuevaVersion"
+      class="relative pointer-events-auto rounded-2xl shadow-2xl border p-4 backdrop-blur-sm
+             bg-[#1a2332]/95 border-white/15"
+      role="status"
+    >
+      <button
+        @click="posponer"
+        title="Más tarde"
+        class="absolute top-1 right-1 w-9 h-9 rounded-full flex items-center justify-center
+               text-white/30 hover:text-white/70 hover:bg-white/10 transition-all"
+      >
+        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+
+      <div class="flex items-start gap-3 pr-6">
+        <div class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border
+                    bg-sky-500/15 border-sky-500/30">
+          <svg class="w-4.5 h-4.5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+        </div>
+        <div class="min-w-0">
+          <p class="text-sm font-black text-white leading-tight">Hay una versión nueva</p>
+          <p class="text-xs text-white/50 mt-1 leading-relaxed">
+            Recarga para ver las novedades. Guarda antes lo que tengas a medias.
+          </p>
+        </div>
+      </div>
+
+      <button
+        @click="recargarNuevaVersion"
+        :disabled="recargando"
+        class="w-full min-h-9 mt-3 py-2 rounded-full text-xs font-black uppercase tracking-widest
+               text-white transition-all shadow-md
+               disabled:opacity-50 disabled:cursor-not-allowed"
+        :class="[theme.bg, theme.bgHover]"
+      >
+        {{ recargando ? 'Recargando…' : 'Recargar' }}
+      </button>
+    </div>
+  </Transition>
+
   <!-- Bocadillo: sesión a punto de expirar en el servidor -->
   <Transition name="toast-slide">
     <div
       v-if="showTokenToast"
-      class="fixed bottom-5 right-5 z-[9990] w-[300px] max-w-[calc(100vw-2.5rem)]
-             rounded-2xl shadow-2xl border p-4 backdrop-blur-sm"
+      class="relative pointer-events-auto rounded-2xl shadow-2xl border p-4 backdrop-blur-sm"
       :class="authStore.minutosRestantes <= 5
         ? 'bg-red-950/95 border-red-500/40'
         : 'bg-[#1a2332]/95 border-amber-500/30'"
@@ -258,7 +375,7 @@ const extenderDesdeToast = async () => {
       <button
         @click="cerrarTokenToast"
         title="Cerrar aviso"
-        class="absolute top-2.5 right-2.5 w-5 h-5 rounded-full flex items-center justify-center
+        class="absolute top-1 right-1 w-9 h-9 rounded-full flex items-center justify-center
                text-white/30 hover:text-white/70 hover:bg-white/10 transition-all"
       >
         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5">
@@ -266,7 +383,7 @@ const extenderDesdeToast = async () => {
         </svg>
       </button>
 
-      <div class="flex items-start gap-3 pr-4">
+      <div class="flex items-start gap-3 pr-6">
         <div
           class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border"
           :class="authStore.minutosRestantes <= 5
@@ -291,9 +408,10 @@ const extenderDesdeToast = async () => {
         <button
           @click="extenderDesdeToast"
           :disabled="tokenToastRefreshing"
-          class="flex-1 py-2 rounded-xl text-xs font-black uppercase tracking-widest
-                 bg-[#00A859] hover:bg-[#009950] text-white transition-all shadow-md
+          class="flex-1 min-h-9 py-2 rounded-full text-xs font-black uppercase tracking-widest
+                 text-white transition-all shadow-md
                  disabled:opacity-50 disabled:cursor-not-allowed"
+          :class="[theme.bg, theme.bgHover]"
         >
           {{ tokenToastRefreshing ? 'Extendiendo…' : 'Extender sesión' }}
         </button>
@@ -309,6 +427,8 @@ const extenderDesdeToast = async () => {
       </div>
     </div>
   </Transition>
+
+  </div>
 </template>
 
 <style>

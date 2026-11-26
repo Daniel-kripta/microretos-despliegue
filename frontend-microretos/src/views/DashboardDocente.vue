@@ -1,20 +1,28 @@
 <!-- Ruta: /encuentros/crear (name: dashboard-docente). El nombre del archivo quedó del naming antiguo (/dashboard) tras el rename de URLs — ver router/index.js. -->
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { useRoute, useRouter, onBeforeRouteUpdate } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import CabeceraSeccion from '../components/CabeceraSeccion.vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '../api.js'
+import { crearCodigoAcceso } from '../services/encuentroService.js'
 import MicroretoModal from '../components/MicroretoModal.vue'
 import ProyectoFichaModal from '../components/ProyectoFichaModal.vue'
-import EliminarEncuentroModal from '../components/EliminarEncuentroModal.vue'
-import EncuentroEquiposYRaCe from '../components/EncuentroEquiposYRaCe.vue'
-import TourPromptModal from '../components/TourPromptModal.vue'
-import { useUIState } from '../composables/useUIState.js'
-import { useRaCeEncuentro } from '../composables/useRaCeEncuentro.js'
+import TallerPasos from '../components/TallerPasos.vue'
+import MiniaturaReto from '../components/MiniaturaReto.vue'
+import EncuentroResumen from '../components/EncuentroResumen.vue'
+import RegenerarAliasButton from '../components/RegenerarAliasButton.vue'
+import AvisoSinNombresReales from '../components/AvisoSinNombresReales.vue'
+import PlanificacionSesiones from '../components/PlanificacionSesiones.vue'
+import { generarAliasAleatorio, errorNombrePila } from '../utils/alias.js'
+import { formatCurso, nivelCurso, CURSO_ENCUENTRO } from '../utils/formatCurso.js'
+import { useGuia } from '../composables/useGuia.js'
 import { useAuthStore } from '../stores/auth.js'
-import { fechaFinEstimada as calcularFechaFinEstimada, duracionPorFase } from '../config/fasesProyecto.js'
+import { fechaFinEstimada as calcularFechaFinEstimada, duracionPorFase, FASES_PROYECTO } from '../config/fasesProyecto.js'
 
-const { tourActivo } = useUIState()
+const { recorrerPantalla } = useGuia()
 const authStore = useAuthStore()
+const isLoaded = ref(false)
+onMounted(() => { setTimeout(() => { isLoaded.value = true }, 80) })
 
 const router = useRouter()
 const route  = useRoute()
@@ -22,6 +30,8 @@ const route  = useRoute()
 // ─── Formulario de encuentro ──────────────────────────────────────────────────────
 const form = ref({
   fecha:            new Date().toISOString().slice(0, 10),
+  // Vacía = la estimada según la planificación; el docente puede alargarla (nunca acortarla)
+  fecha_fin:        '',
   centro_educativo: authStore.userCentroNombre || '',
   ciclo_formativo:  '',
   curso:            '',
@@ -31,7 +41,13 @@ const form = ref({
   alumnados:        [],
   notas:            '',
   microproyecto_id: null,
+  // Sesiones del encuentro y sus fases: se rellena con las de la propuesta y se ajusta aquí
+  planificacion_sesiones: [],
 })
+
+// Por defecto, una sola sesión con todas las fases; el docente añade más si las necesita
+// (antes se copiaba el calendario de la propuesta, que ya no se edita en el ajuste del reto).
+const planificacionInicial = () => [{ fases: FASES_PROYECTO.map(f => f.num) }]
 
 // ─── Buscador de proyectos ─────────────────────────────────────────────────────
 const proyectoSeleccionado  = ref(null)
@@ -50,12 +66,14 @@ const ciclosDisponiblesProy = computed(() => {
   return [...set].sort()
 })
 
-const proyectosFiltrados = computed(() => {
+// Todas las que pasan los filtros; la lista muestra como mucho 60 (contador «60 de N»)
+const proyectosFiltradosTodos = computed(() => {
   // Solo proyectos ya validados (al menos por el docente) pueden asociarse a un
   // encuentro — una propuesta sin validar, un borrador o un archivado no tiene
   // sentido programarlo en clase (ver StoreEncuentroRequest, mismo criterio en backend).
   let base = todosMisProyectos.value.filter(p => p.estado === 'validado' || p.estado === 'completado')
-  if (filtroProyCurso.value)  base = base.filter(p => p.curso === filtroProyCurso.value)
+  // Las propuestas guardan '1' | '2' | 'ambos_cursos' (antes se comparaba con '1º'/'2º' y casi nunca coincidía)
+  if (filtroProyCurso.value)  base = base.filter(p => nivelCurso(p.curso) === filtroProyCurso.value)
   if (filtroProyCiclo.value)  base = base.filter(p => p.ciclo_nombre === filtroProyCiclo.value)
   if (filtroProyEstado.value) base = base.filter(p => p.estado === filtroProyEstado.value)
   if (busquedaProy.value.trim()) {
@@ -66,8 +84,10 @@ const proyectosFiltrados = computed(() => {
       (p.ciclo_nombre   || '').toLowerCase().includes(q)
     )
   }
-  return base.slice(0, 60)
+  return base
 })
+const proyectosFiltrados = computed(() => proyectosFiltradosTodos.value.slice(0, 60))
+const totalProyectosFiltrados = computed(() => proyectosFiltradosTodos.value.length)
 
 async function abrirBuscadorProy() {
   mostrarBuscadorProy.value = true
@@ -88,17 +108,46 @@ function cerrarBuscadorProy() {
   mostrarBuscadorProy.value = false
 }
 
+// Flujo continuo desde el ajuste del reto (?desde=ajuste&microproyecto=<uuid>&fecha=hoy|otro):
+// el reto ajustado llega elegido; «Ahora no» vuelve a su ficha sin guardar nada.
+const desdeAjuste = route.query.desde === 'ajuste'
+function salirSinEncuentro() {
+  const uuid = proyectoSeleccionado.value?.uuid || route.query.microproyecto
+  if (desdeAjuste && uuid) router.push({ name: 'startup-day-detalle', params: { uuid } })
+  else router.push('/encuentros')
+}
+
 function seleccionarProyecto(p) {
   proyectoSeleccionado.value   = p
   form.value.microproyecto_id  = p.id
+  form.value.planificacion_sesiones = planificacionInicial(p)
   if (p.ciclo_nombre) form.value.ciclo_formativo = p.ciclo_nombre
-  if (p.curso)        form.value.curso           = p.curso
+  // Curso del encuentro = el de la propuesta (1º, 2º o ambos), ya marcado en el formulario
+  if (nivelCurso(p.curso)) form.value.curso   = CURSO_ENCUENTRO[nivelCurso(p.curso)]
+  aplicarSesionSugerida(p.sesion_sugerida)
   mostrarBuscadorProy.value    = false
+}
+
+// Reto de una solicitud de docente: la fecha y el horario que propuso se sugieren aquí (el
+// encuentro guarda la fecha; el horario va a las notas). Todo se puede cambiar.
+const sesionSugerida = ref(null)
+const textoHorario = (s) => s?.hora_inicio ? `${s.hora_inicio}${s.hora_fin ? '–' + s.hora_fin : ''}${s.duracion ? ` (${s.duracion})` : ''}` : ''
+function aplicarSesionSugerida(s) {
+  sesionSugerida.value = s || null
+  if (!s?.fecha) return
+  if (s.fecha >= new Date().toISOString().slice(0, 10)) form.value.fecha = s.fecha
+  const horario = textoHorario(s)
+  if (horario && !form.value.notas.includes(horario)) {
+    form.value.notas = [`Sesión propuesta por el docente: ${horario}.`, form.value.notas].filter(Boolean).join('\n')
+  }
 }
 
 function limpiarProyecto() {
   proyectoSeleccionado.value   = null
+  sesionSugerida.value         = null
   form.value.microproyecto_id  = null
+  form.value.planificacion_sesiones = []
+  form.value.fecha_fin         = ''
   form.value.ciclo_formativo   = ''
   form.value.curso             = ''
   // El reparto de equipos se hizo pensando en el proyecto anterior — no tiene
@@ -107,55 +156,146 @@ function limpiarProyecto() {
   form.value.alumnados         = []
 }
 
-// Duración total (en clases) del calendario del proyecto elegido — el backend
-// calcula la fecha_fin real con la misma heurística centralizada (fasesProyecto.js).
-const totalClasesProyectoSeleccionado = computed(() => {
-  return proyectoSeleccionado.value?.diseno_microproyecto?.clases?.length || 0
-})
+// Nº de sesiones planificadas en este encuentro — el backend calcula la fecha_fin real
+// con la misma heurística centralizada (fasesProyecto.js / Encuentro::fechaFinSugerida).
+const totalClasesProyectoSeleccionado = computed(() => form.value.planificacion_sesiones.length)
+const planificacionValida = computed(() =>
+  form.value.planificacion_sesiones.length > 0
+  && form.value.planificacion_sesiones.every(s => (s.fases || []).length > 0))
 
 const fechaFinEstimada = computed(() => {
   return calcularFechaFinEstimada(form.value.fecha, totalClasesProyectoSeleccionado.value)
 })
+// La que se guarda: la elegida por el docente o, si no ha tocado el campo, la estimada
+const fechaFin = computed(() => form.value.fecha_fin || fechaFinEstimada.value)
+// Si cambian la fecha de inicio o las sesiones y la elegida queda antes de la mínima, vuelve a la estimada
+watch(fechaFinEstimada, (min) => {
+  if (form.value.fecha_fin && min && form.value.fecha_fin < min) form.value.fecha_fin = ''
+})
 
 function estadoProyectoBadge(proyectoOEstado) {
   const estado          = typeof proyectoOEstado === 'object' ? proyectoOEstado?.estado : proyectoOEstado
-  const empresaValidado = typeof proyectoOEstado === 'object' && !!proyectoOEstado?.empresa_validado
-  const docenteValidado = typeof proyectoOEstado === 'object' && !!proyectoOEstado?.docente_validado
 
   if (estado === 'borrador' || estado === 'en_edicion')
     return { label: 'En edición',  cls: 'bg-amber-100 text-amber-600' }
   if (estado === 'archivado')
     return { label: 'Archivado',   cls: 'bg-red-50 text-red-400' }
-  if (estado === 'validado') {
-    if (empresaValidado && docenteValidado) return { label: 'Validado · Completo', cls: 'bg-[#00A859]/10 text-[#00A859]' }
-    if (empresaValidado)  return { label: 'Validado · Empresa',  cls: 'bg-[#00A859]/10 text-[#00A859]' }
-    if (docenteValidado)  return { label: 'Validado · Docente',  cls: 'bg-emerald-50 text-emerald-700' }
-    return { label: 'Validado', cls: 'bg-[#00A859]/10 text-[#00A859]' }
-  }
+  if (estado === 'validado')
+    return { label: 'Validado', cls: 'bg-empresas/10 text-empresas-dark' }
+  if (estado === 'completado')
+    return { label: 'Completado', cls: 'bg-sky-50 text-sky-700' }
   if (estado === 'propuesta')
-    return { label: 'Propuesta',   cls: 'bg-violet-50 text-violet-600' }
+    return { label: 'Sin validar', cls: 'bg-violet-50 text-violet-600' }
   return { label: estado || '—',   cls: 'bg-gray-100 text-gray-500' }
 }
 
 // ─── Alumnado por equipos ─────────────────────────────────────────────────────
 const nuevoAlumnadoNombre = ref('')
-const nuevoAlumnadoEquipo = ref(1)
-
-const limiteAlumnados = computed(() => {
-  const n = Number(form.value.num_alumnos)
-  return n > 0 ? n : null
+const errorNuevoAlumnado  = ref('')
+const nuevoAlumnadoEquipo = ref(1)   // grupo de destino de «Añadir»: se elige tocando su tarjeta
+// Si se reducen los grupos y el seleccionado deja de existir, pasa al último.
+watch(() => form.value.num_equipos, (n) => {
+  if (nuevoAlumnadoEquipo.value > (n || 3)) nuevoAlumnadoEquipo.value = n || 3
 })
+
+// El número de alumnos sale de los que hay en los grupos; el tope es el del backend (200)
+const limiteAlumnados = computed(() => 200)
 
 const limiteAlcanzado = computed(() =>
   limiteAlumnados.value !== null && form.value.alumnados.length >= limiteAlumnados.value
 )
 
+// Protección de datos: del alumno/a solo se pide el nombre de pila (una palabra, sin
+// apellidos) y se le añade animal + color: "Adrián Águila Amarillo", único en la clase.
+// El docente lo ve y puede cambiar animal y color con el dado antes de crear el encuentro;
+// viaja en el snapshot `alumnados` y se aplica al crear los equipo_miembros reales en
+// EncuentroController::crearCodigo().
+const aliasUsados = computed(() => form.value.alumnados.map(a => a.alias))
+
 function addAlumnadoEncuentro() {
-  const nombre = nuevoAlumnadoNombre.value.trim()
-  if (!nombre) return
   if (limiteAlcanzado.value) return
-  form.value.alumnados.push({ nombre, equipo_num: nuevoAlumnadoEquipo.value })
+  errorNuevoAlumnado.value = errorNombrePila(nuevoAlumnadoNombre.value)
+  if (errorNuevoAlumnado.value) return
+  form.value.alumnados.push({
+    equipo_num: nuevoAlumnadoEquipo.value,
+    alias: generarAliasAleatorio(nuevoAlumnadoNombre.value, aliasUsados.value),
+  })
   nuevoAlumnadoNombre.value = ''
+}
+
+// ─── Copiar alumnado de un encuentro anterior (solo los del propio docente) ──
+// Así el mismo alumno conserva su alias entre proyectos y el docente no tiene que volver a
+// darlo de alta ni a apuntar otra correspondencia alias → alumno. Los encuentros ya vienen
+// cargados en el historial (GET /encuentros, con equipos y miembros); al guardar, el backend
+// vuelve a validar los alias (AliasAlumnado).
+const copiandoAlumnado     = ref(false)
+const encuentroACopiar     = ref('')
+const copiarConReparto     = ref(true)
+const mensajeCopiaAlumnado = ref('')
+
+function alumnadoDe(encuentro) {
+  if (encuentro.equipos?.length) {
+    return encuentro.equipos.flatMap(e => (e.miembros || []).map(m => ({ alias: m.alias, equipo_num: e.numero_equipo, rol: m.rol })))
+  }
+  return (encuentro.alumnados || []).filter(a => a.alias)
+}
+
+const encuentrosParaCopiar = computed(() => encuentros.value
+  .filter(e => e.es_propietario)
+  .map(e => ({ id: e.id, alumnado: alumnadoDe(e), etiqueta: [
+    formatFecha(e.fecha), e.proyecto_titulo || 'Sin reto ajustado',
+    [e.curso && formatCurso(e.curso), e.grupo].filter(Boolean).join(' '),
+  ].filter(Boolean).join(' · ') }))
+  .filter(e => e.alumnado.length))
+
+function copiarAlumnadoDeEncuentro() {
+  const origen = encuentrosParaCopiar.value.find(e => e.id === Number(encuentroACopiar.value))
+  if (!origen) return
+  const grupos = form.value.num_equipos || 3
+  const yaEstan = new Set(form.value.alumnados.map(a => String(a.alias).toLowerCase()))
+  let copiados = 0, repetidos = 0, sinSitio = 0
+  for (const a of origen.alumnado) {
+    if (yaEstan.has(String(a.alias).toLowerCase())) { repetidos++; continue }
+    if (limiteAlcanzado.value) { sinSitio++; continue }
+    // Con reparto: el mismo grupo si existe (si no, el último); sin reparto: grupos equilibrados
+    const equipo = copiarConReparto.value ? Math.min(Number(a.equipo_num) || 1, grupos) : (copiados % grupos) + 1
+    form.value.alumnados.push({ alias: a.alias, equipo_num: equipo, ...(a.rol ? { rol: a.rol } : {}) })
+    yaEstan.add(String(a.alias).toLowerCase())
+    copiados++
+  }
+  mensajeCopiaAlumnado.value = [
+    `${copiados} alumno${copiados === 1 ? '' : 's'} copiado${copiados === 1 ? '' : 's'}`,
+    repetidos && `${repetidos} ya estaba${repetidos === 1 ? '' : 'n'}`,
+    sinSitio && `${sinSitio} sin copiar por el límite de alumnado`,
+  ].filter(Boolean).join(' · ') + '. Revisa los grupos antes de guardar.'
+  copiandoAlumnado.value = false
+  encuentroACopiar.value = ''
+}
+
+// «Pegar una lista»: un nombre de pila por línea (o separados por comas); cada uno va al grupo
+// con menos alumnado. Los que no son válidos se quedan en el cuadro para corregirlos.
+const pegandoLista = ref(false)
+const listaNombres = ref('')
+const mensajeLista = ref('')
+function anadirListaNombres() {
+  const nombres = listaNombres.value.split(/[\n,;]+/).map(n => n.trim()).filter(Boolean)
+  const grupos = Math.max(1, Number(form.value.num_equipos) || 1)
+  const cuenta = (n) => form.value.alumnados.filter(a => a.equipo_num === n).length
+  const pendientes = []
+  let anadidos = 0
+  for (const nombre of nombres) {
+    if (limiteAlcanzado.value || errorNombrePila(nombre)) { pendientes.push(nombre); continue }
+    let destino = 1
+    for (let n = 2; n <= grupos; n++) if (cuenta(n) < cuenta(destino)) destino = n
+    form.value.alumnados.push({ equipo_num: destino, alias: generarAliasAleatorio(nombre, aliasUsados.value) })
+    anadidos++
+  }
+  listaNombres.value = pendientes.join('\n')
+  mensajeLista.value = [
+    anadidos ? `${anadidos} ${anadidos === 1 ? 'añadido' : 'añadidos'} y repartidos en ${grupos} grupos.` : '',
+    pendientes.length ? `${pendientes.length} sin añadir: solo el nombre de pila, sin apellidos${limiteAlcanzado.value ? ', o se ha llegado al máximo' : ''}.` : '',
+  ].filter(Boolean).join(' ')
+  if (!pendientes.length) pegandoLista.value = false
 }
 
 function removeAlumnadoEncuentro(i) {
@@ -177,6 +317,26 @@ const alumnadosSinEquipo = computed(() =>
 const guardando     = ref(false)
 const guardadoOk    = ref(false)
 const errorGuardado = ref('')
+const encuentroCreado = ref(null)
+
+// «Proyectar QR y códigos» al terminar: crea los grupos y el código de la clase (si aún no
+// los tiene) y abre la pantalla de acceso de este encuentro, sin pasar por la biblioteca.
+const abriendoProyeccion = ref(false)
+const errorProyeccion    = ref('')
+async function proyectarAcceso() {
+  const e = encuentroCreado.value
+  if (!e) return
+  abriendoProyeccion.value = true
+  errorProyeccion.value = ''
+  try {
+    if (!e.codigo_clase) await crearCodigoAcceso(e.id)
+    router.push({ name: 'pantalla-acceso', params: { uuid: e.microproyecto_uuid }, query: { encuentro: e.id } })
+  } catch (err) {
+    errorProyeccion.value = err.response?.data?.error || 'No se pudo crear el código de acceso. Inténtalo desde la biblioteca de encuentros.'
+  } finally {
+    abriendoProyeccion.value = false
+  }
+}
 
 // ─── Historial de encuentros (API) ────────────────────────────────────────────
 const encuentros         = ref([])
@@ -212,13 +372,16 @@ onMounted(async () => {
 
   // Preselecciona el proyecto si venimos del botón "Crear encuentro" del detalle
   // de un proyecto validado (StartupDayDetalle.vue).
-  if (route.query.microproyecto_id) {
+  if (route.query.microproyecto_id || route.query.microproyecto) {
     try {
       const res = await api.get('/startup/proyectos')
       todosMisProyectos.value = res.data
       proyectosCargados.value = true
-      const p = todosMisProyectos.value.find(pr => String(pr.id) === String(route.query.microproyecto_id))
+      const p = todosMisProyectos.value.find(pr => route.query.microproyecto
+        ? pr.uuid === route.query.microproyecto : String(pr.id) === String(route.query.microproyecto_id))
       if (p) seleccionarProyecto(p)
+      // «Otro día»: sin fecha, para que la elija; «Empezar hoy» deja la de hoy (por defecto)
+      if (desdeAjuste && route.query.fecha === 'otro') form.value.fecha = ''
     } catch (e) {
       console.error('Error preseleccionando proyecto desde query param:', e)
     }
@@ -249,15 +412,6 @@ onMounted(async () => {
   } catch (e) {
     console.error('Error migrando encuentros desde localStorage:', e)
   }
-
-  // Tour prompt desactivado temporalmente — reactivar poniendo showTourPrompt.value = true cuando se necesite.
-  // await nextTick()
-  // showTourPrompt.value = true
-})
-
-onUnmounted(() => {
-  tourActivo.value = false
-  window.removeEventListener('scroll', onScrollGuia)
 })
 
 // ─── Guardar encuentro ─────────────────────────────────────────────────────────
@@ -268,12 +422,14 @@ async function guardarEncuentro() {
   try {
     const payload = {
       ...form.value,
-      num_alumnos: form.value.num_alumnos !== '' ? Number(form.value.num_alumnos) : null,
+      num_alumnos: form.value.alumnados.length || null,
     }
     const res = await api.post('/encuentros', payload)
     encuentros.value = [res.data, ...encuentros.value]
+    encuentroCreado.value = res.data
     guardadoOk.value = true
-    setTimeout(() => { guardadoOk.value = false }, 2500)
+    pasoEnc.value = 4
+    pasoEncMax.value = 4
   } catch (e) {
     console.error('Error guardando encuentro:', e)
     errorGuardado.value = e.response?.data?.message || 'No se pudo guardar el encuentro. Revisa los datos e inténtalo de nuevo.'
@@ -281,193 +437,6 @@ async function guardarEncuentro() {
     guardando.value = false
   }
 }
-
-// ─── Eliminar encuentro (modal dos fases) ────────────────────────────────────
-const modalEliminarVisible = ref(false)
-const encuentroAEliminar   = ref(null)
-const snackbar = ref({ visible: false, mensaje: '', accion: null })
-let   snackTimer = null
-
-function mostrarSnack(mensaje, accion = null) {
-  clearTimeout(snackTimer)
-  snackbar.value = { visible: true, mensaje, accion }
-  snackTimer = setTimeout(() => { snackbar.value.visible = false }, 5000)
-}
-
-function abrirModalEliminar(encuentro) {
-  encuentroAEliminar.value = encuentro
-  modalEliminarVisible.value = true
-}
-
-function cerrarModalEliminar() {
-  modalEliminarVisible.value = false
-  encuentroAEliminar.value = null
-}
-
-function onEncuentroEliminado({ id, titulo }) {
-  encuentros.value = encuentros.value.filter(s => s.id !== id)
-  cerrarEncuentroModal()
-  cerrarModalEliminar()
-  // La papelera de "Base de datos" es solo superadmin — el resto de roles ya no tiene esa ruta.
-  mostrarSnack(
-    `"${titulo}" movido a la papelera.`,
-    authStore.isSuperAdmin ? { label: 'Ir a la papelera', fn: () => router.push({ name: 'papelera' }) } : null
-  )
-}
-
-// ─── Filtros y paginación del panel de encuentros ────────────────────────────
-const filtroSes        = ref({ fecha: '', titulo: '', curso: '', grupo: '' })
-const paginaEncuentros  = ref(1)
-const ENCUENTROS_POR_PAGINA = 5
-
-const encuentrosFiltrados = computed(() => {
-  let lista = [...encuentros.value]
-  if (filtroSes.value.fecha)
-    lista = lista.filter(s => s.fecha === filtroSes.value.fecha)
-  if (filtroSes.value.titulo.trim()) {
-    const q = filtroSes.value.titulo.trim().toLowerCase()
-    lista = lista.filter(s => (s.proyecto_titulo || '').toLowerCase().includes(q))
-  }
-  if (filtroSes.value.curso) lista = lista.filter(s => s.curso === filtroSes.value.curso)
-  if (filtroSes.value.grupo) lista = lista.filter(s => s.grupo === filtroSes.value.grupo)
-  return lista.sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0))
-})
-
-const encuentrosVisibles = computed(() => {
-  const start = (paginaEncuentros.value - 1) * ENCUENTROS_POR_PAGINA
-  return encuentrosFiltrados.value.slice(start, start + ENCUENTROS_POR_PAGINA)
-})
-
-const totalPaginasSes = computed(() =>
-  Math.ceil(encuentrosFiltrados.value.length / ENCUENTROS_POR_PAGINA)
-)
-
-watch(filtroSes, () => { paginaEncuentros.value = 1 }, { deep: true })
-
-// ─── Tour guía paso a paso ────────────────────────────────────────────────────
-const modoGuia       = ref(false)
-const pasoGuia       = ref(1)
-const showTourPrompt = ref(false)
-
-function activarTourDesdeModal() { showTourPrompt.value = false; modoGuia.value = true; pasoGuia.value = 1 }
-function omitirTourDesdeModal()  { showTourPrompt.value = false }
-
-const guiaPasosData = [
-  { ref: 'refCampoFecha',    seccion: 'datos', texto: 'Indica la fecha en la que se realizó el encuentro.' },
-  { ref: 'refCampoCentro',   seccion: 'datos', texto: 'Indica el centro educativo.' },
-  { ref: 'refCampoAlumnado', seccion: 'datos', texto: 'Indica la información del alumnado: curso, grupo y número de alumnos.' },
-  { ref: 'refCampoEquipos',  seccion: 'datos', texto: 'Configura los equipos y añade el alumnado asignado a cada uno.' },
-  { ref: 'refCampoNotas',    seccion: 'datos', texto: 'Indica cualquier nota relevante sobre el encuentro.' },
-  { ref: 'refBtnGuardar',    seccion: 'datos', texto: 'Pulsa guardar encuentro para registrar la información.' },
-  { ref: 'refEncuentros',    seccion: 'encuentros', texto: 'Quedará disponible para crear el proyecto y comenzar el taller de ideas, o consultar esta info más adelante.' },
-  { ref: 'refBtnGuia',       seccion: null,    texto: 'Pincha aquí para volver a activar la guía cuando quieras.' },
-]
-
-const TOTAL_PASOS_GUIA = guiaPasosData.length
-
-// Template refs para el tour
-const refCampoFecha    = ref(null)
-const refCampoCentro   = ref(null)
-const refCampoAlumnado = ref(null)
-const refCampoEquipos  = ref(null)
-const refCampoNotas    = ref(null)
-const refBtnGuardar    = ref(null)
-const refEncuentros    = ref(null)
-const refBtnGuia       = ref(null)
-
-const tourRefs = { refCampoFecha, refCampoCentro, refCampoAlumnado, refCampoEquipos, refCampoNotas, refBtnGuardar, refEncuentros, refBtnGuia }
-
-const tourTargetActivo = computed(() => {
-  if (!modoGuia.value) return null
-  return guiaPasosData[pasoGuia.value - 1]?.ref ?? null
-})
-
-const seccionActiva = computed(() => {
-  if (!modoGuia.value) return null
-  return guiaPasosData[pasoGuia.value - 1]?.seccion ?? null
-})
-
-const bocadilloPos = ref({ top: 0, left: 0, arrowLeft: 130, dir: 'top' })
-
-function recalcularBocadillo() {
-  const paso = guiaPasosData[pasoGuia.value - 1]
-  if (!paso) return
-  const el = tourRefs[paso.ref]?.value
-  if (!el) return
-  const rect = el.getBoundingClientRect()
-  const TOOLTIP_W = 272
-  const TOOLTIP_H = 155
-  const MARGIN    = 12
-  const WIN_W = window.innerWidth
-  const WIN_H = window.innerHeight
-
-  const visibleTop    = Math.max(0, rect.top)
-  const visibleBottom = Math.min(WIN_H, rect.bottom)
-  const centerX       = rect.left + rect.width / 2
-
-  let tooltipLeft = centerX - TOOLTIP_W / 2
-  tooltipLeft = Math.max(10, Math.min(tooltipLeft, WIN_W - TOOLTIP_W - 10))
-  const arrowLeft = Math.max(18, Math.min(centerX - tooltipLeft, TOOLTIP_W - 18))
-
-  let dir, tooltipTop
-  if (WIN_H - visibleBottom > TOOLTIP_H + MARGIN) {
-    dir = 'top'
-    tooltipTop = visibleBottom + MARGIN
-  } else if (visibleTop > TOOLTIP_H + MARGIN) {
-    dir = 'bottom'
-    tooltipTop = visibleTop - MARGIN - TOOLTIP_H
-  } else {
-    dir = 'top'
-    tooltipTop = WIN_H * 0.6
-  }
-  tooltipTop = Math.max(10, Math.min(tooltipTop, WIN_H - TOOLTIP_H - 10))
-
-  bocadilloPos.value = { top: tooltipTop, left: tooltipLeft, arrowLeft, dir }
-}
-
-function avanzarGuia() {
-  if (pasoGuia.value < TOTAL_PASOS_GUIA) {
-    pasoGuia.value++
-  } else {
-    modoGuia.value = false
-  }
-}
-
-function saltarGuia() {
-  modoGuia.value = false
-}
-
-function scrollYRecalcular() {
-  const paso = guiaPasosData[pasoGuia.value - 1]
-  const el = tourRefs[paso?.ref]?.value
-  if (el) el.scrollIntoView({ behavior: 'instant', block: 'nearest' })
-  requestAnimationFrame(() => requestAnimationFrame(recalcularBocadillo))
-}
-
-function onScrollGuia() {
-  if (modoGuia.value) requestAnimationFrame(recalcularBocadillo)
-}
-
-watch(pasoGuia, async () => {
-  await nextTick()
-  scrollYRecalcular()
-})
-
-watch(modoGuia, async (v) => {
-  tourActivo.value = v
-  if (v) {
-    window.addEventListener('scroll', onScrollGuia, { passive: true })
-    await nextTick()
-    scrollYRecalcular()
-  } else {
-    window.removeEventListener('scroll', onScrollGuia)
-  }
-})
-
-onBeforeRouteUpdate(() => {
-  modoGuia.value = false
-  pasoGuia.value = 1
-})
 
 // ─── Modal ficha de microreto ─────────────────────────────────────────────────
 const microretoModalId = ref(null)
@@ -491,34 +460,6 @@ function cerrarProyectoModal() {
   proyectoModalUuid.value = null
 }
 
-// ─── Modal de detalle de encuentro ────────────────────────────────────────────
-const encuentroAbierto = ref(null)
-const { cargandoRaCe, modulosExpandidos, raCeBlocksEncuentro, toggleModulo, cargarRaCe } = useRaCeEncuentro()
-
-async function verEncuentro(s) {
-  encuentroAbierto.value = s
-  await cargarRaCe(s.microproyecto_uuid)
-}
-
-function cerrarEncuentroModal() {
-  encuentroAbierto.value = null
-}
-
-function alumnadosDeEquipoEn(encuentro, n) {
-  const equipo = (encuentro?.equipos || []).find(e => e.numero_equipo === n)
-  if (equipo) {
-    return equipo.miembros.map(m => m.alias ? `${m.nombre} (${m.alias})` : m.nombre)
-  }
-  // Encuentros sin equipos cargados todavía (o antiguos): snapshot plano, sin alias.
-  return (encuentro?.alumnados || [])
-    .filter(a => a.equipo_num === n)
-    .map(a => a.nombre)
-}
-
-function alumnadosDelEquipoAbierto(n) {
-  return alumnadosDeEquipoEn(encuentroAbierto.value, n)
-}
-
 // El flujo es secuencial: 1) proyecto asociado → 2) fecha de trabajo →
 // 3) equipos repartidos → 4) guardar. Cada paso exige el anterior.
 const proyectoAsociado  = computed(() => !!form.value.microproyecto_id)
@@ -532,22 +473,152 @@ const equiposRepartidos = computed(() =>
   alumnadosSinEquipo.value.length === 0
 )
 
-const formularioValido = computed(() => equiposRepartidos.value)
+const formularioValido = computed(() => equiposRepartidos.value && planificacionValida.value)
 
 const requisitosFaltantes = computed(() => {
   const faltantes = []
   if (!proyectoAsociado.value) {
-    faltantes.push('Asocia un proyecto al encuentro.')
+    faltantes.push('Asocia un reto ajustado al encuentro.')
     return faltantes
   }
-  if (!form.value.fecha) faltantes.push('Establece la fecha de trabajo.')
+  if (!form.value.fecha) faltantes.push('Establece la fecha de inicio.')
   if (!form.value.curso) faltantes.push('Indica el curso del encuentro.')
-  if (!form.value.grupo) faltantes.push('Indica el grupo del encuentro.')
-  if ((form.value.num_equipos || 0) < 1) faltantes.push('Indica el número de equipos.')
-  if (form.value.alumnados.length === 0) faltantes.push('Reparte el alumnado en los equipos.')
-  else if (alumnadosSinEquipo.value.length > 0) faltantes.push('Hay alumnado sin equipo asignado.')
+  if (!form.value.grupo) faltantes.push('Indica la clase del encuentro.')
+  if (!planificacionValida.value) faltantes.push('Planifica las sesiones: cada una con al menos una fase.')
+  if ((form.value.num_equipos || 0) < 1) faltantes.push('Indica el número de grupos.')
+  if (form.value.alumnados.length === 0) faltantes.push('Reparte el alumnado en los grupos.')
+  else if (alumnadosSinEquipo.value.length > 0) faltantes.push('Hay alumnado sin grupo asignado.')
   return faltantes
 })
+
+// ─── Asistente de 4 pasos (diseño crear_encuentro.png) ───────────────────────
+// Solo cambia la presentación: los datos y el guardado (POST /encuentros) son los mismos.
+const pasosEncuentro = [
+  { num: 1, label: 'Datos generales' },
+  { num: 2, label: 'Grupo y alumnado' },
+  { num: 3, label: 'Confirmación' },
+  { num: 4, label: 'Completado' },
+]
+const pasoEnc        = ref(1)
+const pasoEncMax     = ref(1)
+const intentoAvanzar = ref(false)
+watch(pasoEnc, (v) => {
+  if (v > pasoEncMax.value) pasoEncMax.value = v
+  intentoAvanzar.value = false
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+})
+
+const faltantesPaso1 = computed(() => {
+  const f = []
+  if (!proyectoAsociado.value) f.push('Asocia un reto ajustado al encuentro.')
+  if (!form.value.fecha) f.push('Establece la fecha de inicio.')
+  if (!form.value.curso) f.push('Indica el curso del encuentro.')
+  if (!form.value.grupo) f.push('Indica la clase del encuentro.')
+  if (proyectoAsociado.value && !planificacionValida.value) f.push('Planifica las sesiones: cada una con al menos una fase.')
+  return f
+})
+const faltantesPaso2 = computed(() => {
+  const f = []
+  if ((form.value.num_equipos || 0) < 1) f.push('Indica el número de grupos.')
+  if (form.value.alumnados.length === 0) f.push('Reparte el alumnado en los grupos.')
+  else if (alumnadosSinEquipo.value.length > 0) f.push('Hay alumnado sin grupo asignado.')
+  return f
+})
+const faltantesPaso = computed(() =>
+  pasoEnc.value === 1 ? faltantesPaso1.value
+  : pasoEnc.value === 2 ? faltantesPaso2.value
+  : requisitosFaltantes.value
+)
+function siguientePasoEnc() {
+  intentoAvanzar.value = true
+  if (faltantesPaso.value.length) return
+  pasoEnc.value++
+}
+// Se puede volver a cualquier paso ya visitado, y avanzar solo si los anteriores están completos.
+function puedeIrAPasoEnc(num) {
+  if (pasoEnc.value === 4 || num === 4) return false
+  if (num >= 2 && faltantesPaso1.value.length) return false
+  if (num >= 3 && faltantesPaso2.value.length) return false
+  return true
+}
+// «Cambiar reto ajustado» vacía también grupos y alumnado: se pide confirmación y se guarda una
+// copia en memoria para poder volver atrás («Restaurar reto ajustado anterior»).
+const confirmandoCambioProyecto = ref(false)
+const proyectoAnterior          = ref(null)   // { proyecto, form, sesionSugerida }
+function cambiarProyecto() {
+  proyectoAnterior.value = {
+    proyecto:       proyectoSeleccionado.value,
+    form:           JSON.parse(JSON.stringify(form.value)),
+    sesionSugerida: sesionSugerida.value,
+  }
+  confirmandoCambioProyecto.value = false
+  limpiarProyecto()
+  abrirBuscadorProy()
+}
+function restaurarProyectoAnterior() {
+  const copia = proyectoAnterior.value
+  if (!copia) return
+  form.value                 = JSON.parse(JSON.stringify(copia.form))
+  proyectoSeleccionado.value = copia.proyecto
+  sesionSugerida.value       = copia.sesionSugerida
+  mostrarBuscadorProy.value  = false
+  proyectoAnterior.value     = null
+}
+function crearOtroEncuentro() {
+  limpiarProyecto()
+  proyectoAnterior.value = null
+  form.value.fecha  = new Date().toISOString().slice(0, 10)
+  form.value.grupo  = ''
+  form.value.num_alumnos = ''
+  form.value.notas  = ''
+  guardadoOk.value  = false
+  encuentroCreado.value = null
+  errorProyeccion.value = ''
+  pasoEncMax.value  = 1
+  pasoEnc.value     = 1
+}
+
+function alumnosTexto(n) { return n ? `${n} ${n === 1 ? 'alumno' : 'alumnos'}` : '' }
+
+// Columna derecha: ficha clave/valor con lo que se va rellenando.
+const datosResumenEncuentro = computed(() => [
+  { icono: 'centro',     label: 'Centro educativo', valor: authStore.userCentroNombre || form.value.centro_educativo },
+  { icono: 'clase',      label: 'Curso y clase',    valor: [form.value.curso && `${form.value.curso} curso`, form.value.grupo && `Clase ${form.value.grupo}`].filter(Boolean).join(' · ') },
+  { icono: 'calendario', label: 'Fecha de inicio', valor: proyectoAsociado.value && form.value.fecha ? formatFecha(form.value.fecha) : '' },
+  { icono: 'reloj',      label: form.value.fecha_fin ? 'Fecha de fin' : 'Fecha fin estimada', valor: proyectoAsociado.value && fechaFin.value ? formatFecha(fechaFin.value) : '' },
+  { icono: 'alumnado',   label: 'Alumnado',         valor: alumnosTexto(form.value.alumnados.length || Number(form.value.num_alumnos) || 0) },
+  { icono: 'grupos',     label: 'Grupos',           valor: pasoEncMax.value >= 2 ? `${form.value.num_equipos || 3} grupos` : '' },
+].filter(d => d.valor))
+
+const CONSEJO_PASO_ENC = {
+  1: 'Verifica que el reto ajustado y los datos sean correctos. Podrás modificar la información del encuentro más adelante.',
+  2: 'Usa solo alias (nombre de pila + animal + color): nunca nombres reales completos del alumnado.',
+  3: 'Revisa el resumen. Al guardar, los grupos quedarán listos para generar su código de acceso.',
+  4: 'En la biblioteca de encuentros generarás el código de acceso y, en «Seguimiento de grupos», seguirás el avance de cada grupo.',
+}
+const antesDeContinuarEnc = computed(() => {
+  if (intentoAvanzar.value && faltantesPaso.value.length && pasoEnc.value < 4)
+    return { tipo: 'aviso', titulo: 'Falta completar', texto: faltantesPaso.value[0] }
+  return { tipo: 'info', titulo: pasoEnc.value === 4 ? 'Siguiente paso' : 'Antes de continuar', texto: CONSEJO_PASO_ENC[pasoEnc.value] }
+})
+
+// Paso 3: resumen para confirmar.
+const confirmacionEncuentro = computed(() => [
+  { label: 'Reto ajustado',    valor: proyectoSeleccionado.value?.titulo || '—', ancho: true },
+  { label: 'Fecha de inicio', valor: formatFecha(form.value.fecha) || '—' },
+  { label: form.value.fecha_fin ? 'Fecha de fin' : 'Fecha fin estimada', valor: fechaFin.value ? formatFecha(fechaFin.value) : '—' },
+  { label: 'Sesiones planificadas', valor: String(form.value.planificacion_sesiones.length) },
+  { label: 'Centro educativo', valor: authStore.userCentroNombre || form.value.centro_educativo || '—' },
+  { label: 'Ciclo formativo',  valor: form.value.ciclo_formativo || '—' },
+  { label: 'Curso y clase',    valor: `${form.value.curso || '—'} · Clase ${form.value.grupo || '—'}` },
+  { label: 'Grupos y alumnado', valor: `${form.value.num_equipos || 3} grupos · ${alumnosTexto(form.value.alumnados.length) || '0 alumnos'} con alias`, ancho: true },
+])
+
+// Microproyecto.curso es un valor controlado: dígito o 'ambos_cursos'.
+function cursoProyecto(c) {
+  if (!c) return ''
+  return c === 'ambos_cursos' ? '1º y 2º curso' : `${String(c).replace('º', '')}º curso`
+}
 
 function formatFecha(isoDate) {
   if (!isoDate) return ''
@@ -557,221 +628,124 @@ function formatFecha(isoDate) {
 </script>
 
 <template>
-  <div class="min-h-screen font-sans text-[#1F2937] pt-12">
-
-    <!-- ══════════ TOUR BOCADILLO - OVERLAY + TOOLTIP ════════════════════════ -->
-    <Transition name="sp-fade">
-      <div v-if="modoGuia" class="fixed inset-0 z-[9990] pointer-events-none">
-        <!-- Backdrop bloqueante transparente — bloquea interacción sin oscurecer el elemento activo -->
-        <div class="absolute inset-0 pointer-events-auto" />
-
-        <!-- Bocadillo flotante posicionado sobre el elemento activo -->
-        <div class="absolute pointer-events-auto"
-             :style="{ top: bocadilloPos.top + 'px', left: bocadilloPos.left + 'px', width: '272px', zIndex: 9992 }">
-
-          <!-- Flecha apuntando arriba (bocadillo debajo del elemento) -->
-          <div v-if="bocadilloPos.dir === 'top'"
-               class="absolute -top-[10px] w-0 h-0"
-               :style="{
-                 left: bocadilloPos.arrowLeft + 'px',
-                 transform: 'translateX(-50%)',
-                 borderLeft: '9px solid transparent',
-                 borderRight: '9px solid transparent',
-                 borderBottom: '10px solid #1a2332'
-               }" />
-
-          <!-- Contenido -->
-          <div class="bg-[#1a2332] border border-white/15 rounded-2xl shadow-2xl p-4 text-white">
-            <!-- Progreso -->
-            <div class="flex items-center justify-between mb-2.5">
-              <div class="flex gap-1 items-center">
-                <span v-for="i in TOTAL_PASOS_GUIA" :key="i"
-                      class="h-[3px] rounded-full transition-all duration-300"
-                      :class="i <= pasoGuia ? 'bg-[#00A859] w-5' : 'bg-white/20 w-3'" />
-              </div>
-              <span class="text-[9px] font-bold text-white/40">{{ pasoGuia }}/{{ TOTAL_PASOS_GUIA }}</span>
-            </div>
-
-            <p class="text-[11px] text-white/85 leading-relaxed mb-3">{{ guiaPasosData[pasoGuia - 1].texto }}</p>
-
-            <div class="flex items-center gap-2">
-              <button @click="avanzarGuia"
-                      class="flex-1 py-1.5 rounded-xl bg-[#00A859] text-white
-                             text-[9px] font-black uppercase tracking-widest
-                             hover:bg-[#00A859]/90 transition-all">
-                {{ pasoGuia < TOTAL_PASOS_GUIA ? 'Siguiente →' : 'Finalizar' }}
-              </button>
-              <button @click="saltarGuia"
-                      class="px-2.5 py-1.5 rounded-xl bg-white/5 border border-white/10
-                             text-white/40 text-[9px] font-black uppercase tracking-widest
-                             hover:text-white/60 transition-all">
-                Saltar
-              </button>
-            </div>
-          </div>
-
-          <!-- Flecha apuntando abajo (bocadillo encima del elemento) -->
-          <div v-if="bocadilloPos.dir === 'bottom'"
-               class="absolute -bottom-[10px] w-0 h-0"
-               :style="{
-                 left: bocadilloPos.arrowLeft + 'px',
-                 transform: 'translateX(-50%)',
-                 borderLeft: '9px solid transparent',
-                 borderRight: '9px solid transparent',
-                 borderTop: '10px solid #1a2332'
-               }" />
-        </div>
-      </div>
-    </Transition>
+  <div class="min-h-screen font-sans text-azul-noche pt-16">
 
     <!-- Fondo decorativo -->
-    <div class="fixed top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px]
-                bg-[#00A859] opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
+    <div class="fixed top-0 left-1/2 -translate-x-1/2 w-[min(600px,100vw)] h-[400px]
+                bg-rol-fuerte opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
 
-    <div class="relative z-10 max-w-5xl mx-auto px-4 py-8 md:px-8 md:py-12">
+    <!-- Asistente de 4 pasos + columna derecha (diseño crear_encuentro.png) -->
+    <div class="relative z-10 mx-auto max-w-[90rem] px-4 pb-10 pt-5 sm:px-6 lg:px-5 xl:px-8">
+      <div class="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-5 xl:gap-8">
+      <div class="min-w-0 flex-1 space-y-5">
 
-      <!-- ─── Cabecera ─────────────────────────────────────────────────────── -->
-      <header class="mb-8">
-        <div class="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-5">
-          <div>
-            <div class="inline-flex items-center gap-2 mb-2 px-3 py-1 rounded-full
-                        bg-[#00A859]/10 border border-[#00A859]/20">
-              <span class="w-2 h-2 rounded-full bg-[#00A859]" />
-              <span class="text-[10px] font-black uppercase tracking-widest text-[#00A859]">Dashboard docente</span>
-            </div>
-            <h1 class="text-3xl md:text-4xl font-black tracking-tight text-[#121212]">
-              Encuentros <span class="text-transparent bg-clip-text bg-gradient-to-r from-[#00A859] to-[#99CC33]">DuaLab</span>
-            </h1>
-            <p class="text-gray-500 text-sm mt-1">Registra y consulta tus encuentros de trabajo con retos.</p>
-          </div>
-
-          <!-- Stats chips -->
-          <div class="flex flex-wrap gap-3 items-center">
-            <div class="flex items-center gap-2 px-4 py-2 bg-white rounded-2xl border border-gray-100 shadow-sm">
-              <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2
-                         M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
-              </svg>
-              <span class="font-black text-xl text-[#1F2937]">{{ encuentros.length }}</span>
-              <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">encuentros</span>
-            </div>
-
-            <!-- Botón activar guía -->
-            <button ref="refBtnGuia"
-                    @click="modoGuia = true; pasoGuia = 1"
-                    class="flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-2xl border border-blue-100
-                           shadow-sm text-blue-500 text-xs font-black uppercase tracking-wider
-                           hover:bg-blue-100 hover:border-blue-200 transition-all">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-              </svg>
-              Activar Guía
-            </button>
-          </div>
+      <CabeceraSeccion data-tour="enc-cabecera" plano :titulo="desdeAjuste ? 'Llevar al' : 'Crear'" :destacado="desdeAjuste ? 'aula' : 'encuentro'" color="text-rol-fuerte"
+                       :antetitulo="desdeAjuste ? 'Ajuste del reto · Encuentro' : undefined"
+                       volver="/encuentros" volver-label="Volver a encuentros"
+                       :subtitulo="desdeAjuste ? 'Pon la fecha, la clase y el alumnado: al terminar proyectas el QR para los grupos.' : 'Selecciona un reto y registra los datos de la clase.'">
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- Solo icono por debajo de 2xl: deja sitio al título «Crear encuentro» en una línea -->
+          <RouterLink to="/encuentros" data-tour="enc-ver-encuentros" class="accion-secundaria max-2xl:w-10 max-2xl:px-0" title="Ver todos tus encuentros"
+                      aria-label="Ver todos tus encuentros">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+            <span class="max-2xl:sr-only">Ver encuentros</span>
+          </RouterLink>
+          <!-- Ayuda: abre la guía de esta pantalla (la misma que Guía → «Esta pantalla» de la barra superior) -->
+          <button type="button" @click="recorrerPantalla"
+                  aria-label="Ayuda: guía paso a paso de esta pantalla"
+                  class="accion-secundaria max-sm:w-10 max-sm:px-0" title="Guía paso a paso de esta pantalla">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <span class="max-sm:sr-only">Ayuda</span>
+          </button>
         </div>
-      </header>
+      </CabeceraSeccion>
 
-      <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <TallerPasos data-tour="enc-pasos" variante="linea" etiqueta="Pasos para crear el encuentro"
+                   :pasos="pasosEncuentro" :actual="pasoEnc" :maximo="pasoEncMax" :puede-ir="puedeIrAPasoEnc"
+                   @ir="pasoEnc = $event" />
 
-        <!-- ─── COLUMNA IZQUIERDA: Formulario ───────────────────────────── -->
-        <div class="lg:col-span-3">
-          <div class="bg-white rounded-[1.5rem] border border-gray-100 shadow-sm overflow-hidden">
+      <!-- ═══ PASO 1 · DATOS GENERALES ═══ -->
+      <template v-if="pasoEnc === 1">
 
-          <!-- Header sección izquierda — banner de creación -->
-          <Transition name="creation-hero" appear>
-            <div class="relative overflow-hidden border-b border-[#00A859]/20
-                        bg-gradient-to-br from-[#00A859]/10 via-[#00A859]/5 to-[#99CC33]/8 px-6 py-5">
-              <!-- Fondo decorativo -->
-              <div class="absolute -right-6 -top-6 w-24 h-24 rounded-full
-                          bg-[#00A859]/10 blur-2xl pointer-events-none" />
-              <div class="relative flex items-center gap-4">
-                <div class="w-12 h-12 rounded-2xl bg-[#00A859] flex items-center justify-center shadow-sm flex-shrink-0">
-                  <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2
-                             M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
-                  </svg>
-                </div>
-                <div>
-                  <div class="flex items-center gap-2 mb-1">
-                    <span class="w-2 h-2 rounded-full bg-[#00A859]" />
-                    <span class="text-[10px] font-black uppercase tracking-widest text-[#00A859]">Nuevo encuentro</span>
-                  </div>
-                  <h2 class="text-xl font-black text-[#1F2937] tracking-tight leading-tight">Creación de encuentro</h2>
-                  <p class="text-xs text-gray-500 mt-0.5 font-medium">Selecciona un reto y registra los datos del grupo</p>
-                </div>
+        <!-- Reto y proyecto asociado -->
+        <section data-tour="enc-reto" class="rounded-2xl border border-borde bg-white p-4 shadow-sm sm:p-6" aria-labelledby="titulo-proyecto-asociado">
+          <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start">
+            <div class="flex min-w-0 flex-1 items-start gap-3 sm:gap-4">
+              <span class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rol-fuerte text-white sm:h-12 sm:w-12" aria-hidden="true">
+                <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+              </span>
+              <div class="min-w-0">
+                <h2 id="titulo-proyecto-asociado" class="text-lg font-bold text-azul-noche">Reto ajustado</h2>
+                <p class="mt-0.5 text-sm text-texto-secundario">Selecciona el reto ajustado validado que se trabajará en este encuentro.</p>
               </div>
             </div>
-          </Transition>
-
-          <!-- ══ PROPUESTA-PROYECTO ASOCIADO ═══════════════════════════════════ -->
-          <div class="overflow-hidden border-b border-gray-100">
-            <div class="px-6 py-4 border-b border-gray-50 flex items-center justify-between">
-              <p class="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                Propuesta-Proyecto asociado
-              </p>
-              <button v-if="!mostrarBuscadorProy && !proyectoSeleccionado"
-                      @click="abrirBuscadorProy"
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl
-                             bg-[#99CC33]/10 border border-[#99CC33]/20 text-[#5a7a00]
-                             text-[10px] font-black uppercase tracking-widest
-                             hover:bg-[#99CC33]/20 transition-all">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-                </svg>
-                Buscar propuesta o proyecto
+            <div v-if="(proyectoSeleccionado && !mostrarBuscadorProy && !confirmandoCambioProyecto) || proyectoAnterior"
+                 class="flex shrink-0 flex-wrap gap-2 self-start">
+              <button v-if="proyectoAnterior" type="button" @click="restaurarProyectoAnterior"
+                      :title="`Volver a «${proyectoAnterior.proyecto?.titulo || ''}» con sus datos y grupos`"
+                      class="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-4 text-sm font-semibold text-amber-800 transition-colors hover:bg-amber-100">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+                <span class="sm:hidden">Restaurar anterior</span><span class="max-sm:hidden">Restaurar reto ajustado anterior</span>
+              </button>
+              <button v-if="proyectoSeleccionado && !mostrarBuscadorProy && !confirmandoCambioProyecto" type="button" @click="confirmandoCambioProyecto = true"
+                      class="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-rol-fuerte/30 bg-white px-4 text-sm font-semibold text-rol-fuerte transition-colors hover:bg-rol-fuerte/5">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                Cambiar reto ajustado
               </button>
             </div>
+          </div>
 
-            <div class="px-6 py-5">
+          <div v-if="confirmandoCambioProyecto && proyectoSeleccionado" role="alertdialog" aria-labelledby="aviso-cambio-proyecto"
+               class="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+            <p id="aviso-cambio-proyecto" class="text-sm font-bold text-amber-900">¿Seguro que quieres cambiar de reto ajustado?</p>
+            <p class="mt-1 text-sm leading-relaxed text-amber-800">
+              Se quitará «{{ proyectoSeleccionado.titulo }}» de este encuentro junto con su planificación de sesiones, los grupos y el alumnado que hayas añadido.
+              Si te equivocas, podrás volver con «Restaurar reto ajustado anterior» mientras no salgas de esta pantalla.
+            </p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button type="button" @click="cambiarProyecto" class="accion-principal">Sí, cambiar</button>
+              <button type="button" @click="confirmandoCambioProyecto = false" class="accion-secundaria">Cancelar</button>
+            </div>
+          </div>
 
-              <!-- Proyecto seleccionado -->
-              <div v-if="proyectoSeleccionado && !mostrarBuscadorProy"
-                   class="flex items-start justify-between gap-4">
-                <div class="flex-1 min-w-0">
-                  <div class="flex items-center gap-2 mb-1">
-                    <span class="w-2 h-2 rounded-full bg-[#99CC33] flex-shrink-0" />
-                    <p class="text-xs font-black uppercase tracking-widest text-[#5a7a00]">
-                      Seleccionado
-                    </p>
-                  </div>
-                  <h3 class="font-black text-[#1F2937] text-base leading-snug">
-                    {{ proyectoSeleccionado.titulo }}
-                  </h3>
-                  <div class="flex flex-wrap gap-1.5 mt-2">
-                    <span :class="estadoProyectoBadge(proyectoSeleccionado).cls"
-                          class="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
-                      {{ estadoProyectoBadge(proyectoSeleccionado).label }}
-                    </span>
-                    <span v-if="proyectoSeleccionado.empresa_nombre" class="tag tag-gray">
-                      {{ proyectoSeleccionado.empresa_nombre }}
-                    </span>
-                    <span v-if="proyectoSeleccionado.ciclo_nombre"
-                          class="tag tag-gray truncate max-w-[160px]">
-                      {{ proyectoSeleccionado.ciclo_nombre }}
-                    </span>
-                    <span v-if="proyectoSeleccionado.curso" class="tag tag-lime">
-                      {{ proyectoSeleccionado.curso }}
-                    </span>
-                  </div>
-                </div>
-                <div class="flex flex-col gap-1.5 flex-shrink-0">
-                  <button @click="abrirProyectoModal(proyectoSeleccionado.uuid)"
-                          class="px-3 py-1.5 rounded-xl bg-[#99CC33]/10 border border-[#99CC33]/20
-                                 text-[10px] font-black uppercase tracking-widest text-[#5a7a00]
-                                 hover:bg-[#99CC33]/20 transition-all">
-                    Ver →
-                  </button>
-                  <button @click="limpiarProyecto"
-                          class="px-3 py-1.5 rounded-xl bg-gray-50 border border-gray-200
-                                 text-[10px] font-black uppercase tracking-widest text-gray-400
-                                 hover:border-[#99CC33] hover:text-[#5a7a00] transition-all">
-                    Cambiar
-                  </button>
-                </div>
+          <!-- Proyecto seleccionado: miniatura + datos -->
+          <div v-if="proyectoSeleccionado && !mostrarBuscadorProy"
+               class="flex flex-col gap-4 rounded-xl bg-rol/5 p-3 sm:flex-row sm:items-center sm:p-4">
+            <MiniaturaReto :src="proyectoSeleccionado.imagen_portada_url || ''" class="h-32 w-full sm:h-28 sm:w-40" />
+            <div class="min-w-0 flex-1">
+              <p class="font-heading text-base font-bold leading-snug text-azul-noche break-words sm:text-lg">{{ proyectoSeleccionado.titulo }}</p>
+              <p v-if="proyectoSeleccionado.diseno_reto?.pregunta_reto" class="mt-1 text-sm italic leading-relaxed text-azul-noche sm:text-base">
+                «{{ proyectoSeleccionado.diseno_reto.pregunta_reto }}»
+              </p>
+              <div class="mt-2 flex flex-wrap gap-1.5">
+                <span :class="estadoProyectoBadge(proyectoSeleccionado).cls"
+                      class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide">
+                  {{ estadoProyectoBadge(proyectoSeleccionado).label }}
+                </span>
+                <span v-if="proyectoSeleccionado.empresa_nombre"
+                      class="inline-flex max-w-full items-center rounded-full bg-white px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide text-azul-noche">
+                  <span class="truncate">{{ proyectoSeleccionado.empresa_nombre }}</span>
+                </span>
               </div>
+              <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-texto-secundario">
+                <span v-if="proyectoSeleccionado.familia_nombre" class="inline-flex min-w-0 items-center gap-1.5">
+                  <svg class="h-4 w-4 shrink-0 text-rol-fuerte" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                  <span class="break-words">{{ proyectoSeleccionado.familia_nombre }}</span>
+                </span>
+                <span v-if="proyectoSeleccionado.curso" class="inline-flex items-center gap-1.5">
+                  <svg class="h-4 w-4 shrink-0 text-rol-fuerte" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                  {{ cursoProyecto(proyectoSeleccionado.curso) }}
+                </span>
+                <span v-if="proyectoSeleccionado.ciclo_nombre" class="inline-flex min-w-0 items-center gap-1.5">
+                  <svg class="h-4 w-4 shrink-0 text-rol-fuerte" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5zm0 0v6m0-6l6.16-3.422A12.083 12.083 0 0118.82 17.5L12 21l-6.82-3.5a12.08 12.08 0 01.66-6.922L12 14z"/></svg>
+                  <span class="break-words">{{ proyectoSeleccionado.ciclo_nombre }}</span>
+                </span>
+              </div>
+            </div>
+          </div>
 
               <!-- Buscador -->
               <div v-else-if="mostrarBuscadorProy" class="space-y-4">
@@ -780,13 +754,13 @@ function formatFecha(isoDate) {
                 <div class="flex flex-wrap gap-2">
                   <!-- Búsqueda texto -->
                   <div class="relative flex-1 min-w-40">
-                    <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-300 pointer-events-none"
+                    <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-texto-secundario pointer-events-none"
                          fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
                     </svg>
                     <input v-model="busquedaProy" type="text"
-                           placeholder="Buscar por título o empresa..."
-                           class="field-input pl-9 !text-xs" />
+                           placeholder="Buscar por título o empresa"
+                           class="field-input !pl-9 !text-xs" />
                   </div>
 
                   <!-- Filtro estado -->
@@ -798,7 +772,7 @@ function formatFecha(isoDate) {
                 </div>
 
                 <!-- Filtros Ciclo + Curso -->
-                <div class="grid grid-cols-2 gap-3">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label class="field-label">Ciclo formativo</label>
                     <select v-model="filtroProyCiclo" class="field-input">
@@ -809,14 +783,14 @@ function formatFecha(isoDate) {
                   <div>
                     <label class="field-label">Curso</label>
                     <div class="flex gap-2 mt-1">
-                      <button v-for="op in [{ val: '', label: 'Todos' }, { val: '1º', label: '1º' }, { val: '2º', label: '2º' }]"
+                      <button v-for="op in [{ val: '', label: 'Todos' }, { val: '1', label: '1º' }, { val: '2', label: '2º' }, { val: 'ambos', label: 'Ambos' }]"
                               :key="op.val"
                               @click="filtroProyCurso = op.val"
-                              class="flex-1 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest
+                              class="flex-1 inline-flex h-9 items-center justify-center rounded-full text-xs font-bold uppercase tracking-widest
                                      border transition-all"
                               :class="filtroProyCurso === op.val
-                                ? 'bg-[#99CC33] border-[#99CC33] text-white'
-                                : 'bg-gray-50 border-gray-200 text-gray-500 hover:border-[#99CC33]/40 hover:text-[#5a7a00]'">
+                                ? 'bg-primary-400 border-primary-400 text-white'
+                                : 'bg-gray-50 border-borde text-texto-secundario hover:border-primary-400/40 hover:text-primary-700'">
                         {{ op.label }}
                       </button>
                     </div>
@@ -825,23 +799,23 @@ function formatFecha(isoDate) {
 
                 <!-- Contador + limpiar + cancelar -->
                 <div class="flex items-center justify-between">
-                  <p class="text-[10px] text-gray-400 font-medium">
-                    <span v-if="cargandoProyectos">Cargando proyectos...</span>
+                  <p class="text-xs text-texto-secundario font-medium">
+                    <span v-if="cargandoProyectos">Cargando retos ajustados...</span>
                     <span v-else>
-                      {{ proyectosFiltrados.length }}
-                      {{ proyectosFiltrados.length === 1 ? 'proyecto' : 'proyectos' }}
+                      <template v-if="totalProyectosFiltrados > proyectosFiltrados.length">{{ proyectosFiltrados.length }} de </template>{{ totalProyectosFiltrados }}
+                      {{ totalProyectosFiltrados === 1 ? 'reto ajustado' : 'retos ajustados' }}
                     </span>
                   </p>
                   <div class="flex gap-3">
                     <button v-if="filtroProyCurso || filtroProyCiclo || filtroProyEstado || busquedaProy"
                             @click="filtroProyCurso = ''; filtroProyCiclo = ''; filtroProyEstado = ''; busquedaProy = ''"
-                            class="text-[10px] font-black uppercase tracking-widest text-gray-400
+                            class="min-h-9 rounded-full px-2 py-2 text-xs font-bold uppercase tracking-widest text-texto-secundario
                                    hover:text-red-400 transition-colors">
                       Limpiar
                     </button>
                     <button @click="cerrarBuscadorProy"
-                            class="text-[10px] font-black uppercase tracking-widest text-gray-400
-                                   hover:text-gray-600 transition-colors">
+                            class="min-h-9 rounded-full px-2 py-2 text-xs font-bold uppercase tracking-widest text-texto-secundario
+                                   hover:text-texto-secundario transition-colors">
                       Cancelar
                     </button>
                   </div>
@@ -849,7 +823,7 @@ function formatFecha(isoDate) {
 
                 <!-- Spinner -->
                 <div v-if="cargandoProyectos" class="flex justify-center py-8">
-                  <svg class="animate-spin w-6 h-6 text-[#99CC33]" viewBox="0 0 24 24">
+                  <svg class="animate-spin w-6 h-6 text-primary-400" viewBox="0 0 24 24">
                     <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
                   </svg>
                 </div>
@@ -858,30 +832,30 @@ function formatFecha(isoDate) {
                 <div v-else-if="proyectosFiltrados.length"
                      class="space-y-1.5 max-h-72 overflow-y-auto pr-1 -mr-1">
                   <div v-for="p in proyectosFiltrados" :key="p.uuid"
-                       class="flex items-stretch rounded-xl border border-gray-100 bg-gray-50
-                              hover:border-[#99CC33]/30 hover:bg-[#99CC33]/5 transition-all group">
+                       class="flex items-stretch rounded-xl border border-borde bg-gray-50
+                              hover:border-primary-400/30 hover:bg-primary-400/5 transition-all group">
                     <!-- Zona seleccionar (clic principal) -->
                     <button @click="seleccionarProyecto(p)"
                             class="flex-1 text-left px-4 py-3 min-w-0">
-                      <p class="text-sm font-black text-[#1F2937] leading-snug
-                                group-hover:text-[#5a7a00] transition-colors line-clamp-2">
+                      <p class="text-sm font-bold text-azul-noche leading-snug
+                                group-hover:text-primary-700 transition-colors line-clamp-2">
                         {{ p.titulo }}
                       </p>
                       <div class="flex flex-wrap gap-1.5 mt-1.5">
                         <span :class="estadoProyectoBadge(p).cls"
-                              class="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
+                              class="px-2 py-0.5 rounded-full text-xs font-bold uppercase tracking-widest">
                           {{ estadoProyectoBadge(p).label }}
                         </span>
                         <span v-if="p.empresa_nombre" class="tag tag-gray">{{ p.empresa_nombre }}</span>
                         <span v-if="p.ciclo_nombre"   class="tag tag-gray truncate max-w-[140px]">{{ p.ciclo_nombre }}</span>
-                        <span v-if="p.curso"          class="tag tag-lime">{{ p.curso }}</span>
+                        <span v-if="nivelCurso(p.curso)" class="tag tag-lime">{{ nivelCurso(p.curso) === 'ambos' ? 'Ambos cursos' : nivelCurso(p.curso) + 'º' }}</span>
                       </div>
                     </button>
                     <!-- Botón Ver (abre modal) -->
                     <button @click.stop="abrirProyectoModal(p.uuid)"
                             title="Ver detalle"
-                            class="shrink-0 flex items-center justify-center px-3 border-l border-gray-100
-                                   text-gray-300 hover:text-[#5a7a00] hover:bg-[#99CC33]/10
+                            class="shrink-0 flex items-center justify-center px-3 border-l border-borde
+                                   text-texto-secundario hover:text-primary-700 hover:bg-primary-400/10
                                    transition-all rounded-r-xl">
                       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -894,715 +868,478 @@ function formatFecha(isoDate) {
                 </div>
 
                 <!-- Sin resultados -->
-                <div v-else class="text-center py-8 text-gray-400">
+                <div v-else class="text-center py-8 text-texto-secundario">
                   <svg class="w-8 h-8 mx-auto mb-2 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
                   </svg>
-                  <p class="text-xs font-medium">Sin proyectos para esos filtros</p>
+                  <p class="text-xs font-medium">Sin retos ajustados para esos filtros</p>
                 </div>
 
               </div>
 
-              <!-- Estado inicial — sin selector abierto ni proyecto -->
-              <div v-else>
-                <div class="flex items-start gap-3 p-3 rounded-xl bg-gray-50 border border-gray-100">
-                  <svg class="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" fill="none"
-                       stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                  </svg>
-                  <p class="text-xs text-gray-500 font-medium leading-relaxed">
-                    Asocia un proyecto existente a este encuentro para tenerlo
-                    vinculado desde el registro. Los proyectos se crean en
-                    <button @click="router.push({ name: 'startup-day-crear' })"
-                            class="underline font-black hover:text-[#5a7a00] transition-colors">
-                      Generar Proyecto
-                    </button>.
-                  </p>
-                </div>
-                <button @click="abrirBuscadorProy"
-                        class="mt-3 w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
-                               border border-[#99CC33]/30 bg-[#99CC33]/5 text-[#5a7a00]
-                               text-[10px] font-black uppercase tracking-widest
-                               hover:bg-[#99CC33]/10 transition-all">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-                  </svg>
-                  Buscar propuesta o proyecto
-                </button>
-              </div>
+          <!-- Estado inicial — sin selector abierto ni proyecto -->
+          <div v-else class="space-y-3">
+            <p class="flex items-start gap-2 rounded-xl bg-rol/5 px-3 py-2.5 text-sm text-azul-noche">
+              <svg class="mt-0.5 h-4 w-4 shrink-0 text-rol-fuerte" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span>
+                Solo se pueden asociar retos ajustados que hayas validado (o ya completados). Se crean desde
+                <button type="button" @click="router.push({ name: 'startup-day-crear' })"
+                        class="font-semibold text-rol-fuerte underline hover:no-underline">Trabajar un reto</button>.
+              </span>
+            </p>
+            <button type="button" data-tour="enc-buscar-reto" @click="abrirBuscadorProy"
+                    class="inline-flex h-10 items-center gap-2 rounded-full bg-rol-fuerte px-5 text-sm font-semibold text-white shadow-sm hover:bg-rol-fuerte/90">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+              Buscar reto ajustado
+            </button>
+          </div>
+        </section>
 
+        <!-- Datos del encuentro -->
+        <section data-tour="enc-datos" class="rounded-2xl border border-borde bg-white p-4 shadow-sm sm:p-6" aria-labelledby="titulo-datos-encuentro">
+          <div class="mb-5 flex items-start gap-3 sm:gap-4">
+            <span class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rol-fuerte text-white sm:h-12 sm:w-12" aria-hidden="true">
+              <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            </span>
+            <div class="min-w-0">
+              <h2 id="titulo-datos-encuentro" class="text-lg font-bold text-azul-noche">Datos del encuentro</h2>
+              <p class="mt-0.5 text-sm text-texto-secundario">Define la información básica de la sesión.</p>
             </div>
           </div>
 
-          <!-- ══ DATOS DEL ENCUENTRO ══════════════════════════════════════════ -->
-          <div :class="{ 'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'datos' }">
-            <div class="px-6 py-4 border-b border-gray-50">
-              <p class="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
-                Datos del encuentro
+          <div class="grid grid-cols-1 gap-x-5 gap-y-4 sm:grid-cols-2">
+            <div class="min-w-0 rounded-xl transition-all">
+              <label for="enc-fecha" class="field-label">Fecha de inicio <span class="text-red-600" aria-hidden="true">*</span></label>
+              <input id="enc-fecha" v-model="form.fecha" type="date" class="field-input" :disabled="!proyectoAsociado" required />
+              <p v-if="sesionSugerida?.fecha" class="mt-1.5 rounded-lg bg-alumnos/10 px-2.5 py-1.5 text-xs font-semibold text-alumnos-dark">
+                El docente propuso el {{ new Date(sesionSugerida.fecha + 'T00:00:00').toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }) }}<template v-if="sesionSugerida.hora_inicio">, {{ textoHorario(sesionSugerida) }}</template>.
+              </p>
+              <p v-if="!proyectoAsociado" class="mt-1.5 text-xs font-medium text-amber-800">
+                Asocia primero un reto ajustado para poder establecer las fechas.
               </p>
             </div>
-            <div class="px-6 py-5 space-y-4">
 
-              <div ref="refCampoFecha" :class="{ 'tour-active': tourTargetActivo === 'refCampoFecha' }"
-                   class="rounded-xl transition-all">
-                <label class="field-label">Fecha de trabajo <span class="text-red-400">*</span></label>
-                <input v-model="form.fecha" type="date" class="field-input"
-                       :disabled="!proyectoAsociado" />
-                <p v-if="!proyectoAsociado" class="text-xs text-amber-500 font-medium mt-1.5">
-                  Asocia primero un proyecto para poder establecer la fecha de trabajo.
-                </p>
-                <p v-else-if="fechaFinEstimada" class="text-xs text-gray-500 mt-1.5">
-                  Fecha fin estimada: <span class="font-bold text-[#1F2937]">{{ fechaFinEstimada }}</span>
-                  ({{ totalClasesProyectoSeleccionado }} clase(s) del proyecto). Podrás ajustarla luego en el detalle del encuentro.
-                </p>
-              </div>
-
-              <div ref="refCampoCentro" :class="{ 'tour-active': tourTargetActivo === 'refCampoCentro' }"
-                   class="rounded-xl transition-all">
-                <label class="field-label">Centro educativo</label>
-                <template v-if="authStore.userCentroNombre">
-                  <div class="field-input bg-gray-50 text-gray-500 cursor-default select-none">
-                    {{ authStore.userCentroNombre }}
-                  </div>
+            <!-- Fecha de fin: parte de la estimada (nº de sesiones de la planificación) y se puede
+                 alargar; no acortar, el backend no acepta una anterior a la estimada -->
+            <div class="min-w-0">
+              <label for="enc-fecha-fin" class="field-label">Fecha de fin</label>
+              <input id="enc-fecha-fin" type="date" class="field-input"
+                     :value="fechaFin || ''" :min="fechaFinEstimada || form.fecha || undefined"
+                     :disabled="!proyectoAsociado || !form.fecha"
+                     @change="form.fecha_fin = ($event.target.value && $event.target.value !== fechaFinEstimada) ? $event.target.value : ''" />
+              <p v-if="proyectoAsociado && fechaFinEstimada" class="mt-1.5 text-xs text-texto-secundario">
+                <template v-if="!form.fecha_fin">
+                  Estimada según {{ totalClasesProyectoSeleccionado }} {{ totalClasesProyectoSeleccionado === 1 ? 'sesión' : 'sesiones' }} de la planificación de abajo. Puedes alargarla.
                 </template>
                 <template v-else>
-                  <input v-model="form.centro_educativo" type="text" list="centros-datalist"
-                         placeholder="Ej. IES Aguas Nuevas" class="field-input" />
-                  <datalist id="centros-datalist">
-                    <option v-for="c in centrosParaAutocompletar" :key="c" :value="c" />
-                  </datalist>
+                  La estimada era el {{ formatFecha(fechaFinEstimada) }}.
+                  <button type="button" @click="form.fecha_fin = ''" class="font-semibold text-rol-fuerte underline-offset-2 hover:underline">Usar la estimada</button>
                 </template>
-              </div>
+              </p>
+            </div>
 
-              <div>
-                <label class="field-label">Ciclo formativo</label>
-                <input v-model="form.ciclo_formativo" type="text" list="ciclos-datalist"
+            <div class="min-w-0 rounded-xl transition-all">
+              <label for="enc-centro" class="field-label">Centro educativo</label>
+              <div v-if="authStore.userCentroNombre" id="enc-centro" class="field-input cursor-default select-none bg-gray-50 text-texto-secundario">
+                {{ authStore.userCentroNombre }}
+              </div>
+              <template v-else>
+                <input id="enc-centro" v-model="form.centro_educativo" type="text" list="centros-datalist"
+                       placeholder="Ej. IES Aguas Nuevas" class="field-input" />
+                <datalist id="centros-datalist">
+                  <option v-for="c in centrosParaAutocompletar" :key="c" :value="c" />
+                </datalist>
+              </template>
+            </div>
+
+            <!-- Ciclo: el del reto ajustado, de solo lectura (los módulos y RA/CE del encuentro salen
+                 de ese ciclo; cambiarlo aquí los descuadraría). El backend también lo fija. -->
+            <div class="min-w-0">
+              <label for="enc-ciclo" class="field-label">Ciclo formativo</label>
+              <div v-if="proyectoSeleccionado?.ciclo_nombre" id="enc-ciclo" aria-readonly="true"
+                   class="field-input cursor-default select-none bg-gray-50 text-texto-secundario break-words"
+                   title="Es el ciclo del reto ajustado: para otro ciclo, cambia de reto ajustado">
+                {{ form.ciclo_formativo }}
+              </div>
+              <template v-else>
+                <input id="enc-ciclo" v-model="form.ciclo_formativo" type="text" list="ciclos-datalist"
                        placeholder="Ej. CFGM Sistemas Microinformáticos" class="field-input" />
                 <datalist id="ciclos-datalist">
                   <option v-for="c in ciclosParaAutocompletar" :key="c" :value="c" />
                 </datalist>
+              </template>
+            </div>
+
+            <fieldset class="min-w-0">
+              <legend class="field-label">Curso <span class="text-red-600" aria-hidden="true">*</span></legend>
+              <div class="grid grid-cols-3 gap-2">
+                <button v-for="c in ['1º', '2º', '1º y 2º']" :key="c" type="button" @click="form.curso = c"
+                        :aria-pressed="form.curso === c"
+                        class="h-10 rounded-full border text-sm font-semibold transition-colors"
+                        :class="form.curso === c
+                          ? 'border-rol-fuerte bg-rol-fuerte text-white shadow-sm'
+                          : 'border-borde bg-white text-azul-noche hover:border-rol-fuerte/40 hover:text-rol-fuerte'">
+                  {{ c === '1º y 2º' ? 'Ambos' : c }}
+                </button>
               </div>
+            </fieldset>
+            <fieldset data-tour="enc-clase" class="min-w-0 rounded-xl transition-all">
+              <legend class="field-label">Clase <span class="text-red-600" aria-hidden="true">*</span></legend>
+              <div class="grid grid-cols-4 gap-2">
+                <button v-for="g in ['A', 'B', 'C', 'D']" :key="g" type="button" @click="form.grupo = g"
+                        :aria-pressed="form.grupo === g" :aria-label="`Clase ${g}`"
+                        class="h-10 rounded-full border text-sm font-semibold transition-colors"
+                        :class="form.grupo === g
+                          ? 'border-rol-fuerte bg-rol-fuerte text-white shadow-sm'
+                          : 'border-borde bg-white text-azul-noche hover:border-rol-fuerte/40 hover:text-rol-fuerte'">
+                  {{ g }}
+                </button>
+              </div>
+            </fieldset>
+          </div>
+        </section>
 
-              <div ref="refCampoAlumnado" class="space-y-4 rounded-xl transition-all"
-                   :class="{ 'tour-active': tourTargetActivo === 'refCampoAlumnado' }">
-                <div class="grid grid-cols-2 gap-4">
-                  <div>
-                    <label class="field-label">Curso <span class="text-red-400">*</span></label>
-                    <div class="flex gap-2 mt-1">
-                      <button v-for="c in ['1º', '2º']" :key="c"
-                              @click="form.curso = c"
-                              class="flex-1 py-2 rounded-xl text-xs font-black uppercase tracking-widest
-                                     border transition-all"
-                              :class="form.curso === c
-                                ? 'bg-[#00A859] border-[#00A859] text-white shadow-sm'
-                                : 'bg-gray-50 border-gray-200 text-gray-500 hover:border-[#00A859]/40 hover:text-[#00A859]'">
-                        {{ c }}
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <label class="field-label">Grupo <span class="text-red-400">*</span></label>
-                    <div class="flex gap-1.5 mt-1 flex-wrap">
-                      <button v-for="g in ['A', 'B', 'C', 'D']" :key="g"
-                              @click="form.grupo = g"
-                              class="flex-1 min-w-[2rem] py-2 rounded-xl text-xs font-black uppercase
-                                     border transition-all"
-                              :class="form.grupo === g
-                                ? 'bg-[#99CC33] border-[#99CC33] text-white shadow-sm'
-                                : 'bg-gray-50 border-gray-200 text-gray-500 hover:border-[#99CC33]/40 hover:text-[#99CC33]'">
-                        {{ g }}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <div>
-                  <label class="field-label">Número de alumnos</label>
-                  <input v-model="form.num_alumnos" type="number" min="1" max="99"
-                         placeholder="Ej. 24" class="field-input w-32" />
-                </div>
+        <!-- Planificación de sesiones: qué fases se trabajan en cada sesión de este encuentro -->
+        <section v-if="proyectoAsociado" data-tour="enc-planificacion" class="rounded-2xl border border-borde bg-white p-4 shadow-sm sm:p-6" aria-labelledby="titulo-planificacion">
+          <div class="mb-5 flex items-start gap-3 sm:gap-4">
+            <span class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rol-fuerte text-white sm:h-12 sm:w-12" aria-hidden="true">
+              <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+            </span>
+            <div class="min-w-0">
+              <h2 id="titulo-planificacion" class="text-lg font-bold text-azul-noche">Planificación de sesiones</h2>
+              <p class="mt-0.5 text-sm text-texto-secundario">Por defecto, una sesión con todas las fases: añade más si lo vais a trabajar en varias. De aquí sale la fecha fin estimada.</p>
+            </div>
+          </div>
+          <PlanificacionSesiones v-model="form.planificacion_sesiones" />
+        </section>
+      </template>
 
+      <!-- ═══ PASO 2 · GRUPO Y ALUMNADO ═══ -->
+      <section v-else-if="pasoEnc === 2" class="rounded-2xl border border-borde bg-white p-4 shadow-sm sm:p-6" aria-labelledby="titulo-grupo-alumnado">
+        <div class="mb-5 flex items-start gap-3 sm:gap-4">
+          <span class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rol-fuerte text-white sm:h-12 sm:w-12" aria-hidden="true">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          </span>
+          <div class="min-w-0">
+            <h2 id="titulo-grupo-alumnado" class="text-lg font-bold text-azul-noche">Grupo y alumnado</h2>
+            <p class="mt-0.5 text-sm text-texto-secundario">Indica cuántos grupos habrá y reparte al alumnado (solo con alias).</p>
+          </div>
+        </div>
+        <div class="space-y-4">
                 <!-- Número de equipos -->
-                <div>
-                  <label class="field-label">Número de equipos <span class="text-red-400">*</span></label>
+                <div data-tour="enc-num-grupos">
+                  <label class="field-label">Número de grupos <span class="text-red-400">*</span></label>
                   <div class="flex items-center gap-2 mt-1">
                     <button @click="form.num_equipos = Math.max(1, (form.num_equipos || 3) - 1)"
                             :disabled="!fechaEstablecida"
-                            class="w-8 h-8 rounded-xl bg-gray-100 border border-gray-200
-                                   text-gray-600 font-black text-sm hover:bg-gray-200 transition-all
+                            class="w-9 h-9 rounded-full bg-gray-100 border border-borde
+                                   text-texto-secundario font-bold text-sm hover:bg-gray-200 transition-all
                                    disabled:opacity-40 disabled:cursor-not-allowed">−</button>
-                    <span class="w-8 text-center text-base font-black text-[#1F2937]">{{ form.num_equipos || 3 }}</span>
+                    <span class="w-8 text-center text-base font-bold text-azul-noche">{{ form.num_equipos || 3 }}</span>
                     <button @click="form.num_equipos = Math.min(20, (form.num_equipos || 3) + 1)"
                             :disabled="!fechaEstablecida"
-                            class="w-8 h-8 rounded-xl bg-gray-100 border border-gray-200
-                                   text-gray-600 font-black text-sm hover:bg-gray-200 transition-all
+                            class="w-9 h-9 rounded-full bg-gray-100 border border-borde
+                                   text-texto-secundario font-bold text-sm hover:bg-gray-200 transition-all
                                    disabled:opacity-40 disabled:cursor-not-allowed">+</button>
-                    <span class="text-[10px] text-gray-400 font-medium ml-1">equipos · se crearán al generar el código</span>
+                    <span class="text-xs text-texto-secundario font-medium ml-1">grupos · se crearán al generar el código</span>
                   </div>
                 </div>
 
                 <p v-if="!fechaEstablecida" class="text-xs text-amber-500 font-medium">
-                  Establece la fecha de trabajo para repartir el alumnado en equipos.
+                  Establece la fecha de inicio para repartir el alumnado en grupos.
                 </p>
 
                 <!-- Alumnado por equipos — siempre visible -->
-                <div ref="refCampoEquipos" class="space-y-3 rounded-xl transition-all"
-                     :class="{ 'tour-active': tourTargetActivo === 'refCampoEquipos' }">
+                <div data-tour="enc-alumnado" class="space-y-3 rounded-xl transition-all">
 
                   <label class="field-label">
-                    Alumnado por equipos <span class="text-red-400">*</span>
-                    <span v-if="limiteAlumnados" class="ml-2 text-xs font-semibold"
-                          :class="limiteAlcanzado ? 'text-red-400' : 'text-gray-400'">
-                      {{ form.alumnados.length }}/{{ limiteAlumnados }}
+                    Alumnado por grupos <span class="text-red-400">*</span>
+                    <span v-if="form.alumnados.length" class="ml-2 text-xs font-semibold"
+                          :class="limiteAlcanzado ? 'text-red-400' : 'text-texto-secundario'">
+                      {{ alumnosTexto(form.alumnados.length) }}
                     </span>
                   </label>
 
-                  <div class="px-3 py-2 bg-emerald-50 rounded-xl border border-emerald-100
-                              text-[11px] text-emerald-700 flex items-start gap-1.5">
-                    <span class="shrink-0">🔒</span>
-                    <span>Creamos un alias automático para cada alumno/a (protección de datos) —
-                    el nombre real que escribas aquí no se muestra fuera del equipo ni del panel docente.</span>
-                  </div>
+                  <AvisoSinNombresReales para="docente" />
 
-                  <!-- Formulario añadir alumno/a -->
+                  <!-- Formulario añadir alumno/a: nombre de pila; el grupo es la tarjeta seleccionada
+                       (se elige tocando la tarjeta del grupo). Animal y color se generan. -->
+                  <p class="flex flex-wrap items-center gap-2 text-sm text-texto-secundario" aria-live="polite">
+                    Añadiendo a:
+                    <span class="inline-flex items-center gap-1.5 rounded-full bg-rol-fuerte px-3 py-1 text-sm font-semibold text-white">
+                      <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-white/20 text-xs font-bold">{{ nuevoAlumnadoEquipo }}</span>
+                      Grupo {{ nuevoAlumnadoEquipo }}
+                    </span>
+                    <span class="text-xs">· toca otra tarjeta para cambiar de grupo</span>
+                  </p>
                   <div class="flex flex-wrap gap-2">
-                    <input v-model="nuevoAlumnadoNombre" type="text" placeholder="Nombre del alumno/a"
-                           class="field-input flex-1 min-w-32 !text-sm"
+                    <input v-model="nuevoAlumnadoNombre" type="text" maxlength="30"
+                           placeholder="Nombre de pila (sin apellidos)" aria-label="Nombre de pila del alumno/a"
+                           class="field-input flex-1 min-w-0 basis-40 !text-sm"
                            :disabled="!fechaEstablecida"
+                           @input="errorNuevoAlumnado = ''"
                            @keyup.enter="addAlumnadoEncuentro" />
-                    <select v-model="nuevoAlumnadoEquipo"
-                            class="field-input !w-auto pr-8 cursor-pointer !text-sm"
-                            :disabled="!fechaEstablecida">
-                      <option v-for="n in (form.num_equipos || 3)" :key="n" :value="n">
-                        Equipo {{ n }}
-                      </option>
-                    </select>
                     <button @click="addAlumnadoEncuentro"
                             :disabled="limiteAlcanzado || !fechaEstablecida"
-                            class="shrink-0 px-3 py-2 bg-[#00A859] text-white rounded-xl
-                                   text-xs font-black hover:bg-[#00A859]/90 transition-all
-                                   disabled:opacity-40 disabled:cursor-not-allowed">
-                      + Añadir
+                            class="inline-flex h-10 shrink-0 items-center rounded-full bg-rol-fuerte px-4 text-sm font-semibold text-white
+                                   transition-colors hover:bg-rol-fuerte/90 disabled:cursor-not-allowed disabled:opacity-40">
+                      + Añadir a Grupo {{ nuevoAlumnadoEquipo }}
                     </button>
+                  </div>
+                  <p v-if="errorNuevoAlumnado" class="text-xs font-semibold text-red-500">{{ errorNuevoAlumnado }}</p>
+
+                  <!-- Pegar una lista de nombres: se reparten solos en los grupos -->
+                  <div>
+                    <button v-if="!pegandoLista" data-tour="enc-pegar-lista" type="button" @click="pegandoLista = true; mensajeLista = ''"
+                            :disabled="!fechaEstablecida || limiteAlcanzado"
+                            class="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-rol/30 bg-white px-3 py-2
+                                   text-xs font-bold text-rol-fuerte transition-all hover:bg-rol/5
+                                   disabled:opacity-40 disabled:cursor-not-allowed">
+                      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h10"/>
+                      </svg>
+                      Pegar una lista de nombres
+                    </button>
+                    <div v-else class="space-y-2 rounded-xl border border-rol/20 bg-rol/5 p-3">
+                      <label for="lista-nombres" class="block text-xs font-bold uppercase tracking-widest text-rol-fuerte">Un nombre de pila por línea</label>
+                      <textarea id="lista-nombres" v-model="listaNombres" rows="5" class="field-input resize-y !text-sm"
+                                placeholder="Lucía&#10;Hugo&#10;Martina" />
+                      <p class="text-xs text-texto-secundario">Se reparten solos entre los {{ form.num_equipos || 1 }} grupos y a cada uno se le añade un animal y un color.</p>
+                      <div class="flex flex-wrap gap-2">
+                        <button type="button" @click="anadirListaNombres" :disabled="!listaNombres.trim()"
+                                class="inline-flex min-h-9 items-center rounded-full bg-rol-fuerte px-4 text-xs font-bold text-white disabled:opacity-40">
+                          Añadir y repartir
+                        </button>
+                        <button type="button" @click="pegandoLista = false" class="inline-flex min-h-9 items-center rounded-full px-3 text-xs font-bold text-texto-secundario">Cancelar</button>
+                      </div>
+                    </div>
+                    <p v-if="mensajeLista" class="mt-1.5 text-xs font-semibold text-azul-noche" role="status">{{ mensajeLista }}</p>
+                  </div>
+
+                  <!-- Copiar alumnado de un encuentro anterior del mismo docente -->
+                  <div v-if="encuentrosParaCopiar.length">
+                    <button v-if="!copiandoAlumnado" data-tour="enc-copiar-alumnado" type="button" @click="copiandoAlumnado = true; mensajeCopiaAlumnado = ''"
+                            :disabled="!fechaEstablecida"
+                            class="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-rol/30 bg-white px-3 py-2
+                                   text-xs font-bold text-rol-fuerte transition-all hover:bg-rol/5
+                                   disabled:opacity-40 disabled:cursor-not-allowed">
+                      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                      </svg>
+                      Copiar alumnado de un encuentro anterior
+                    </button>
+                    <div v-else class="space-y-2 rounded-xl border border-rol/20 bg-rol/5 p-3">
+                      <label class="block text-xs font-bold uppercase tracking-widest text-rol-fuerte" for="encuentro-a-copiar">
+                        ¿De qué encuentro copias el alumnado?
+                      </label>
+                      <select id="encuentro-a-copiar" v-model="encuentroACopiar" class="field-input w-full !text-sm cursor-pointer">
+                        <option value="" disabled>Elige uno de tus encuentros…</option>
+                        <option v-for="e in encuentrosParaCopiar" :key="e.id" :value="e.id">
+                          {{ e.etiqueta }} · {{ e.alumnado.length }} alumnos
+                        </option>
+                      </select>
+                      <label class="flex items-center gap-2 text-xs text-texto-secundario cursor-pointer">
+                        <input v-model="copiarConReparto" type="checkbox" class="h-4 w-4 rounded accent-rol-fuerte" />
+                        Mantener los mismos grupos (si no, se reparten equilibrados)
+                      </label>
+                      <div class="flex flex-wrap justify-end gap-2">
+                        <button type="button" @click="copiandoAlumnado = false; encuentroACopiar = ''"
+                                class="min-h-9 rounded-full px-3 py-2 text-xs font-bold text-texto-secundario hover:text-azul-noche">
+                          Cancelar
+                        </button>
+                        <button type="button" @click="copiarAlumnadoDeEncuentro" :disabled="!encuentroACopiar"
+                                class="min-h-9 rounded-full bg-rol-fuerte px-4 py-2 text-xs font-bold text-white transition-all hover:bg-rol/90
+                                       disabled:opacity-40 disabled:cursor-not-allowed">
+                          Copiar alumnado
+                        </button>
+                      </div>
+                    </div>
+                    <p v-if="mensajeCopiaAlumnado" class="mt-1.5 text-xs font-semibold text-rol-fuerte">{{ mensajeCopiaAlumnado }}</p>
                   </div>
 
                   <!-- Grid de equipos -->
-                  <div class="grid grid-cols-2 gap-2">
+                  <div data-tour="enc-grupos" class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <!-- Tocar la tarjeta la selecciona como destino de «Añadir». La cabecera es el
+                         botón accesible (teclado / lector); el clic en el resto de la tarjeta también
+                         vale, salvo en sus propios controles (mover de grupo, dado, quitar). -->
                     <div v-for="n in (form.num_equipos || 3)" :key="n"
-                         class="rounded-xl border p-3 transition-all"
+                         class="cursor-pointer rounded-xl border p-3 transition-all"
                          :class="Number(nuevoAlumnadoEquipo) === n
-                           ? 'border-[#00A859] bg-[#00A859]/5 ring-2 ring-[#00A859]/30'
-                           : 'border-gray-100 bg-gray-50/50'">
-                      <div class="flex items-center gap-1.5 mb-2">
-                        <span class="w-5 h-5 rounded-full flex items-center justify-center
-                                     text-[9px] font-black flex-shrink-0 transition-colors"
-                              :class="Number(nuevoAlumnadoEquipo) === n
-                                ? 'bg-[#00A859] text-white'
-                                : 'bg-[#00A859]/10 text-[#00A859]'">{{ n }}</span>
-                        <p class="text-[10px] font-black uppercase tracking-widest flex-1 truncate"
-                           :class="Number(nuevoAlumnadoEquipo) === n ? 'text-[#00A859]' : 'text-gray-500'">
-                          Equipo {{ n }}
-                        </p>
+                           ? 'border-rol-fuerte bg-rol/5 ring-2 ring-rol/30'
+                           : 'border-borde bg-gray-50/50 hover:border-rol/40 hover:bg-rol/5'"
+                         @click="e => { if (!e.target.closest('select, button:not([data-elegir-grupo]), input')) nuevoAlumnadoEquipo = n }">
+                      <button type="button" data-elegir-grupo @click="nuevoAlumnadoEquipo = n"
+                              :aria-pressed="Number(nuevoAlumnadoEquipo) === n"
+                              :aria-label="`Grupo ${n}: añadir aquí el alumnado (${alumnadosDeEquipo(n).length} ${alumnadosDeEquipo(n).length === 1 ? 'alumno' : 'alumnos'})`"
+                              class="-m-1 mb-1 flex w-[calc(100%+0.5rem)] items-center gap-1.5 rounded-lg p-1 text-left">
+                        <span class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold transition-colors"
+                              :class="Number(nuevoAlumnadoEquipo) === n ? 'bg-rol-fuerte text-white' : 'bg-rol/10 text-rol-fuerte'">{{ n }}</span>
+                        <span class="flex-1 truncate text-xs font-bold uppercase tracking-wide"
+                              :class="Number(nuevoAlumnadoEquipo) === n ? 'text-rol-fuerte' : 'text-texto-secundario'">
+                          Grupo {{ n }}
+                        </span>
                         <span v-if="Number(nuevoAlumnadoEquipo) === n"
-                              class="text-[8px] font-black uppercase tracking-widest text-[#00A859]
-                                     bg-[#00A859]/10 rounded-full px-1.5 py-0.5 flex-shrink-0">
-                          Aquí
+                              class="inline-flex shrink-0 items-center gap-1 rounded-full bg-rol-fuerte px-2 py-0.5 text-xs font-bold text-white">
+                          <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                          Seleccionado
                         </span>
-                        <span class="text-[9px] text-gray-400 flex-shrink-0">
-                          {{ alumnadosDeEquipo(n).length }}
-                        </span>
-                      </div>
-                      <div v-if="alumnadosDeEquipo(n).length" class="space-y-1">
-                        <div v-for="a in alumnadosDeEquipo(n)" :key="a._i"
-                             class="flex items-center gap-1 text-xs">
-                          <span class="flex-1 truncate font-medium text-[#1F2937]">{{ a.nombre }}</span>
-                          <button @click="removeAlumnadoEncuentro(a._i)"
-                                  class="text-gray-300 hover:text-red-400 font-black transition-colors
-                                         text-sm leading-none flex-shrink-0">×</button>
+                        <span class="shrink-0 text-xs text-texto-secundario">{{ alumnadosDeEquipo(n).length }}</span>
+                      </button>
+                      <div v-if="alumnadosDeEquipo(n).length" class="space-y-1.5">
+                        <div v-for="a in alumnadosDeEquipo(n)" :key="a._i" class="flex items-center gap-2 text-xs">
+                          <span class="flex-1 min-w-0 truncate font-medium text-azul-noche">{{ a.alias }}</span>
+                          <select :value="a.equipo_num" @change="form.alumnados[a._i].equipo_num = Number($event.target.value)"
+                                  :aria-label="`Grupo de ${a.alias}`"
+                                  class="h-9 shrink-0 cursor-pointer rounded-xl border border-borde bg-white px-1.5 text-xs font-bold text-texto-secundario">
+                            <option v-for="g in (form.num_equipos || 3)" :key="g" :value="g">G{{ g }}</option>
+                          </select>
+                          <RegenerarAliasButton :alias="a.alias" :usados="aliasUsados"
+                                                 @generado="alias => (form.alumnados[a._i].alias = alias)" />
+                          <button @click="removeAlumnadoEncuentro(a._i)" :aria-label="`Quitar a ${a.alias}`"
+                                  class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-base font-bold leading-none text-texto-secundario transition-colors hover:bg-red-50 hover:text-red-400">×</button>
                         </div>
                       </div>
-                      <p v-else class="text-[10px] text-gray-300 italic">Sin alumnos</p>
+                      <p v-else class="text-xs text-texto-secundario italic">Sin alumnos</p>
                     </div>
                   </div>
 
                   <!-- Sin equipo asignado -->
                   <div v-if="alumnadosSinEquipo.length"
                        class="rounded-xl border border-amber-100 bg-amber-50/50 p-3">
-                    <p class="text-[10px] font-black uppercase tracking-widest text-amber-500 mb-2">
-                      Sin equipo asignado
+                    <p class="text-xs font-bold uppercase tracking-widest text-amber-500 mb-2">
+                      Sin grupo asignado
                     </p>
-                    <div class="space-y-1">
-                      <div v-for="a in alumnadosSinEquipo" :key="a._i"
-                           class="flex items-center gap-1 text-xs">
-                        <span class="flex-1 truncate font-medium text-amber-700">{{ a.nombre }}</span>
-                        <button @click="removeAlumnadoEncuentro(a._i)"
-                                class="text-amber-300 hover:text-red-400 font-black transition-colors
-                                       text-sm leading-none flex-shrink-0">×</button>
+                    <div class="space-y-1.5">
+                      <div v-for="a in alumnadosSinEquipo" :key="a._i" class="flex items-center gap-2 text-xs">
+                        <span class="flex-1 min-w-0 truncate font-medium text-amber-700">{{ a.alias }}</span>
+                        <select :value="''" @change="form.alumnados[a._i].equipo_num = Number($event.target.value)"
+                                :aria-label="`Asignar grupo a ${a.alias}`"
+                                class="h-9 shrink-0 cursor-pointer rounded-xl border border-amber-200 bg-white px-1.5 text-xs font-bold text-amber-700">
+                          <option value="" disabled>Grupo</option>
+                          <option v-for="g in (form.num_equipos || 3)" :key="g" :value="g">G{{ g }}</option>
+                        </select>
+                        <RegenerarAliasButton :alias="a.alias" :usados="aliasUsados"
+                                               @generado="alias => (form.alumnados[a._i].alias = alias)" />
+                        <button @click="removeAlumnadoEncuentro(a._i)" :aria-label="`Quitar a ${a.alias}`"
+                                class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-base font-bold leading-none text-amber-300 transition-colors hover:bg-red-50 hover:text-red-400">×</button>
                       </div>
                     </div>
                   </div>
 
                 </div>
-              </div>
-
-              <div ref="refCampoNotas" class="rounded-xl transition-all"
-                   :class="{ 'tour-active': tourTargetActivo === 'refCampoNotas' }">
-                <label class="field-label">Notas adicionales</label>
-                <textarea v-model="form.notas" rows="3"
-                          placeholder="Observaciones, adaptaciones realizadas, valoración..."
-                          class="field-input resize-none" />
-              </div>
-
-              <!-- Campo cuenta docente — asignado automáticamente al guardar -->
-              <div class="flex items-center gap-3 px-4 py-3 rounded-xl
-                          bg-[#00A859]/5 border border-[#00A859]/15">
-                <div class="w-8 h-8 rounded-xl bg-[#00A859]/10 flex items-center justify-center flex-shrink-0">
-                  <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
-                  </svg>
-                </div>
-                <div class="flex-1 min-w-0">
-                  <p class="text-[9px] font-black uppercase tracking-widest text-[#00A859] mb-0.5">
-                    Cuenta docente asociada
-                  </p>
-                  <p class="text-sm font-bold text-[#1F2937] truncate">{{ authStore.userName }}</p>
-                </div>
-                <span class="flex-shrink-0 text-[9px] font-black uppercase tracking-widest
-                             px-2 py-0.5 rounded-full bg-[#00A859]/10 text-[#00A859]">
-                  Auto
-                </span>
-              </div>
-
-            </div>
-
-            <div v-if="requisitosFaltantes.length || errorGuardado"
-                 class="px-6 py-3 bg-amber-50 border-t border-amber-100">
-              <ul class="space-y-0.5">
-                <li v-for="(msg, i) in requisitosFaltantes" :key="i"
-                    class="text-xs font-semibold text-amber-600 flex items-center gap-1.5">
-                  <span class="w-1 h-1 rounded-full bg-amber-400 flex-shrink-0" /> {{ msg }}
-                </li>
-              </ul>
-              <p v-if="errorGuardado" class="text-xs font-semibold text-red-500 mt-1">
-                {{ errorGuardado }}
-              </p>
-            </div>
-
-            <div ref="refBtnGuardar"
-                 class="px-6 py-4 bg-gray-50 border-t border-gray-100 flex items-center justify-between gap-4 transition-all"
-                 :class="{ 'tour-active': tourTargetActivo === 'refBtnGuardar' }">
-              <p class="text-[10px] text-gray-400 font-medium">
-                El encuentro se guarda en la base de datos.
-              </p>
-              <button @click="guardarEncuentro"
-                      :disabled="!formularioValido || guardando"
-                      class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl
-                             text-xs font-black uppercase tracking-widest
-                             transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                      :class="guardadoOk
-                        ? 'bg-[#99CC33] text-white'
-                        : 'bg-[#00A859] hover:bg-[#00A859]/90 text-white shadow-sm'">
-                <svg v-if="guardadoOk" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
-                </svg>
-                <svg v-else-if="guardando" class="w-4 h-4 animate-spin" viewBox="0 0 24 24">
-                  <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
-                </svg>
-                <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3
-                           m-4 0V3m0 4l-2-2m2 2l2-2"/>
-                </svg>
-                {{ guardadoOk ? '¡Guardado!' : guardando ? 'Guardando...' : 'Guardar encuentro' }}
-              </button>
-            </div>
-          </div>
-
-          </div><!-- /card creación -->
         </div>
+      </section>
 
-        <!-- ─── COLUMNA DERECHA: Historial ──────────────────────────────── -->
-        <div class="lg:col-span-2 transition-all"
-             :class="{ 'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'encuentros' }">
-
-          <div ref="refEncuentros"
-               class="bg-white rounded-[1.5rem] border border-gray-100 shadow-sm overflow-hidden sticky top-[4.5rem]"
-               :class="{ 'tour-active': tourTargetActivo === 'refEncuentros' }">
-
-            <!-- Cabecera — banner azul -->
-            <div class="relative overflow-hidden border-b border-blue-100
-                        bg-gradient-to-br from-blue-50 via-blue-50/60 to-indigo-50/40 px-5 py-4">
-              <!-- Fondo decorativo -->
-              <div class="absolute -right-4 -top-4 w-20 h-20 rounded-full
-                          bg-blue-100 blur-2xl pointer-events-none" />
-              <div class="relative flex items-center gap-3">
-                <div class="w-10 h-10 rounded-2xl bg-blue-500 flex items-center justify-center shadow-sm flex-shrink-0">
-                  <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2
-                             M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-                  </svg>
-                </div>
-                <div class="flex-1 min-w-0">
-                  <div class="flex items-center gap-2 mb-0.5">
-                    <span class="w-1.5 h-1.5 rounded-full bg-blue-400" />
-                    <span class="text-[10px] font-black uppercase tracking-widest text-blue-500">Historial</span>
-                  </div>
-                  <h2 class="text-base font-black text-[#1F2937] tracking-tight leading-tight truncate">
-                    Resumen de encuentros
-                  </h2>
-                </div>
-                <span class="flex-shrink-0 text-[10px] font-black bg-blue-100 text-blue-600
-                             px-2.5 py-1 rounded-full uppercase tracking-widest">
-                  {{ encuentros.length }}
-                </span>
-              </div>
-            </div>
-
-            <!-- Acciones rápidas -->
-            <div class="px-5 py-3 border-b border-gray-100">
-              <!-- Botón Ver encuentros — prominente -->
-              <button @click="router.push('/encuentros')"
-                      class="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
-                             bg-[#00A859] text-white
-                             text-[10px] font-black uppercase tracking-widest
-                             hover:bg-[#00A859]/90 transition-all shadow-sm mb-2">
-                <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
-                </svg>
-                Ver todos los encuentros
-              </button>
-              <!-- name 'mis-equipos' (antes 'mis-grupos') — ver router/index.js -->
-              <button @click="router.push({ name: 'mis-equipos' })"
-                      class="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
-                             bg-violet-50 border border-violet-200 text-violet-700
-                             text-[10px] font-black uppercase tracking-widest
-                             hover:bg-violet-100 transition-all mb-2">
-                <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 100-8 4 4 0 000 8zm6 3c0-1.1-.9-2-2-2h-8c-1.1 0-2 .9-2 2v1h12v-1z"/>
-                </svg>
-                Mis grupos — seguimiento equipos
-              </button>
-              <button @click="router.push({ name: 'startup-day-crear' })"
-                      class="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl
-                             bg-[#99CC33]/10 border border-[#99CC33]/20 text-[#5a7a00]
-                             text-[9px] font-black uppercase tracking-widest
-                             hover:bg-[#99CC33]/20 transition-all">
-                <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-                </svg>
-                Nueva propuesta
-              </button>
-            </div>
-
-            <!-- Filtros compactos -->
-            <div v-if="encuentros.length > 0" class="px-4 py-3 border-b border-gray-50 space-y-2">
-              <!-- Búsqueda por título -->
-              <div class="relative">
-                <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-300 pointer-events-none"
-                     fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-                </svg>
-                <input v-model="filtroSes.titulo" type="text" placeholder="Buscar encuentro..."
-                       class="w-full bg-gray-50 border border-gray-200 rounded-lg pl-7 pr-3 py-1.5
-                              text-xs font-medium text-gray-700 placeholder-gray-300
-                              focus:outline-none focus:border-[#00A859]/50 focus:ring-1 focus:ring-[#00A859]/20" />
-              </div>
-              <!-- Fecha -->
-              <input v-model="filtroSes.fecha" type="date"
-                     class="w-full bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5
-                            text-xs font-medium text-gray-600
-                            focus:outline-none focus:border-[#00A859]/50 focus:ring-1 focus:ring-[#00A859]/20" />
-              <!-- Curso + Grupo -->
-              <div class="grid grid-cols-2 gap-2">
-                <div>
-                  <p class="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Curso</p>
-                  <div class="flex gap-1">
-                    <button v-for="c in ['', '1º', '2º']" :key="'fc'+c"
-                            @click="filtroSes.curso = c"
-                            class="flex-1 py-1 rounded-lg text-[8px] font-black uppercase border transition-all"
-                            :class="filtroSes.curso === c
-                              ? 'bg-[#00A859] border-[#00A859] text-white'
-                              : 'bg-gray-50 border-gray-200 text-gray-400 hover:border-[#00A859]/40'">
-                      {{ c === '' ? '·' : c }}
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <p class="text-[8px] font-black uppercase tracking-widest text-gray-400 mb-1">Grupo</p>
-                  <div class="flex gap-0.5">
-                    <button v-for="g in ['', 'A', 'B', 'C', 'D']" :key="'fg'+g"
-                            @click="filtroSes.grupo = g"
-                            class="flex-1 py-1 rounded-md text-[7px] font-black uppercase border transition-all"
-                            :class="filtroSes.grupo === g
-                              ? 'bg-[#99CC33] border-[#99CC33] text-white'
-                              : 'bg-gray-50 border-gray-200 text-gray-400 hover:border-[#99CC33]/40'">
-                      {{ g === '' ? '·' : g }}
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <!-- Limpiar filtros -->
-              <div v-if="filtroSes.titulo || filtroSes.fecha || filtroSes.curso || filtroSes.grupo"
-                   class="flex justify-end">
-                <button @click="filtroSes = { fecha: '', titulo: '', curso: '', grupo: '' }"
-                        class="text-[9px] font-black uppercase tracking-widest text-gray-400 hover:text-red-400 transition-colors">
-                  Limpiar filtros
-                </button>
-              </div>
-            </div>
-
-            <!-- Cargando encuentros -->
-            <div v-if="cargandoEncuentros" class="px-5 py-10 flex justify-center">
-              <svg class="animate-spin w-5 h-5 text-[#00A859]" viewBox="0 0 24 24">
-                <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
-              </svg>
-            </div>
-
-            <!-- Estado vacío -->
-            <div v-else-if="encuentros.length === 0" class="px-5 py-10 text-center">
-              <div class="w-12 h-12 rounded-full bg-gray-50 border border-gray-100
-                          flex items-center justify-center mx-auto mb-3">
-                <svg class="w-5 h-5 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/>
-                </svg>
-              </div>
-              <p class="text-xs text-gray-400 font-medium leading-relaxed">
-                Aún no hay encuentros.<br>¡Registra el primero!
-              </p>
-            </div>
-
-            <!-- Sin resultados tras filtrar -->
-            <div v-else-if="!cargandoEncuentros && encuentrosFiltrados.length === 0" class="px-5 py-8 text-center">
-              <p class="text-xs text-gray-400 font-medium">Sin resultados para esos filtros.</p>
-            </div>
-
-            <!-- Lista de encuentros (miniaturas) -->
-            <ul v-else-if="!cargandoEncuentros" class="divide-y divide-gray-50">
-              <li v-for="s in encuentrosVisibles" :key="s.id"
-                  class="px-4 py-3 hover:bg-gray-50/60 transition-colors group cursor-pointer"
-                  @click="verEncuentro(s)">
-                <div class="flex items-start justify-between gap-2">
-                  <div class="flex-1 min-w-0">
-                    <p class="text-xs font-black text-[#1F2937] leading-snug truncate
-                              group-hover:text-[#00A859] transition-colors">
-                      {{ s.proyecto_titulo || '(sin título)' }}
-                    </p>
-                    <p class="text-[10px] text-[#00A859] font-bold mt-0.5">
-                      {{ formatFecha(s.fecha) }}
-                    </p>
-                    <div class="flex flex-wrap gap-1 mt-1">
-                      <span v-if="s.curso"       class="tag tag-green">{{ s.curso }}</span>
-                      <span v-if="s.grupo"       class="tag tag-lime">Gr. {{ s.grupo }}</span>
-                      <span v-if="s.num_alumnos" class="tag tag-gray">{{ s.num_alumnos }} al.</span>
-                      <span v-if="s.num_equipos" class="tag tag-gray">{{ s.num_equipos }} eq.</span>
-                    </div>
-                    <div v-if="s.num_equipos" class="space-y-0.5 mt-1">
-                      <p v-for="n in s.num_equipos" :key="n"
-                         class="text-[9px] text-gray-400 truncate">
-                        <span class="font-black text-[#00A859]">Eq.{{ n }}</span>
-                        {{ alumnadosDeEquipoEn(s, n).join(', ') || 'Sin alumnos' }}
-                      </p>
-                    </div>
-                  </div>
-                  <div class="flex flex-col items-end gap-1 flex-shrink-0">
-                    <button @click.stop="abrirModalEliminar(s)"
-                            class="p-1 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-400 transition-all"
-                            title="Eliminar">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              </li>
-            </ul>
-
-            <!-- Paginación -->
-            <div v-if="totalPaginasSes > 1"
-                 class="px-4 py-3 border-t border-gray-50 flex items-center justify-between gap-2">
-              <button @click="paginaEncuentros--"
-                      :disabled="paginaEncuentros === 1"
-                      class="p-1.5 rounded-lg border border-gray-200 text-gray-400
-                             hover:border-[#00A859] hover:text-[#00A859]
-                             disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
-                </svg>
-              </button>
-              <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                {{ paginaEncuentros }} / {{ totalPaginasSes }}
-              </span>
-              <button @click="paginaEncuentros++"
-                      :disabled="paginaEncuentros === totalPaginasSes"
-                      class="p-1.5 rounded-lg border border-gray-200 text-gray-400
-                             hover:border-[#00A859] hover:text-[#00A859]
-                             disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-                </svg>
-              </button>
-            </div>
-
+      <!-- ═══ PASO 3 · CONFIRMACIÓN ═══ -->
+      <section v-else-if="pasoEnc === 3" class="rounded-2xl border border-borde bg-white p-4 shadow-sm sm:p-6" aria-labelledby="titulo-confirmacion">
+        <div class="mb-5 flex items-start gap-3 sm:gap-4">
+          <span class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rol-fuerte text-white sm:h-12 sm:w-12" aria-hidden="true">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </span>
+          <div class="min-w-0">
+            <h2 id="titulo-confirmacion" class="text-lg font-bold text-azul-noche">Confirmación</h2>
+            <p class="mt-0.5 text-sm text-texto-secundario">Revisa los datos antes de guardar el encuentro.</p>
           </div>
         </div>
 
+        <dl data-tour="enc-confirmacion" class="grid grid-cols-1 gap-x-6 gap-y-3 rounded-xl bg-gray-50 p-4 sm:grid-cols-2">
+          <div v-for="d in confirmacionEncuentro" :key="d.label" class="min-w-0" :class="d.ancho ? 'sm:col-span-2' : ''">
+            <dt class="text-xs font-semibold uppercase tracking-wide text-texto-secundario">{{ d.label }}</dt>
+            <dd class="mt-0.5 break-words text-sm font-semibold text-azul-noche">{{ d.valor }}</dd>
+          </div>
+        </dl>
+        <button type="button" @click="pasoEnc = 2"
+                class="mt-2 inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-sm font-semibold text-rol-fuerte hover:bg-rol/10">
+          Revisar grupos y alumnado
+        </button>
+
+        <div data-tour="enc-notas" class="mt-4 rounded-xl transition-all">
+          <label for="enc-notas" class="field-label">Notas adicionales</label>
+          <textarea id="enc-notas" v-model="form.notas" rows="3"
+                    placeholder="Observaciones, adaptaciones realizadas, valoración… (sin nombres reales del alumnado)"
+                    class="field-input resize-none" />
+        </div>
+
+        <!-- Cuenta docente — asignada automáticamente al guardar -->
+        <div class="mt-4 flex items-center gap-3 rounded-xl border border-rol/15 bg-rol/5 px-4 py-3">
+          <span class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-rol/10 text-rol-fuerte" aria-hidden="true">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+          </span>
+          <div class="min-w-0 flex-1">
+            <p class="text-xs font-semibold uppercase tracking-wide text-rol-fuerte">Cuenta docente asociada</p>
+            <p class="truncate text-sm font-semibold text-azul-noche">{{ authStore.userName }}</p>
+          </div>
+          <span class="shrink-0 rounded-full bg-rol/10 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-rol-fuerte">Auto</span>
+        </div>
+
+        <p v-if="errorGuardado" class="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+          {{ errorGuardado }}
+        </p>
+      </section>
+
+      <!-- ═══ PASO 4 · COMPLETADO ═══ -->
+      <section v-else class="rounded-2xl border border-borde bg-white p-6 text-center shadow-sm sm:p-10" aria-labelledby="titulo-completado">
+        <span class="mx-auto inline-flex h-14 w-14 items-center justify-center rounded-full bg-empresas-dark text-white" aria-hidden="true">
+          <svg class="h-7 w-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+        </span>
+        <h2 id="titulo-completado" class="mt-4 text-xl font-bold text-azul-noche sm:text-2xl">Encuentro creado</h2>
+        <p class="mx-auto mt-2 max-w-md text-sm text-texto-secundario">
+          Ya tienes los grupos listos. Proyecta el QR y los códigos para que el alumnado entre en su grupo; en «Seguimiento de grupos» seguirás su avance.
+        </p>
+        <!-- 1) Empezar ya: proyectar el acceso del alumnado -->
+        <div v-if="encuentroCreado?.microproyecto_uuid" data-tour="enc-proyectar" class="mx-auto mt-6 max-w-md rounded-2xl border border-rol/25 bg-rol/5 p-4 sm:p-5">
+          <p class="font-heading text-lg font-bold text-azul-noche">¿Empezáis ya?</p>
+          <p class="mt-1 text-sm text-texto-secundario">Proyecta el QR y los códigos en clase: cada grupo entra con el suyo.</p>
+          <button type="button" @click="proyectarAcceso" :disabled="abriendoProyeccion"
+                  class="accion-principal mt-3 disabled:opacity-50">
+            {{ abriendoProyeccion ? 'Preparando…' : 'Proyectar QR y códigos' }}
+          </button>
+        </div>
+        <!-- 2) Seguir a los grupos; 3) el resto, más discreto -->
+        <div class="mt-4 flex flex-col items-center gap-3">
+          <RouterLink :to="{ name: 'encuentros-registrados', query: { ver: 'seguimiento' } }" data-tour="enc-ir-seguimiento" class="accion-secundaria">Ir al seguimiento de grupos</RouterLink>
+          <div class="flex flex-wrap justify-center gap-2 border-t border-borde pt-3">
+            <RouterLink to="/encuentros" class="accion-secundaria">Ver encuentros</RouterLink>
+            <button type="button" @click="crearOtroEncuentro" class="accion-secundaria">Crear otro encuentro</button>
+          </div>
+        </div>
+        <p v-if="errorProyeccion" class="mx-auto mt-3 max-w-md text-sm font-semibold text-red-700" role="alert">{{ errorProyeccion }}</p>
+      </section>
+
+      <!-- Lo que falta para avanzar (se muestra al intentar seguir) -->
+      <div v-if="pasoEnc < 4 && intentoAvanzar && faltantesPaso.length"
+           class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3" role="alert">
+        <ul class="space-y-1">
+          <li v-for="(msg, i) in faltantesPaso" :key="i" class="flex items-start gap-2 text-sm font-medium text-amber-900">
+            <span class="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-600" aria-hidden="true" /> {{ msg }}
+          </li>
+        </ul>
+      </div>
+
+      <!-- Botones de paso -->
+      <div v-if="pasoEnc < 4" data-tour="enc-botones" class="fila-pasos rounded-xl transition-all">
+        <button v-if="pasoEnc === 1" type="button" @click="salirSinEncuentro" class="btn-paso-atras">{{ desdeAjuste ? 'Ahora no' : 'Cancelar' }}</button>
+        <button v-else type="button" @click="pasoEnc--" class="btn-paso-atras">← Anterior</button>
+        <button v-if="pasoEnc < 3" type="button" @click="siguientePasoEnc" class="btn-paso">Siguiente →</button>
+        <button v-else type="button" @click="guardarEncuentro" :disabled="guardando" class="btn-paso">
+          <svg v-if="guardando" class="h-4 w-4 animate-spin" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/></svg>
+          {{ guardando ? 'Guardando…' : 'Guardar encuentro' }}
+        </button>
+      </div>
+
+      </div><!-- /columna principal -->
+
+      <EncuentroResumen data-tour="enc-resumen"
+                        :proyecto="proyectoSeleccionado"
+                        :estado="proyectoSeleccionado ? estadoProyectoBadge(proyectoSeleccionado) : null"
+                        :datos="datosResumenEncuentro"
+                        :antes="antesDeContinuarEnc"
+                        @ver-proyecto="abrirProyectoModal(proyectoSeleccionado.uuid)"
+                        @ver-reto="abrirMicroretoModal(proyectoSeleccionado.microreto_id)" />
       </div>
     </div>
   </div>
-
-  <!-- ═══════════════════════════════════════════════════════════════════════ -->
-  <!-- MODAL DETALLE DE ENCUENTRO                                                -->
-  <!-- ═══════════════════════════════════════════════════════════════════════ -->
-  <Teleport to="body">
-    <Transition name="modal-fade">
-      <div v-if="encuentroAbierto"
-           class="fixed inset-0 z-50 flex items-center justify-center p-4">
-
-        <!-- Backdrop -->
-        <div @click="cerrarEncuentroModal()"
-             class="absolute inset-0 bg-black/40 backdrop-blur-sm" />
-
-        <!-- Panel -->
-        <div class="relative bg-white rounded-[1.75rem] shadow-2xl max-w-2xl w-full max-h-[92vh]
-                    overflow-hidden border border-gray-100 flex flex-col">
-
-          <!-- Cabecera -->
-          <div class="px-5 sm:px-7 pt-6 sm:pt-7 pb-5 border-b border-gray-100 flex-shrink-0">
-            <div class="flex items-start justify-between gap-4">
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 mb-2">
-                  <span class="w-2 h-2 rounded-full bg-[#00A859] flex-shrink-0" />
-                  <p class="text-[10px] font-black uppercase tracking-[0.18em] text-[#00A859]">
-                    Encuentro · {{ formatFecha(encuentroAbierto.fecha) }}
-                  </p>
-                </div>
-                <h2 class="text-lg font-black text-[#1F2937] leading-snug">
-                  {{ encuentroAbierto.proyecto_titulo || '(sin título)' }}
-                </h2>
-                <p v-if="encuentroAbierto.centro_educativo"
-                   class="text-xs font-semibold text-gray-400 mt-0.5 truncate">
-                  {{ encuentroAbierto.centro_educativo }}
-                </p>
-              </div>
-              <button @click="cerrarEncuentroModal()"
-                      class="flex-shrink-0 p-2 rounded-xl hover:bg-gray-100 text-gray-400
-                             hover:text-gray-600 transition-all">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                </svg>
-              </button>
-            </div>
-
-            <!-- Tags rápidos -->
-            <div class="flex flex-wrap gap-1.5 mt-3">
-              <span v-if="encuentroAbierto.fecha"           class="tag tag-gray">{{ formatFecha(encuentroAbierto.fecha) }}</span>
-              <span v-if="encuentroAbierto.curso"           class="tag tag-green">{{ encuentroAbierto.curso }}</span>
-              <span v-if="encuentroAbierto.grupo"           class="tag tag-lime">Grupo {{ encuentroAbierto.grupo }}</span>
-              <span v-if="encuentroAbierto.num_alumnos"     class="tag tag-gray">{{ encuentroAbierto.num_alumnos }} alumnos</span>
-            </div>
-          </div>
-
-          <!-- Contenido con scroll -->
-          <div class="flex-1 overflow-y-auto min-h-0">
-
-          <!-- Cuerpo -->
-          <div class="px-5 sm:px-7 py-5 space-y-4">
-
-            <!-- Grid de datos -->
-            <div v-if="encuentroAbierto.ciclo_formativo" class="grid grid-cols-1 gap-3">
-              <div class="p-3.5 rounded-xl bg-[#F8FAFC] border border-gray-100">
-                <p class="text-[9px] font-black uppercase tracking-wider text-gray-400 mb-0.5">Ciclo</p>
-                <p class="text-sm font-bold text-[#1F2937] leading-snug">{{ encuentroAbierto.ciclo_formativo }}</p>
-              </div>
-            </div>
-
-            <!-- Notas -->
-            <div v-if="encuentroAbierto.notas"
-                 class="p-4 rounded-xl bg-[#F8FAFC] border border-gray-100">
-              <p class="text-[9px] font-black uppercase tracking-wider text-gray-400 mb-1.5">Notas adicionales</p>
-              <p class="text-sm text-[#1F2937] leading-relaxed">{{ encuentroAbierto.notas }}</p>
-            </div>
-
-            <EncuentroEquiposYRaCe
-              :num-equipos="encuentroAbierto.num_equipos"
-              :alumnados-del-equipo="alumnadosDelEquipoAbierto"
-              :cargando-ra-ce="cargandoRaCe"
-              :ra-ce-blocks="raCeBlocksEncuentro"
-              :modulos-expandidos="modulosExpandidos"
-              @toggle-modulo="toggleModulo"
-            />
-
-          </div>
-
-          </div>
-          <!-- /Contenido con scroll -->
-
-          <!-- Pie -->
-          <div class="px-5 sm:px-7 py-4 bg-[#F8FAFC] border-t border-gray-100 space-y-3 flex-shrink-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <button v-if="encuentroAbierto.microreto_id"
-                      @click="abrirMicroretoModal(encuentroAbierto.microreto_id)"
-                      class="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl
-                             bg-white border border-gray-200 text-gray-500
-                             text-xs font-black uppercase tracking-widest
-                             hover:border-[#00A859] hover:text-[#00A859] transition-all">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/>
-                </svg>
-                Ver ficha reto
-              </button>
-              <button v-if="encuentroAbierto.microproyecto_uuid"
-                      @click="abrirProyectoModal(encuentroAbierto.microproyecto_uuid)"
-                      class="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl
-                             bg-white border border-gray-200 text-gray-500
-                             text-xs font-black uppercase tracking-widest
-                             hover:border-[#00A859] hover:text-[#00A859] transition-all">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m-4 6h16v6a2 2 0 01-2 2H6a2 2 0 01-2-2v-6z"/>
-                </svg>
-                Ver ficha proyecto
-              </button>
-              <button @click="router.push({ path: '/encuentros', query: { id: encuentroAbierto.id } }); cerrarEncuentroModal()"
-                      class="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl
-                             bg-white border border-gray-200 text-gray-500
-                             text-xs font-black uppercase tracking-widest
-                             hover:border-[#00A859] hover:text-[#00A859] transition-all">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-                </svg>
-                Ver más detalle de este encuentro
-              </button>
-              <button @click="router.push('/encuentros'); cerrarEncuentroModal()"
-                      class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#00A859] text-white
-                             text-xs font-black uppercase tracking-widest hover:bg-[#00A859]/90
-                             transition-all shadow-sm">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
-                </svg>
-                Ver todos los encuentros
-              </button>
-            </div>
-            <button @click="abrirModalEliminar(encuentroAbierto)"
-                    class="text-xs text-gray-400 hover:text-red-400 font-black uppercase
-                           tracking-widest transition-colors">
-              Eliminar encuentro
-            </button>
-          </div>
-
-        </div>
-      </div>
-    </Transition>
-  </Teleport>
 
   <!-- ═══════════════════════════════════════════════════════════════════════ -->
   <!-- MODAL FICHA DE MICRORETO                                               -->
@@ -1620,47 +1357,6 @@ function formatFecha(isoDate) {
     @close="cerrarProyectoModal"
   />
 
-  <!-- Modal eliminar encuentro -->
-  <EliminarEncuentroModal
-    :visible="modalEliminarVisible"
-    :encuentro="encuentroAEliminar"
-    @encuentro-eliminado="onEncuentroEliminado"
-    @cerrar="cerrarModalEliminar"
-  />
-
-  <!-- Modal: ¿Activar guía-tour? -->
-  <TourPromptModal
-    :show="showTourPrompt"
-    titulo="¿Quieres activar la guía-tour?"
-    descripcion="Explora el panel docente con una guía paso a paso que te muestra cada función."
-    @activar="activarTourDesdeModal"
-    @omitir="omitirTourDesdeModal"
-  />
-
-  <!-- Snackbar papelera -->
-  <Teleport to="body">
-    <Transition name="dd-snack">
-      <div v-if="snackbar.visible"
-           class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9999]
-                  flex items-center gap-3 px-5 py-3 rounded-2xl shadow-xl
-                  bg-[#1F2937] text-white text-sm font-medium">
-        <svg v-if="snackbar.accion" class="w-4 h-4 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-        </svg>
-        <svg v-else class="w-4 h-4 text-green-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
-        </svg>
-        <span>{{ snackbar.mensaje }}</span>
-        <button v-if="snackbar.accion"
-                @click="snackbar.accion.fn(); snackbar.visible = false"
-                class="ml-2 px-3 py-1 rounded-lg bg-amber-400 text-amber-900
-                       text-xs font-black uppercase tracking-wider hover:bg-amber-300 transition-colors">
-          {{ snackbar.accion.label }}
-        </button>
-      </div>
-    </Transition>
-  </Teleport>
 
 </template>
 
@@ -1677,31 +1373,29 @@ function formatFecha(isoDate) {
 
 .field-label {
   display: block;
-  font-size: 0.6875rem;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: #6B7280;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #17283E; /* azul noche */
   margin-bottom: 0.375rem;
 }
 .field-input {
   width: 100%;
-  background: #F9FAFB;
-  border: 1px solid #E5E7EB;
+  background: #fff;
+  border: 1px solid var(--color-borde-campo); /* 3:1 con el fondo (WCAG 1.4.11) */
   border-radius: 0.75rem;
   padding: 0.625rem 0.875rem;
   font-size: 0.875rem;
   font-weight: 500;
-  color: #1F2937;
+  color: #17283E;
   outline: none;
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 .field-input:focus {
-  border-color: #00A859;
-  box-shadow: 0 0 0 3px rgba(0, 168, 89, 0.12);
+  border-color: var(--color-rol-fuerte);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-rol-fuerte) 15%, transparent);
   background: #fff;
 }
-.field-input::placeholder { color: #D1D5DB; font-weight: 400; }
+.field-input::placeholder { color: #6B7280; font-weight: 400; }
 .field-input:disabled { opacity: 0.45; cursor: not-allowed; }
 select.field-input { cursor: pointer; }
 .tag {
@@ -1709,38 +1403,17 @@ select.field-input { cursor: pointer; }
   align-items: center;
   padding: 0.125rem 0.5rem;
   border-radius: 999px;
-  font-size: 0.625rem;
-  font-weight: 800;
+  font-size: 0.75rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
 }
 .tag-gray  { background: #F3F4F6; color: #6B7280; }
-.tag-green { background: rgba(0,168,89,0.1); color: #00A859; }
-.tag-lime  { background: rgba(153,204,51,0.12); color: #5a7a00; }
+.tag-green { background: rgba(48,114,170,0.1); color: #3072AA; }
+.tag-lime  { background: rgba(107,164,213,0.12); color: #275d8a; }
 .tag-amber { background: rgba(251,191,36,0.12); color: #92400e; }
 
-/* Tour: sección activa */
-.tour-active {
-  box-shadow: 0 0 0 3px #00A859, 0 0 0 8px rgba(0, 168, 89, 0.2), 0 4px 20px rgba(0,0,0,0.1) !important;
-  border-radius: 0.75rem;
-  transition: box-shadow 0.25s ease;
-}
 
-/* Tour: secciones inactivas se desvanecen y desenfocadas */
-.tour-seccion-blur {
-  filter: blur(2px);
-  opacity: 0.4;
-  pointer-events: none;
-  transition: filter 0.3s ease, opacity 0.3s ease;
-}
-
-/* sp-fade transition (overlay y bocadillo) */
-.sp-fade-enter-active, .sp-fade-leave-active { transition: opacity 200ms ease; }
-.sp-fade-enter-from, .sp-fade-leave-to { opacity: 0; }
-
-/* snackbar */
-.dd-snack-enter-active, .dd-snack-leave-active { transition: opacity 250ms ease, transform 250ms ease; }
-.dd-snack-enter-from, .dd-snack-leave-to { opacity: 0; transform: translateX(-50%) translateY(12px); }
 
 /* Modal animation */
 .modal-fade-enter-active,

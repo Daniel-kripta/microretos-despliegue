@@ -1,13 +1,17 @@
 <script setup>
-import { ref, computed } from 'vue'
+import BotonGuia from './BotonGuia.vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useSidePanel } from '../composables/useSidePanel.js'
+import { useRoleTheme } from '../composables/useRoleTheme.js'
+import { LightBulbIcon } from '@heroicons/vue/24/outline'
 
 const authStore = useAuthStore()
 const route     = useRoute()
 const router    = useRouter()
 const { mobileOpen, toggleMobilePanel } = useSidePanel()
+const { theme } = useRoleTheme()
 
 const irHome = () => {
   const destino = authStore.isAuthenticated && (authStore.isDocente || authStore.isAdmin)
@@ -29,34 +33,68 @@ const sectionLabels = {
   'empresas':             'Empresas',
   'dashboard-docente':    'Crear encuentro',
   'encuentros-registrados': 'Encuentros',
-  'startup-day':          'Propuestas-Proyecto',
-  'startup-day-crear':    'Nueva propuesta',
-  'startup-day-detalle':  'Proyecto',
-  'startup-day-editar':   'Editar proyecto',
+  'startup-day':          'Mis retos ajustados',
+  'proyectos-terminados': 'Mis retos ajustados completados',
+  'startup-day-crear':    'Ajuste del reto',
+  'startup-day-detalle':  'Reto ajustado',
+  'startup-day-editar':   'Ajuste del reto',
   'gestion-usuarios':     'Usuarios',
 }
 
 const sectionLabel = computed(() => sectionLabels[route.name] ?? null)
 
+// ── Menú de usuario (Mi usuario / Cerrar sesión) ──────────────────────────────
+const menuAbierto = ref(false)
+const menuRef     = ref(null)
+
+const cerrarMenu = () => { menuAbierto.value = false }
+const alPulsarFuera = (e) => { if (menuRef.value && !menuRef.value.contains(e.target)) cerrarMenu() }
+const alPulsarTecla = (e) => { if (e.key === 'Escape') cerrarMenu() }
+
+// Conoce DUALAB (bombilla): lleva a Recursos, con el recorrido completo y el acceso a «¿Qué es DUALAB?»
+const RUTA_RECURSOS = '/seccion/recursos'
+const enRecursos = computed(() => route.path === RUTA_RECURSOS)
+const irARecursos = () => {
+  cerrarMenu()
+  if (!enRecursos.value) router.push(RUTA_RECURSOS)
+}
+
+onMounted(() => {
+  document.addEventListener('click', alPulsarFuera)
+  document.addEventListener('keydown', alPulsarTecla)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', alPulsarFuera)
+  document.removeEventListener('keydown', alPulsarTecla)
+})
+watch(() => route.fullPath, cerrarMenu)
+
+const irAMiUsuario = () => {
+  cerrarMenu()
+  router.push('/mi-usuario')
+}
+
 const cerrarSesion = async () => {
   cargandoOut.value = true
   await authStore.logout()
   cargandoOut.value = false
+  cerrarMenu()
   router.push('/')
 }
 </script>
 
 <template>
   <header
-    class="fixed top-0 left-0 right-0 h-12 z-50 flex items-center gap-2 px-3
-           bg-[#1F2937] border-b border-[#333333] select-none"
+    class="fixed top-0 left-0 right-0 h-16 z-50 flex items-center gap-1 sm:gap-2 px-3
+           bg-azul-noche border-b border-azul-noche-border select-none"
   >
     <!-- Menú (cajón lateral) — solo visible en móvil/tablet con sesión iniciada -->
     <button
       v-if="authStore.isAuthenticated"
       @click="toggleMobilePanel"
+      data-tour="tb-menu"
       title="Menú"
-      class="lg:hidden w-8 h-8 rounded-lg flex items-center justify-center shrink-0
+      class="lg:hidden w-10 h-10 rounded-full flex items-center justify-center shrink-0
              text-white/60 hover:text-white hover:bg-white/10
              transition-all duration-150"
     >
@@ -68,21 +106,21 @@ const cerrarSesion = async () => {
       </svg>
     </button>
 
-    <!-- Logo DuaLab -->
+    <!-- Logo DuaLab — el color de "Lab" refleja el rol de quien ha iniciado sesión -->
     <button
       @click="irHome"
-      class="flex items-center gap-2 shrink-0 hover:opacity-80 transition-opacity duration-150 cursor-pointer"
+      class="flex items-center gap-2 mr-1 shrink-0 hover:opacity-80 transition-opacity duration-150 cursor-pointer"
     >
-      <img src="../assets/logo.png" alt="DuaLab" class="h-6 w-auto object-contain" />
-      <span class="font-black text-sm tracking-tighter text-white uppercase select-none">
-        Dua<span class="text-[#00A859]">Lab</span>
+      <img src="../assets/logo_colores.png" alt="DUALAB" class="h-11 w-auto object-contain" />
+      <span class="font-black text-lg tracking-tighter text-white uppercase select-none">
+        Dua<span :class="theme.textDark">Lab</span>
       </span>
     </button>
 
-    <!-- Separador + sección activa -->
+    <!-- Separador + sección activa — oculta en móvil, donde no cabe junto a la bombilla y el usuario -->
     <template v-if="sectionLabel">
-      <span class="text-white/15 select-none">/</span>
-      <span class="text-[11px] font-black uppercase tracking-[0.15em] text-white/50 truncate">
+      <span class="hidden text-white/15 select-none sm:inline">/</span>
+      <span class="hidden min-w-0 text-[11px] font-black uppercase tracking-[0.15em] text-white/50 truncate sm:inline">
         {{ sectionLabel }}
       </span>
     </template>
@@ -92,48 +130,111 @@ const cerrarSesion = async () => {
     <!-- ── Sesión activa ── -->
     <template v-if="authStore.isAuthenticated">
 
-      <!-- Nombre y rol -->
-      <div class="hidden sm:flex flex-col items-end leading-none gap-0.5">
-        <span class="text-[9px] font-black uppercase tracking-widest text-white/30">
-          {{ authStore.roleLabel }}
-        </span>
-        <span class="text-[11px] font-bold text-white/70 truncate max-w-[130px]">
-          {{ authStore.userName }}
-        </span>
+      <!-- Conoce DUALAB (bombilla): lleva a la sección Recursos (recorrido completo,
+           «¿Qué es DUALAB?», guías). Solo para quien puede abrir las secciones (no empresa).
+           En móvil solo la bombilla; desde md, con el texto. -->
+      <button
+        v-if="authStore.canAccess('seccion')"
+        type="button"
+        @click="irARecursos"
+        data-tour="tb-conoce"
+        aria-label="Conoce DUALAB"
+        title="Conoce DUALAB"
+        :aria-current="enRecursos ? 'page' : undefined"
+        class="flex h-10 min-w-10 shrink-0 items-center justify-center gap-2 rounded-full px-2.5
+               text-white/70 hover:text-white hover:bg-white/10 transition-colors duration-150"
+        :class="enRecursos && 'bg-white/10 text-white'"
+      >
+        <LightBulbIcon class="h-5 w-5 shrink-0 text-amber-300" aria-hidden="true" />
+        <span class="hidden whitespace-nowrap text-[13px] font-bold md:inline">Conoce DUALAB</span>
+      </button>
+
+      <!-- Guía paso a paso (tour del menú y de la pantalla). «Instalar app» está al pie del panel lateral -->
+      <BotonGuia v-if="authStore.canAccess('seccion')" />
+
+      <span class="h-6 w-px shrink-0 bg-white/10" aria-hidden="true" />
+
+      <!-- Usuario (como en la maqueta idea_dashboard): avatar + nombre + "Rol · Centro" y
+           flecha que despliega Mi usuario / Cerrar sesión. En vez de foto, el icono de usuario. -->
+      <div ref="menuRef" class="relative shrink-0">
+        <button
+          type="button"
+          @click="menuAbierto = !menuAbierto"
+          data-tour="tb-usuario"
+          :aria-expanded="menuAbierto"
+          aria-haspopup="menu"
+          title="Mi cuenta"
+          class="flex items-center gap-2.5 rounded-full py-1.5 pl-1.5 pr-2 sm:pr-3
+                 hover:bg-white/10 transition-colors duration-150"
+        >
+          <!-- Punto verde: sistema activo (antes en el pie del panel lateral) -->
+          <span class="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white ring-2 ring-white/20"
+                :class="theme.bg" title="Sistema activo">
+            <span class="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-400 ring-2 ring-azul-noche"
+                  aria-hidden="true" />
+            <svg class="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="8" r="4"/>
+              <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+            </svg>
+          </span>
+          <span class="hidden min-w-0 flex-col items-start text-left leading-tight sm:flex">
+            <span class="max-w-[180px] truncate text-[13px] font-bold text-white">{{ authStore.userName }}</span>
+            <span class="max-w-[180px] truncate text-[11px] text-white/50">
+              {{ authStore.roleLabel }}<template v-if="authStore.userCentroNombre"> · {{ authStore.userCentroNombre }}</template>
+            </span>
+          </span>
+          <svg class="hidden h-4 w-4 shrink-0 text-white/50 transition-transform sm:block"
+               :class="menuAbierto && 'rotate-180'"
+               fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+          </svg>
+        </button>
+
+        <Transition name="menu-usuario">
+          <div v-if="menuAbierto" role="menu"
+               class="absolute right-0 top-full mt-2 w-64 overflow-hidden rounded-2xl bg-white py-1.5
+                      text-sm text-azul-noche shadow-xl ring-1 ring-black/5">
+            <!-- En móvil el nombre no cabe en la barra: se muestra aquí -->
+            <div class="border-b border-gray-100 px-4 py-2.5 sm:hidden">
+              <p class="truncate font-bold">{{ authStore.userName }}</p>
+              <p class="truncate text-xs text-gray-500">
+                {{ authStore.roleLabel }}<template v-if="authStore.userCentroNombre"> · {{ authStore.userCentroNombre }}</template>
+              </p>
+            </div>
+            <div class="flex items-center gap-2 border-b border-gray-100 px-4 py-2">
+              <span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-emerald-400" aria-hidden="true" />
+              <span class="text-[10px] font-black uppercase tracking-widest text-emerald-700">Sistema activo</span>
+            </div>
+            <button type="button" role="menuitem" @click="irAMiUsuario"
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left font-medium hover:bg-gray-50">
+              <svg class="h-4 w-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="8" r="4"/>
+                <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+              </svg>
+              Mi usuario
+            </button>
+            <button type="button" role="menuitem" @click="cerrarSesion" :disabled="cargandoOut"
+                    class="flex w-full items-center gap-3 px-4 py-2.5 text-left font-medium text-red-600
+                           hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50">
+              <svg v-if="!cargandoOut" class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+              </svg>
+              <svg v-else class="h-4 w-4 animate-spin" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
+              </svg>
+              Cerrar sesión
+            </button>
+          </div>
+        </Transition>
       </div>
-
-      <!-- Mi usuario -->
-      <button
-        @click="router.push('/mi-usuario')"
-        title="Mi usuario"
-        class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0
-               text-white/40 hover:text-white/80 hover:bg-white/10
-               transition-all duration-150"
-      >
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="8" r="4"/>
-          <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-        </svg>
-      </button>
-
-      <!-- Logout -->
-      <button
-        @click="cerrarSesion"
-        :disabled="cargandoOut"
-        title="Cerrar sesión"
-        class="w-8 h-8 rounded-xl flex items-center justify-center shrink-0
-               text-red-400/60 hover:text-red-300 hover:bg-red-500/10
-               transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        <svg v-if="!cargandoOut" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
-        </svg>
-        <svg v-else class="w-4 h-4 animate-spin" viewBox="0 0 24 24">
-          <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
-        </svg>
-      </button>
     </template>
   </header>
 </template>
+
+<style scoped>
+.menu-usuario-enter-active, .menu-usuario-leave-active { transition: opacity .15s ease, transform .15s ease; }
+.menu-usuario-enter-from, .menu-usuario-leave-to { opacity: 0; transform: translateY(-4px); }
+</style>

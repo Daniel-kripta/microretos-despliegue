@@ -6,6 +6,7 @@ use Illuminate\Http\Request;
 use App\Http\Requests\ValidarFaseEquipoRequest;
 use App\Http\Requests\RechazarFaseEquipoRequest;
 use App\Http\Requests\EvaluarEquipoRequest;
+use App\Http\Requests\UpdateDiagnosticoFinalRequest;
 use App\Models\Equipo;
 use App\Models\EquipoFase;
 use App\Models\Microproyecto;
@@ -82,10 +83,14 @@ class EquipoGestionController extends Controller
 
         $data = $request->validated();
 
+        // Se fusiona con lo que ya guardó el equipo en F4 (organización de la exposición):
+        // sustituir 'datos' entero lo borraba.
+        $datosF4 = EquipoFase::where('equipo_id', $equipo->id)->where('numero_fase', 4)->first()->datos ?? [];
+
         $fase = EquipoFase::updateOrCreate(
             ['equipo_id' => $equipo->id, 'numero_fase' => 4],
             [
-                'datos'                    => ['evaluacion_docente' => $data['evaluacion']],
+                'datos'                    => array_merge($datosF4, ['evaluacion_docente' => $data['evaluacion']]),
                 'validado_docente'         => true,
                 'fecha_validacion_docente' => now(),
                 'nota_docente'             => $data['nota_docente'] ?? null,
@@ -114,19 +119,19 @@ class EquipoGestionController extends Controller
 
         $fasesCompletas = $equipo->fases->filter(fn($f) => $f->completada)->count();
         if ($fasesCompletas < 5) {
-            return response()->json(['error' => 'El equipo debe completar las 5 fases antes de generar el diagnóstico final.'], 422);
+            return response()->json(['error' => 'El grupo debe completar las 5 fases antes de generar el diagnóstico final.'], 422);
         }
 
         $contexto = DiagnosticoFinalService::contexto($equipo);
 
-        $cacheKey  = 'diagnostico_final_v1_' . md5($contexto);
+        $cacheKey  = 'diagnostico_final_v2_' . md5($contexto);
         $resultado = Cache::remember($cacheKey, now()->addDay(), function () use ($contexto) {
             $response = Http::withToken(config('services.openai.key'))
                 ->timeout(60)
                 ->post('https://api.openai.com/v1/chat/completions', [
                     'model'    => 'gpt-4o',
                     'messages' => [
-                        ['role' => 'system', 'content' => 'Eres un docente de Formación Profesional española que redacta el diagnóstico final de un equipo de alumnado al terminar un microproyecto tipo reto de empresa (Aprendizaje Basado en Retos). Básate ÚNICAMENTE en la información proporcionada, nunca inventes datos que no estén en el contexto. Ten en cuenta el nivel de completitud y la calidad del contenido registrado en cada fase, la evaluación curricular ya realizada por el docente (niveles de RA alcanzados) y la nota opcional si existe. No repitas literalmente los datos identificativos (ciclo, curso, grupo, nombres de los participantes) en el texto — el lector ya los tiene delante, céntrate en analizar el proceso y el aprendizaje. Redacta en español, tono profesional y constructivo, sin tecnicismos innecesarios.'],
+                        ['role' => 'system', 'content' => 'Eres un docente de Formación Profesional española que redacta el diagnóstico final de un equipo de alumnado al terminar un microproyecto tipo reto de empresa (Aprendizaje Basado en Retos). Básate ÚNICAMENTE en la información proporcionada, nunca inventes datos que no estén en el contexto. Ten en cuenta el nivel de completitud y la calidad del contenido registrado en cada fase, la evaluación curricular ya realizada por el docente (niveles de RA alcanzados) y la nota opcional si existe. No repitas literalmente los datos identificativos (ciclo, curso, grupo, participantes) en el texto — el lector ya los tiene delante, céntrate en analizar el proceso y el aprendizaje. Los participantes aparecen como «Integrante N»: si necesitas nombrar a alguno, usa exactamente esa forma. Redacta en español, tono profesional y constructivo, sin tecnicismos innecesarios.'],
                         ['role' => 'user',   'content' => "Contexto del equipo:\n{$contexto}\nDevuelve SOLO este JSON:\n{\"resumen\":\"resumen general del desempeño del equipo a lo largo del proyecto (2-4 frases)\",\"fortalezas\":[\"punto fuerte concreto\"],\"areas_mejora\":[\"área de mejora concreta\"],\"valoracion_ra_ce\":\"cómo el trabajo del equipo evidencia (o no) los RA/CE trabajados, apoyándote en la evaluación curricular del docente si existe\",\"conclusion\":\"valoración final breve (1-2 frases)\"}"],
                     ],
                     'response_format' => ['type' => 'json_object'],
@@ -148,6 +153,9 @@ class EquipoGestionController extends Controller
             return response()->json(['error' => 'No se pudo generar el diagnóstico. Inténtalo de nuevo.'], 502);
         }
 
+        // La IA solo conoce «Integrante N» (ver DiagnosticoFinalService::seudonimizar)
+        $resultado = DiagnosticoFinalService::restaurarAlias($resultado, $equipo);
+
         $equipo->update([
             'diagnostico_final'       => $resultado,
             'diagnostico_generado_en' => now(),
@@ -156,6 +164,41 @@ class EquipoGestionController extends Controller
         return response()->json([
             'diagnostico'  => $resultado,
             'generado_en'  => $equipo->diagnostico_generado_en,
+        ]);
+    }
+
+    /**
+     * PATCH /api/startup/equipos/{id}/diagnostico-final
+     * El docente corrige a mano el diagnóstico que redactó la IA. Solo sobre uno ya
+     * generado. Se marca dentro del propio JSON (editado_docente/editado_en) para que la
+     * interfaz distinga "lo dijo la IA" de "lo revisó el docente"; regenerar con IA
+     * sustituye el JSON entero y por tanto vuelve a quitar la marca.
+     */
+    public function actualizarDiagnosticoFinal(UpdateDiagnosticoFinalRequest $request, int $equipoId)
+    {
+        $equipo = $this->equipoDeMiEncuentro($request, $equipoId);
+
+        if (empty($equipo->diagnostico_final)) {
+            return response()->json(['error' => 'Este grupo todavía no tiene diagnóstico final que editar.'], 422);
+        }
+
+        $data = $request->validated();
+
+        $diagnostico = [
+            'resumen'          => $data['resumen'],
+            'fortalezas'       => array_values($data['fortalezas']),
+            'areas_mejora'     => array_values($data['areas_mejora']),
+            'valoracion_ra_ce' => $data['valoracion_ra_ce'] ?? null,
+            'conclusion'       => $data['conclusion'] ?? null,
+            'editado_docente'  => true,
+            'editado_en'       => now()->toIso8601String(),
+        ];
+
+        $equipo->update(['diagnostico_final' => $diagnostico]);
+
+        return response()->json([
+            'diagnostico' => $diagnostico,
+            'generado_en' => $equipo->diagnostico_generado_en,
         ]);
     }
 
@@ -176,17 +219,33 @@ class EquipoGestionController extends Controller
      */
     public function pantallaAcceso(Request $request, $uuid)
     {
-        $proyecto = $this->proyectoDeMiEncuentro($request, $uuid);
+        // Los códigos y tokens dan entrada al workspace del alumnado (y permiten escribir en
+        // él): solo los grupos de encuentros que el usuario puede EDITAR, nunca a un
+        // colaborador de solo lectura.
+        /** @var \App\Models\User $user  ruta bajo auth:sanctum */
+        $user = $request->user();
+        $proyecto = Microproyecto::where('uuid', $uuid)
+            ->whereHas('encuentros', fn($q) => $q->editablesPara($user))
+            ->firstOrFail();
 
-        $equipos = $proyecto->equipos()->get()->map(fn($e) => [
+        $equipos = $proyecto->equipos()->whereHas('encuentro', fn($q) => $q->editablesPara($user))->get()->map(fn($e) => [
             'id'            => $e->id,
+            'encuentro_id'  => $e->encuentro_id,
             'nombre'        => $e->nombre,
             'codigo_acceso' => $e->codigo_acceso,
             'token'         => $e->token,
         ]);
 
+        // Código de la clase (el que enseñan las tarjetas de encuentro): con él se entra la
+        // primera vez en /unirse y se elige grupo; el de cada grupo sirve también para volver.
+        $clases = $proyecto->encuentros()->editablesPara($user)->whereNotNull('codigo_clase')
+            ->get(['encuentros.id', 'encuentros.grupo', 'encuentros.codigo_clase'])
+            ->map(fn($e) => ['encuentro_id' => $e->id, 'grupo' => $e->grupo, 'codigo_clase' => $e->codigo_clase])
+            ->values();
+
         return response()->json([
             'proyecto_titulo' => $proyecto->titulo,
+            'clases'          => $clases,
             'equipos'         => $equipos,
         ]);
     }
@@ -195,20 +254,13 @@ class EquipoGestionController extends Controller
     // Un docente solo puede gestionar equipos/proyectos de sus propios encuentros.
     // Admin y superadmin ven todos (EnsureIsDocente ya deja pasar a ambos roles).
 
-    // pantallaAcceso solo lee (visiblesPara); validarFase/rechazarFase/evaluar/destroy mutan
-    // datos del equipo, así que exigen editablesPara (un colaborador de solo lectura no pasa).
+    // validarFase/rechazarFase/evaluar/destroy mutan datos del equipo y pantallaAcceso entrega
+    // los códigos de acceso: todos exigen editablesPara (un colaborador de solo lectura no pasa).
 
     private function equipoDeMiEncuentro(Request $request, int $equipoId): Equipo
     {
         return Equipo::where('id', $equipoId)
             ->whereHas('encuentro', fn($q) => $q->editablesPara($request->user()))
-            ->firstOrFail();
-    }
-
-    private function proyectoDeMiEncuentro(Request $request, string $uuid): Microproyecto
-    {
-        return Microproyecto::where('uuid', $uuid)
-            ->whereHas('encuentros', fn($q) => $q->visiblesPara($request->user()))
             ->firstOrFail();
     }
 }

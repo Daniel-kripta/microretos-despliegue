@@ -82,7 +82,7 @@ async function confirmarEliminacion() {
                   {{ encuentro.fecha }}
                 </span>
                 <span v-if="encuentro?.centro_educativo"
-                  class="text-[10px] font-bold bg-[#00A859]/10 text-[#00A859] px-2 py-0.5 rounded-full">
+                  class="text-[10px] font-bold bg-centros/10 text-centros px-2 py-0.5 rounded-full">
                   {{ encuentro.centro_educativo }}
                 </span>
                 <span v-if="encuentro?.ciclo_formativo"
@@ -135,19 +135,19 @@ async function confirmarEliminacion() {
                     </svg>
                   </div>
                   <div class="flex-1">
-                    <p class="font-black text-sm text-blue-700">Los proyectos StartUp Day vinculados no se eliminarán</p>
-                    <p class="text-xs text-blue-500 mt-0.5">Los proyectos creados a partir de este encuentro permanecen en la biblioteca.</p>
+                    <p class="font-black text-sm text-blue-700">El reto ajustado vinculado no se eliminará</p>
+                    <p class="text-xs text-blue-500 mt-0.5">El reto ajustado asociado a este encuentro se mantiene en «Mis retos ajustados».</p>
                   </div>
                 </div>
 
-                <div class="esm-actions mt-2">
-                  <button type="button" @click="$emit('cerrar')" class="esm-btn-ghost flex-1">Cancelar</button>
-                  <button type="button" @click="avanzarFase2" class="esm-btn-danger-outline flex-[2]">
+                <div class="fila-pasos mt-2">
+                  <button type="button" @click="$emit('cerrar')" class="btn-paso-atras">Cancelar</button>
+                  <button type="button" @click="avanzarFase2" class="btn-paso border-2 border-red-300 bg-white text-red-600 shadow-none hover:border-red-400 hover:bg-red-50">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
                     </svg>
-                    Entiendo, quiero eliminarlo
+                    <span class="sm:hidden">Continuar</span><span class="hidden sm:inline">Entiendo, quiero eliminarlo</span>
                   </button>
                 </div>
               </div>
@@ -199,8 +199,8 @@ async function confirmarEliminacion() {
                   </div>
                 </Transition>
 
-                <div class="esm-actions">
-                  <button type="button" @click="fase = 1" class="esm-btn-ghost flex-1">
+                <div class="fila-pasos">
+                  <button type="button" @click="fase = 1" class="btn-paso-atras">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
                     </svg>
@@ -210,7 +210,7 @@ async function confirmarEliminacion() {
                     type="button"
                     @click="confirmarEliminacion"
                     :disabled="!textoValido || eliminando"
-                    class="esm-btn-danger flex-[2]"
+                    class="btn-paso bg-red-600 shadow-red-600/30 hover:bg-red-700"
                   >
                     <svg v-if="eliminando" class="animate-spin w-4 h-4 shrink-0" viewBox="0 0 24 24">
                       <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
@@ -219,7 +219,8 @@ async function confirmarEliminacion() {
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
                     </svg>
-                    {{ eliminando ? 'Moviendo a papelera...' : 'Mover a papelera' }}
+                    <span class="sm:hidden">{{ eliminando ? 'Moviendo...' : 'Mover' }}</span>
+                    <span class="hidden sm:inline">{{ eliminando ? 'Moviendo a papelera...' : 'Mover a papelera' }}</span>
                   </button>
                 </div>
               </div>
@@ -247,7 +248,7 @@ async function confirmarEliminacion() {
 }
 .esm-card {
   position: relative; background: #fff; border: 1px solid #fecaca;
-  border-radius: 2rem; padding: 2.25rem; width: 100%; max-width: 520px;
+  border-radius: 2rem; padding: 1.5rem; width: 100%; max-width: 520px;
   max-height: 90vh; overflow-y: auto;
   box-shadow: 0 0 0 1px rgba(220,38,38,.08), 0 24px 48px rgba(0,0,0,.2), 0 0 80px rgba(220,38,38,.06);
   scrollbar-width: thin; scrollbar-color: #fecaca transparent;
@@ -255,7 +256,10 @@ async function confirmarEliminacion() {
 .esm-card::-webkit-scrollbar { width: 5px; }
 .esm-card::-webkit-scrollbar-thumb { background: #fecaca; border-radius: 3px; }
 
-.esm-header   { display: flex; align-items: flex-start; gap: 1rem; }
+.esm-header   { display: flex; align-items: flex-start; gap: 1rem; padding-right: 2.5rem; /* hueco para el ✕ */ }
+@media (min-width: 640px) {
+  .esm-card { padding: 2.25rem; }
+}
 .esm-icon-box { flex-shrink: 0; width: 52px; height: 52px; background: #fef2f2; border: 1.5px solid #fecaca; border-radius: 1rem; display: flex; align-items: center; justify-content: center; }
 .esm-title    { font-size: 1.2rem; font-weight: 900; color: #1F2937; letter-spacing: -.025em; line-height: 1.2; }
 .esm-sub      { font-size: .78rem; color: #6b7280; margin-top: .3rem; font-weight: 500; }
@@ -282,7 +286,7 @@ async function confirmarEliminacion() {
 .esm-btn-danger {
   display: flex; align-items: center; justify-content: center; gap: .5rem;
   padding: 1rem 1.5rem; background: #dc2626; color: #fff; border: none;
-  border-radius: 1rem; font-weight: 900; font-size: .7rem; letter-spacing: .15em;
+  border-radius: 9999px; font-weight: 900; font-size: .7rem; letter-spacing: .15em;
   text-transform: uppercase; cursor: pointer; box-shadow: 0 6px 20px rgba(220,38,38,.3); transition: all .2s;
 }
 .esm-btn-danger:hover:not(:disabled)  { background: #b91c1c; transform: translateY(-1px); }
@@ -291,7 +295,7 @@ async function confirmarEliminacion() {
 .esm-btn-danger-outline {
   display: flex; align-items: center; justify-content: center; gap: .5rem;
   padding: 1rem 1.5rem; background: #fff; color: #dc2626; border: 2px solid #fca5a5;
-  border-radius: 1rem; font-weight: 900; font-size: .7rem; letter-spacing: .15em;
+  border-radius: 9999px; font-weight: 900; font-size: .7rem; letter-spacing: .15em;
   text-transform: uppercase; cursor: pointer; transition: all .2s;
 }
 .esm-btn-danger-outline:hover  { background: #fef2f2; border-color: #f87171; }
@@ -299,14 +303,14 @@ async function confirmarEliminacion() {
 .esm-btn-ghost {
   display: flex; align-items: center; justify-content: center; gap: .4rem;
   padding: 1rem 1.5rem; background: #fff; color: #6b7280; border: 2px solid #e5e7eb;
-  border-radius: 1rem; font-weight: 900; font-size: .7rem; letter-spacing: .15em;
+  border-radius: 9999px; font-weight: 900; font-size: .7rem; letter-spacing: .15em;
   text-transform: uppercase; cursor: pointer; transition: all .2s;
 }
 .esm-btn-ghost:hover  { border-color: #d1d5db; color: #374151; }
 .esm-btn-ghost:active { transform: scale(.97); }
 .esm-x {
-  position: absolute; top: 1.25rem; right: 1.25rem; width: 32px; height: 32px;
-  background: #fef2f2; border: none; border-radius: .5rem; color: #f87171;
+  position: absolute; top: 1rem; right: 1rem; width: 36px; height: 36px;
+  background: #fef2f2; border: none; border-radius: 9999px; color: #f87171;
   display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .2s;
 }
 .esm-x:hover { background: #fee2e2; color: #dc2626; }

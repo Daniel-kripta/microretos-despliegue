@@ -28,9 +28,15 @@ const emit = defineEmits(['centro-creado', 'centro-guardado', 'cerrar', 'crear-e
 
 // ─── Estado ────────────────────────────────────────────────
 const nombre       = ref('')
+const municipio    = ref('')
 const nombreError  = ref('')
 const errorGlobal  = ref('')
 const guardando    = ref(false)
+
+// Resultado de POST /centros/{id}/impacto-cambio cuando nombre/municipio cambian y hay
+// empresas/encuentros/proyectos que copiaron ese dato en su momento — null = sin calcular
+// o sin impacto; objeto = mostrar el aviso y esperar confirmación antes de guardar.
+const impacto = ref(null)
 
 const imgUrl       = ref('')
 const subiendoImg  = ref(false)
@@ -71,6 +77,7 @@ watch(() => props.visible, async (v) => {
   if (props.centro) {
     // Modo edición: pre-cargar datos existentes
     nombre.value      = props.centro.nombre
+    municipio.value    = props.centro.municipio || ''
     imgUrl.value       = props.centro.img || ''
     seleccionados.value = (props.centro.ciclos ?? []).map(c => c.id)
 
@@ -276,7 +283,9 @@ function quitarImagenCentro() {
 }
 
 // ─── Guardar ────────────────────────────────────────────────
-async function guardar() {
+// confirmado=true significa "el usuario ya vio el aviso de impacto y ha pulsado
+// 'Sí, actualizar todo'" — se salta la previsualización y guarda directamente.
+async function guardar(confirmado = false) {
   nombreError.value = ''
   errorGlobal.value = ''
 
@@ -289,11 +298,30 @@ async function guardar() {
     return
   }
 
+  // Solo tiene sentido en modo editar: crear un centro nuevo no afecta a nada existente.
+  if (modoEditar.value && !confirmado) {
+    try {
+      const { data } = await api.post(`/centros/${props.centro.id}/impacto-cambio`, {
+        nombre:    nombre.value.trim(),
+        municipio: municipio.value.trim() || null,
+      })
+      if (data.requiere_confirmacion) {
+        impacto.value = data
+        return // esperamos a que el usuario confirme desde el aviso antes de guardar
+      }
+    } catch (e) {
+      // Si falla solo la previsualización, no bloqueamos el guardado real — el PUT
+      // vuelve a validar igualmente.
+    }
+  }
+
+  impacto.value = null
   guardando.value = true
   try {
     if (modoEditar.value) {
       const { data } = await api.put(`/centros/${props.centro.id}`, {
         nombre:    nombre.value.trim(),
+        municipio: municipio.value.trim() || null,
         ciclosIds: seleccionados.value,
         img:       imgUrl.value || null,
       })
@@ -301,6 +329,7 @@ async function guardar() {
     } else {
       const { data } = await api.post('/centros', {
         nombre:    nombre.value.trim(),
+        municipio: municipio.value.trim() || null,
         ciclosIds: seleccionados.value,
         img:       imgUrl.value || null,
       })
@@ -336,10 +365,16 @@ async function guardar() {
   }
 }
 
+function cancelarConfirmacionImpacto() {
+  impacto.value = null
+}
+
 function resetear() {
   nombre.value        = ''
+  municipio.value      = ''
   nombreError.value   = ''
   errorGlobal.value   = ''
+  impacto.value       = null
   seleccionados.value = []
   familiasExpandidas.value.clear()
 
@@ -372,11 +407,11 @@ function resetear() {
             <!-- Cabecera -->
             <div class="cce-header">
               <div class="cce-icon-box" :class="modoEditar ? 'cce-icon-box--edit' : ''">
-                <svg v-if="modoEditar" class="w-7 h-7 text-[#99CC33]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg v-if="modoEditar" class="w-7 h-7 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
                 </svg>
-                <svg v-else class="w-7 h-7 text-[#99CC33]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg v-else class="w-7 h-7 text-centros-light" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/>
                 </svg>
@@ -402,19 +437,50 @@ function resetear() {
                 class="cce-input"
                 :class="{ 'cce-input-err': nombreError }"
                 placeholder="Ej: IES Nombre del Centro"
-                @keydown.enter.prevent="guardar"
+                @keydown.enter.prevent="guardar()"
               />
               <p v-if="nombreError" class="cce-err">{{ nombreError }}</p>
+            </div>
+
+            <!-- Municipio -->
+            <div class="mt-6">
+              <label class="cce-label">Municipio</label>
+              <input
+                v-model="municipio"
+                class="cce-input"
+                placeholder="Ej: Las Palmas de Gran Canaria"
+                @keydown.enter.prevent="guardar()"
+              />
+            </div>
+
+            <!-- Aviso de impacto en cascada (solo al editar, si nombre/municipio cambian) -->
+            <div v-if="impacto" class="mt-6 p-4 rounded-2xl border-2 border-amber-300 bg-amber-50">
+              <p class="text-sm font-bold text-amber-800">
+                Este cambio va a actualizar también:
+              </p>
+              <ul class="mt-2 text-sm text-amber-700 list-disc list-inside">
+                <li>{{ impacto.afectados.empresas }} empresa(s) asociadas a este centro</li>
+                <li>{{ impacto.afectados.encuentros }} encuentro(s) creados con este centro</li>
+                <li>{{ impacto.afectados.proyectos }} reto(s) ajustado(s) con este centro asignado</li>
+              </ul>
+              <div class="mt-4 flex flex-col-reverse sm:flex-row gap-3">
+                <button type="button" @click="cancelarConfirmacionImpacto" class="cce-btn-ghost flex-1">
+                  Cancelar
+                </button>
+                <button type="button" @click="guardar(true)" :disabled="guardando" class="cce-btn-green flex-1">
+                  {{ guardando ? 'Actualizando...' : 'Sí, actualizar todo' }}
+                </button>
+              </div>
             </div>
 
             <!-- Imagen del centro -->
             <div class="mt-6">
               <label class="cce-label">Imagen del centro</label>
               <div class="flex items-center gap-3">
-                <div class="w-20 h-20 rounded-2xl border-2 border-dashed border-[#BBE8D0] bg-[#F0FBF4]
+                <div class="w-20 h-20 rounded-2xl border-2 border-dashed border-[#C7DCEC] bg-[#F2F7FB]
                             flex items-center justify-center shrink-0 overflow-hidden">
                   <img v-if="imgUrl" :src="imgUrl" alt="" class="w-full h-full object-cover" />
-                  <svg v-else class="w-8 h-8 text-[#00A859]/40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg v-else class="w-8 h-8 text-centros/40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
                           d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/>
                   </svg>
@@ -446,7 +512,7 @@ function resetear() {
                 <p class="cce-label mb-0">Ciclos que imparte *</p>
                 <span v-if="totalSeleccionados > 0"
                   class="text-[10px] font-black uppercase tracking-widest
-                         bg-[#00A859]/10 text-[#00A859] px-2.5 py-1 rounded-full">
+                         bg-centros/10 text-centros px-2.5 py-1 rounded-full">
                   {{ totalSeleccionados }} seleccionados
                 </span>
               </div>
@@ -463,7 +529,7 @@ function resetear() {
                   :key="familia.id"
                   class="rounded-2xl border overflow-hidden transition-colors"
                   :class="ciclosPreseleccionadosDeFamilia(familia.id) > 0
-                    ? 'border-[#00A859]/30 bg-[#F0FBF4]'
+                    ? 'border-centros/30 bg-[#F2F7FB]'
                     : 'border-gray-100 bg-white'"
                 >
                   <!-- Cabecera familia -->
@@ -473,11 +539,11 @@ function resetear() {
                     class="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-black/5 transition-colors"
                   >
                     <div class="w-2 h-2 rounded-full shrink-0"
-                      :class="ciclosPreseleccionadosDeFamilia(familia.id) > 0 ? 'bg-[#00A859]' : 'bg-gray-300'"/>
+                      :class="ciclosPreseleccionadosDeFamilia(familia.id) > 0 ? 'bg-centros' : 'bg-gray-300'"/>
                     <span class="flex-1 font-bold text-sm text-[#1F2937]">{{ familia.nombre }}</span>
                     <span v-if="ciclosPreseleccionadosDeFamilia(familia.id) > 0"
                       class="text-[10px] font-black uppercase tracking-widest
-                             bg-[#00A859]/15 text-[#00A859] px-2 py-0.5 rounded-full shrink-0">
+                             bg-centros/15 text-centros px-2 py-0.5 rounded-full shrink-0">
                       {{ ciclosPreseleccionadosDeFamilia(familia.id) }}
                     </span>
                     <svg
@@ -492,32 +558,32 @@ function resetear() {
                   <!-- Lista de ciclos -->
                   <div v-if="familiasExpandidas.has(familia.id)" class="border-t border-gray-100 px-4 py-3">
                     <div v-if="cargandoCiclos[familia.id]" class="flex items-center gap-2 py-2">
-                      <div class="w-4 h-4 rounded-full border-2 border-[#00A859]/30 border-t-[#00A859] animate-spin shrink-0"/>
+                      <div class="w-4 h-4 rounded-full border-2 border-centros/30 border-t-centros animate-spin shrink-0"/>
                       <span class="text-xs text-gray-400">Cargando ciclos...</span>
                     </div>
                     <div v-else-if="ciclosPorFamilia[familia.id]?.length">
                       <!-- Seleccionar todos -->
-                      <label class="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-gray-500
-                                   cursor-pointer pb-2 mb-2 border-b border-gray-100 hover:text-[#00A859]">
+                      <label class="flex items-center gap-2 min-h-9 text-xs font-black uppercase tracking-widest text-gray-500
+                                   cursor-pointer pb-2 mb-2 border-b border-gray-100 hover:text-centros">
                         <input
                           type="checkbox"
                           :checked="todosDeFamiliaSeleccionados(familia.id)"
                           @change="toggleTodosDeFamilia(familia.id)"
-                          class="accent-[#00A859] w-3.5 h-3.5 shrink-0"
+                          class="accent-centros w-4 h-4 shrink-0"
                         />
                         Seleccionar todos
                       </label>
-                      <div class="flex flex-col gap-1.5">
+                      <div class="flex flex-col gap-0.5">
                         <label
                           v-for="ciclo in ciclosPorFamilia[familia.id]"
                           :key="ciclo.id"
-                          class="flex items-center gap-2 text-sm text-[#1F2937] cursor-pointer hover:text-[#00A859] py-0.5"
+                          class="flex items-center gap-2 min-h-9 text-sm text-[#1F2937] cursor-pointer hover:text-centros py-0.5"
                         >
                           <input
                             type="checkbox"
                             :value="ciclo.id"
                             v-model="seleccionados"
-                            class="accent-[#00A859] w-4 h-4 shrink-0"
+                            class="accent-centros w-4 h-4 shrink-0"
                           />
                           {{ ciclo.nombre }}
                         </label>
@@ -531,7 +597,7 @@ function resetear() {
 
             <!-- Empresas asociadas -->
             <div class="mt-6">
-              <div class="flex items-center justify-between mb-3">
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
                 <p class="cce-label mb-0">Empresas asociadas</p>
                 <div class="flex flex-col items-end gap-1.5">
                   <button type="button" @click="toggleSelectorEmpresas" class="cce-btn-add-empresa">
@@ -563,12 +629,12 @@ function resetear() {
 
               <Transition name="cce-fade">
                 <div v-if="mostrarSelectorEmpresas" class="cce-empresas-selector">
-                  <div class="flex items-center gap-2">
+                  <div class="flex flex-wrap items-center gap-2">
                     <input
                       v-model="busquedaEmpresa"
                       type="text"
                       placeholder="Buscar empresa por nombre..."
-                      class="cce-input cce-input-sm flex-1"
+                      class="cce-input cce-input-sm flex-1 min-w-0"
                     />
                     <button
                       type="button"
@@ -584,30 +650,30 @@ function resetear() {
                     </button>
                   </div>
 
-                  <label class="flex items-center gap-2 text-[11px] font-semibold text-gray-500 mt-2 cursor-pointer">
+                  <label class="flex items-center gap-2 min-h-9 text-[11px] font-semibold text-gray-500 mt-2 cursor-pointer">
                     <input
                       type="checkbox"
                       v-model="filtrarPorFamilia"
-                      class="accent-[#00A859] w-3.5 h-3.5 shrink-0"
+                      class="accent-centros w-4 h-4 shrink-0"
                     />
                     Mostrar solo empresas de las familias que imparte este centro
                   </label>
 
                   <div v-if="cargandoEmpresas" class="flex items-center gap-2 py-3">
-                    <div class="w-4 h-4 rounded-full border-2 border-[#00A859]/30 border-t-[#00A859] animate-spin shrink-0"/>
+                    <div class="w-4 h-4 rounded-full border-2 border-centros/30 border-t-centros animate-spin shrink-0"/>
                     <span class="text-xs text-gray-400">Cargando empresas...</span>
                   </div>
                   <div v-else class="max-h-[30vh] overflow-y-auto cce-scroll mt-2 space-y-0.5">
                     <label
                       v-for="e in empresasCandidatas"
                       :key="e.id"
-                      class="flex items-center gap-2 text-sm text-[#1F2937] cursor-pointer hover:text-[#00A859] py-1.5"
+                      class="flex items-center gap-2 min-h-9 text-sm text-[#1F2937] cursor-pointer hover:text-centros py-1.5"
                     >
                       <input
                         type="checkbox"
                         :value="e.id"
                         v-model="empresasSeleccionadasNuevas"
-                        class="accent-[#00A859] w-4 h-4 shrink-0"
+                        class="accent-centros w-4 h-4 shrink-0"
                       />
                       <span class="flex-1 min-w-0">
                         <span class="block truncate">{{ e.nombre_comercial }}</span>
@@ -624,7 +690,7 @@ function resetear() {
 
                   <p v-if="errorEmpresas" class="cce-err mt-2">{{ errorEmpresas }}</p>
 
-                  <div class="flex justify-end gap-2 mt-3">
+                  <div class="flex flex-wrap justify-end gap-2 mt-3">
                     <button
                       type="button"
                       @click="mostrarSelectorEmpresas = false; empresasSeleccionadasNuevas = []; errorEmpresas = ''"
@@ -656,10 +722,10 @@ function resetear() {
               </div>
             </Transition>
 
-            <!-- Acciones -->
-            <div class="cce-actions">
+            <!-- Acciones (ocultas mientras se muestra el aviso de impacto de arriba) -->
+            <div v-if="!impacto" class="cce-actions">
               <button type="button" @click="$emit('cerrar')" class="cce-btn-ghost flex-1">Cancelar</button>
-              <button type="button" @click="guardar" :disabled="guardando" class="cce-btn-green flex-[2]">
+              <button type="button" @click="guardar()" :disabled="guardando" class="cce-btn-green flex-[2]">
                 <svg v-if="guardando" class="animate-spin w-4 h-4" viewBox="0 0 24 24">
                   <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
                 </svg>
@@ -674,7 +740,7 @@ function resetear() {
             </div>
 
             <!-- X -->
-            <button type="button" class="cce-x" @click="$emit('cerrar')">
+            <button type="button" class="cce-x" @click="$emit('cerrar')" aria-label="Cerrar">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
               </svg>
@@ -699,17 +765,17 @@ function resetear() {
   position: relative; background: #fff;
   border: 1px solid #e5e7eb; border-radius: 2rem; padding: 2.5rem;
   width: 100%; max-width: 760px; max-height: 92vh; overflow-y: auto;
-  box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 24px 48px rgba(0,0,0,.18), 0 0 80px rgba(153,204,51,.07);
-  scrollbar-width: thin; scrollbar-color: #BBE8D0 transparent;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.03), 0 24px 48px rgba(0,0,0,.18), 0 0 80px rgba(48,114,170,.07);
+  scrollbar-width: thin; scrollbar-color: #C7DCEC transparent;
 }
 .cce-card::-webkit-scrollbar       { width: 5px; }
-.cce-card::-webkit-scrollbar-thumb { background: #BBE8D0; border-radius: 3px; }
+.cce-card::-webkit-scrollbar-thumb { background: #C7DCEC; border-radius: 3px; }
 
 .cce-scroll { scrollbar-width: thin; scrollbar-color: #d1d5db transparent; }
 .cce-scroll::-webkit-scrollbar       { width: 4px; }
 .cce-scroll::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
 
-.cce-header   { display: flex; align-items: flex-start; gap: 1rem; }
+.cce-header   { display: flex; align-items: flex-start; gap: 1rem; padding-right: 2.5rem; }
 .cce-icon-box { flex-shrink: 0; width: 52px; height: 52px; background: rgba(31,41,55,0.9); border-radius: 1rem; display: flex; align-items: center; justify-content: center; }
 .cce-icon-box--edit { background: rgba(180,83,9,0.12); }
 .cce-title    { font-size: 1.3rem; font-weight: 900; color: #1F2937; letter-spacing: -.025em; line-height: 1.2; }
@@ -720,11 +786,11 @@ function resetear() {
 .cce-err   { font-size: .7rem; color: #ef4444; font-weight: 700; margin-top: .35rem; margin-left: .25rem; }
 
 .cce-input {
-  width: 100%; border: 2px solid #BBE8D0; border-radius: 1rem; padding: .85rem 1rem;
-  font-size: .875rem; font-weight: 600; color: #1F2937; background: #F0FBF4; outline: none; transition: all .2s;
+  width: 100%; border: 2px solid #C7DCEC; border-radius: 1rem; padding: .85rem 1rem;
+  font-size: .875rem; font-weight: 600; color: #1F2937; background: #F2F7FB; outline: none; transition: all .2s;
 }
 .cce-input::placeholder { color: #9CA3AF; }
-.cce-input:focus        { background: #E6F7EE; border-color: #00A859; box-shadow: 0 0 0 4px rgba(0,168,89,.12); }
+.cce-input:focus        { background: #E5EFF7; border-color: #3072AA; box-shadow: 0 0 0 4px rgba(48,114,170,.12); }
 .cce-input-err          { border-color: #fca5a5 !important; background: #fff5f5 !important; }
 
 .cce-alert-error { display: flex; align-items: center; gap: .75rem; background: #fef2f2; border: 1px solid #fecaca; border-radius: 1rem; padding: .75rem 1rem; color: #dc2626; font-size: .78rem; font-weight: 700; }
@@ -732,39 +798,39 @@ function resetear() {
 .cce-btn-add-empresa {
   display: flex; align-items: center; gap: .35rem;
   font-size: .625rem; font-weight: 900; letter-spacing: .1em; text-transform: uppercase;
-  color: #00A859; background: rgba(0,168,89,.08); border: none; border-radius: .75rem;
-  padding: .4rem .7rem; cursor: pointer; transition: background .2s;
+  color: #3072AA; background: rgba(48,114,170,.08); border: none; border-radius: 9999px;
+  padding: .4rem .7rem; min-height: 36px; cursor: pointer; transition: background .2s;
 }
-.cce-btn-add-empresa:hover { background: rgba(0,168,89,.16); }
+.cce-btn-add-empresa:hover { background: rgba(48,114,170,.16); }
 
 .cce-btn-add-empresa--alt { color: #374151; background: rgba(55,65,81,.06); }
 .cce-btn-add-empresa--alt:hover { background: rgba(55,65,81,.12); }
 
 .cce-chip-empresa {
   display: inline-flex; flex-direction: column; align-items: flex-start; gap: .1rem;
-  font-size: .72rem; font-weight: 700; color: #1F2937; background: #F0FBF4;
-  border: 1px solid #BBE8D0; border-radius: 1rem; padding: .35rem .75rem;
+  font-size: .72rem; font-weight: 700; color: #1F2937; background: #F2F7FB;
+  border: 1px solid #C7DCEC; border-radius: 1rem; padding: .35rem .75rem;
 }
 .cce-chip-empresa-sub {
   font-size: .6rem; font-weight: 600; color: #6b7280; text-transform: none; letter-spacing: 0;
 }
 
 .cce-empresas-selector {
-  border: 2px solid #BBE8D0; border-radius: 1rem; padding: .85rem; background: #FAFDFB;
+  border: 2px solid #C7DCEC; border-radius: 1rem; padding: .85rem; background: #F8FAFC;
 }
 
 .cce-btn-refresh {
   display: flex; align-items: center; gap: .3rem; flex-shrink: 0;
   font-size: .625rem; font-weight: 900; letter-spacing: .08em; text-transform: uppercase;
-  color: #374151; background: #fff; border: 2px solid #e5e7eb; border-radius: .75rem;
-  padding: .5rem .7rem; cursor: pointer; transition: all .2s; white-space: nowrap;
+  color: #374151; background: #fff; border: 2px solid #e5e7eb; border-radius: 9999px;
+  padding: .5rem .7rem; min-height: 36px; cursor: pointer; transition: all .2s; white-space: nowrap;
 }
-.cce-btn-refresh:hover { border-color: #BBE8D0; color: #00A859; }
+.cce-btn-refresh:hover { border-color: #C7DCEC; color: #3072AA; }
 
 .cce-input-sm { padding: .55rem .8rem; font-size: .8rem; }
 
 .cce-btn-ghost-sm, .cce-btn-green-sm {
-  padding: .55rem 1rem; border-radius: .75rem; font-size: .625rem; font-weight: 900;
+  padding: .55rem 1rem; min-height: 36px; border-radius: 9999px; font-size: .625rem; font-weight: 900;
   letter-spacing: .1em; text-transform: uppercase; cursor: pointer; transition: all .2s;
 }
 .cce-btn-ghost-sm { background: #fff; color: #6b7280; border: 2px solid #e5e7eb; }
@@ -775,21 +841,28 @@ function resetear() {
 
 .cce-actions { display: flex; gap: .75rem; margin-top: 2rem; }
 
-.cce-btn-green { display: flex; align-items: center; justify-content: center; gap: .5rem; padding: 1rem 1.5rem; background: linear-gradient(135deg, #1F2937, #374151); color: #fff; border: none; border-radius: 1rem; font-weight: 900; font-size: .7rem; letter-spacing: .15em; text-transform: uppercase; cursor: pointer; box-shadow: 0 6px 20px rgba(31,41,55,.28); transition: all .2s; }
+.cce-btn-green { display: flex; align-items: center; justify-content: center; gap: .5rem; padding: 1rem 1.5rem; background: linear-gradient(135deg, #1F2937, #374151); color: #fff; border: none; border-radius: 9999px; font-weight: 900; font-size: .7rem; letter-spacing: .15em; text-transform: uppercase; cursor: pointer; box-shadow: 0 6px 20px rgba(31,41,55,.28); transition: all .2s; }
 .cce-btn-green:hover:not(:disabled)  { transform: translateY(-1px); box-shadow: 0 10px 28px rgba(31,41,55,.38); }
 .cce-btn-green:active:not(:disabled) { transform: scale(.97); }
 .cce-btn-green:disabled              { opacity: .5; cursor: not-allowed; }
 
-.cce-btn-ghost { display: flex; align-items: center; justify-content: center; padding: 1rem 1.5rem; background: #fff; color: #6b7280; border: 2px solid #e5e7eb; border-radius: 1rem; font-weight: 900; font-size: .7rem; letter-spacing: .15em; text-transform: uppercase; cursor: pointer; transition: all .2s; }
+.cce-btn-ghost { display: flex; align-items: center; justify-content: center; padding: 1rem 1.5rem; background: #fff; color: #6b7280; border: 2px solid #e5e7eb; border-radius: 9999px; font-weight: 900; font-size: .7rem; letter-spacing: .15em; text-transform: uppercase; cursor: pointer; transition: all .2s; }
 .cce-btn-ghost:hover  { border-color: #d1d5db; color: #374151; }
 .cce-btn-ghost:active { transform: scale(.97); }
 
 .cce-x {
-  position: absolute; top: 1.25rem; right: 1.25rem; width: 32px; height: 32px;
-  background: #f3f4f6; border: none; border-radius: .5rem; color: #9ca3af;
+  position: absolute; top: 1.25rem; right: 1.25rem; width: 36px; height: 36px;
+  background: #f3f4f6; border: none; border-radius: 9999px; color: #9ca3af;
   display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background .2s, color .2s;
 }
 .cce-x:hover { background: #e5e7eb; color: #1F2937; }
+
+/* Móvil (360px): menos relleno y acciones apiladas para que nada desborde (como InsertModifyEmpresa) */
+@media (max-width: 640px) {
+  .cce-card    { padding: 1.5rem 1.25rem; }
+  .cce-x       { top: .75rem; right: .75rem; }
+  .cce-actions { flex-direction: column-reverse; margin-top: 1.5rem; }
+}
 
 .cce-overlay-enter-active, .cce-overlay-leave-active { transition: opacity .3s ease; }
 .cce-overlay-enter-from,   .cce-overlay-leave-to    { opacity: 0; }

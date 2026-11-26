@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class EquipoTarea extends Model
 {
@@ -13,9 +14,12 @@ class EquipoTarea extends Model
     protected $casts = [
         'orden'       => 'integer',
         'obligatoria' => 'boolean',
+        // Nombre del alumno responsable: cifrado igual que equipo_miembros.nombre
+        'responsable' => 'encrypted',
     ];
 
-    public function equipo()
+    /** @return BelongsTo<Equipo, $this> */
+    public function equipo(): BelongsTo
     {
         return $this->belongsTo(Equipo::class);
     }

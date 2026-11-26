@@ -7,6 +7,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.2",
+        "barryvdh/laravel-dompdf": "^3.1",
         "doctrine/dbal": "^4.4",
         "laravel/framework": "^12.0",
         "laravel/sanctum": "^4.0",
@@ -14,6 +15,7 @@
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
+        "larastan/larastan": "^3.12",
         "laravel/pail": "^1.2.2",
         "laravel/pint": "^1.24",
         "laravel/sail": "^1.41",
@@ -67,7 +69,8 @@
         ],
         "pre-package-uninstall": [
             "Illuminate\\Foundation\\ComposerScripts::prePackageUninstall"
-        ]
+        ],
+        "analyse": "phpstan analyse --memory-limit=2G"
     },
     "extra": {
         "laravel": {
@@ -81,6 +84,9 @@
         "allow-plugins": {
             "pestphp/pest-plugin": true,
             "php-http/discovery": true
+        },
+        "platform": {
+            "php": "8.3.33"
         }
     },
     "minimum-stability": "stable",

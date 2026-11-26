@@ -1,37 +1,39 @@
 <script setup>
-import { ref, computed, onMounted, onActivated, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { ref, computed, onMounted, onActivated, onUnmounted, watch, nextTick } from 'vue'
+import CabeceraSeccion from '../components/CabeceraSeccion.vue'
+import FiltrosPanel from '../components/FiltrosPanel.vue'
+import FiltroSelect from '../components/FiltroSelect.vue'
+import TituloResultados from '../components/TituloResultados.vue'
+import { usePaginacion } from '../composables/usePaginacion.js'
+import { useRoute } from 'vue-router'
 import api from '../api.js'
 import AccesoEmpresasModal from '../components/AccesoEmpresasModal.vue'
+import ProyectoFichaModal from '../components/ProyectoFichaModal.vue'
+import { useAuthStore } from '../stores/auth.js'
+import { iconoFamilia, colorFamilia } from '../utils/familiaIconos.js'
 
-const router = useRouter()
-
-// ─── Estado de acceso ─────────────────────────────────────────────────────────
-const desbloqueado = ref(sessionStorage.getItem('empresas_module_unlocked') === 'true')
-
-async function onDesbloqueado() {
-  desbloqueado.value = true
-  await cargarDatos()
-}
-
-function onCerrarAcceso() {
-  router.go(-1)
-}
+const auth = useAuthStore()
 
 // ─── Datos ────────────────────────────────────────────────────────────────────
 const empresas   = ref([])
 const familias   = ref([])
-const proyectos  = ref([])
+// todosProyectos: sin filtrar por estado — usado para mostrar el historial completo de
+// proyectos asociados a cada empresa en su card (borradores, completados, archivados...).
+const todosProyectos = ref([])
 const cargando   = ref(false)
 const isLoaded   = ref(false)
 
 // ─── Filtros ──────────────────────────────────────────────────────────────────
 const busqueda        = ref('')
-const filtroFamilia   = ref('')
 const filtroEstado    = ref('')
 const filtroProvincia = ref('')
-const filtroSector    = ref('')
+const filtroSectores  = ref([])   // varios sectores (casillas del lateral)
 const filtroCentro    = ref('')
+const filtroFamilias  = ref([])   // ids de familia (string), casillas del lateral
+const orden           = ref('nombre') // 'nombre' | 'estado' | 'proyectos'
+const sectoresExpandidos = ref(false)
+// «Filtros rápidos»: visible de entrada en escritorio y plegado en móvil; «Más filtros» lo alterna.
+const panelFiltrosAbierto = ref(typeof window === 'undefined' || window.innerWidth >= 1024)
 
 // ─── UI ───────────────────────────────────────────────────────────────────────
 const empresaExpandida = ref(null)
@@ -55,7 +57,7 @@ const empresaEjemplo = {
   email_contacto: 'formacion@herreriacanaria.es',
   persona_contacto: 'Carlos Medina',
   posicion_contacto: 'Responsable de formación',
-  estado_contacto: 'Pendiente',
+  estado_contacto: 'Pendiente de llamar',
   telefono: '922 456 789',
   actividad: 'Fabricación de estructuras metálicas y forja artesanal',
   familias: [{ id: 2, nombre: 'Fabricación Mecánica' }],
@@ -76,21 +78,15 @@ const emailOk       = ref(false)
 const emailError    = ref('')
 
 // ─── Formulario validación ────────────────────────────────────────────────────
-const validForm = ref({ remitente: 'info@viaoptima.es', proyecto_uuid: '', mensaje: '' })
-const enviandoValidacion = ref(false)
-const validacionOk       = ref(false)
-const validacionError    = ref('')
 
 // ─── Cargar datos ─────────────────────────────────────────────────────────────
 onMounted(async () => {
   setTimeout(() => { isLoaded.value = true }, 60)
-  if (!desbloqueado.value) return
   await cargarDatos()
 })
 
 // `onActivated` cubre KeepAlive; el watcher cubre re-navegación a la misma ruta (SidePanel añade ?_t=)
 onActivated(() => {
-  if (!desbloqueado.value) return
   if (route.query.empresa_id) {
     aplicarQueryParams()
   }
@@ -98,7 +94,6 @@ onActivated(() => {
 
 const route = useRoute()
 watch(() => route.fullPath, () => {
-  if (!desbloqueado.value) return
   if (route.query.empresa_id) {
     aplicarQueryParams()
   }
@@ -117,15 +112,7 @@ function aplicarQueryParams() {
   empresaExpandida.value = empresa
   emailOk.value = false
   emailError.value = ''
-  validacionOk.value = false
-  validacionError.value = ''
   emailForm.value = { remitente: 'info@viaoptima.es', asunto: '', mensaje: '' }
-  validForm.value = {
-    remitente: 'info@viaoptima.es',
-    proyecto_uuid: route.query.proyecto_uuid || '',
-    mensaje: '',
-  }
-  if (route.query.panel === 'validacion') panelActivo.value = 'validacion'
 }
 
 async function cargarDatos() {
@@ -138,31 +125,39 @@ async function cargarDatos() {
     ])
     empresas.value  = empRes.data
     familias.value  = famRes.data
-    proyectos.value = proRes.data.filter(p => p.estado === 'propuesta' || p.estado === 'validado')
-    // Inicializar todos los centros cerrados por defecto
-    centrosCerrados.value = new Set(empRes.data.map(e => e.centro_educativo || SIN_CENTRO))
+    todosProyectos.value = proRes.data
   } finally {
     cargando.value = false
   }
 }
 
-// ─── Computed: empresas filtradas ─────────────────────────────────────────────
+// ─── Filtrado ─────────────────────────────────────────────────────────────────
+// Centralizado para poder reutilizarlo en el contador de los chips de sector,
+// excluyendo el propio filtro de sector al contarlo (si no, seleccionar uno haría
+// que el resto de sectores siempre mostrara 0).
+function empresaCumpleFiltros(e, { omitirSector = false, omitirEstado = false, omitirFamilia = false } = {}) {
+  const q = busqueda.value.toLowerCase()
+  const matchNombre  = !q ||
+    (e.nombre_comercial || '').toLowerCase().includes(q) ||
+    (e.razon_social || '').toLowerCase().includes(q)
+  const matchEstado  = omitirEstado || !filtroEstado.value || e.estado_contacto === filtroEstado.value
+  const matchProv    = !filtroProvincia.value || e.provincia === filtroProvincia.value
+  const matchSector  = omitirSector || !filtroSectores.value.length || filtroSectores.value.includes(e.sector)
+  const matchCentro  = !filtroCentro.value   || e.centro_educativo === filtroCentro.value
+  // Una empresa puede tener varias familias: basta con que una coincida
+  const matchFamilia = omitirFamilia || !filtroFamilias.value.length ||
+    (e.familias || []).some(f => filtroFamilias.value.includes(String(f.id)))
+  return matchNombre && matchEstado && matchProv && matchSector && matchCentro && matchFamilia
+}
+
+// Estados canónicos (StoreEmpresaRequest::ESTADOS_CONTACTO), de más a menos avanzado para «Ordenar por estado»
+const ORDEN_ESTADO = ['En colaboración activa', 'Llamado - Información obtenida', 'Llamado - Llamar más tarde', 'Pendiente de llamar', 'Llamado - Negativa', 'Descartada']
+const porNombre = (a, b) => (a.nombre_comercial || '').localeCompare(b.nombre_comercial || '', 'es')
 const empresasFiltradas = computed(() => {
-  return empresas.value
-    .filter(e => {
-      const q = busqueda.value.toLowerCase()
-      const matchNombre  = !q ||
-        (e.nombre_comercial || '').toLowerCase().includes(q) ||
-        (e.razon_social || '').toLowerCase().includes(q)
-      const matchFamilia = !filtroFamilia.value ||
-        (e.familias || []).some(f => String(f.id) === filtroFamilia.value)
-      const matchEstado  = !filtroEstado.value   || e.estado_contacto === filtroEstado.value
-      const matchProv    = !filtroProvincia.value || e.provincia === filtroProvincia.value
-      const matchSector  = !filtroSector.value   || e.sector === filtroSector.value
-      const matchCentro  = !filtroCentro.value   || e.centro_educativo === filtroCentro.value
-      return matchNombre && matchFamilia && matchEstado && matchProv && matchSector && matchCentro
-    })
-    .sort((a, b) => (a.nombre_comercial || '').localeCompare(b.nombre_comercial || '', 'es'))
+  const lista = empresas.value.filter(e => empresaCumpleFiltros(e))
+  if (orden.value === 'estado') return lista.sort((a, b) => (ORDEN_ESTADO.indexOf(a.estado_contacto) + 1 || 99) - (ORDEN_ESTADO.indexOf(b.estado_contacto) + 1 || 99) || porNombre(a, b))
+  if (orden.value === 'proyectos') return lista.sort((a, b) => proyectosDeEmpresa(b.id).length - proyectosDeEmpresa(a.id).length || porNombre(a, b))
+  return lista.sort(porNombre)
 })
 
 // ─── Computed: valores únicos para filtros ────────────────────────────────────
@@ -178,10 +173,61 @@ const centros = computed(() => {
   const set = new Set(empresas.value.map(e => e.centro_educativo).filter(Boolean))
   return [...set].sort((a, b) => a.localeCompare(b, 'es'))
 })
+// Solo las familias vinculadas a alguna empresa del listado (no el catálogo completo)
+const opcionesFamilia = computed(() => {
+  const porId = new Map()
+  empresas.value.forEach(e => (e.familias || []).forEach(f => porId.set(String(f.id), f.nombre)))
+  return [...porId]
+    .map(([value, label]) => ({ value, label }))
+    .sort((a, b) => a.label.localeCompare(b.label, 'es'))
+})
 
-const estadosContacto = ['Contactado', 'Pendiente', 'Sin contactar', 'Reunión fijada', 'No interesado', 'Activo']
+// ─── Chips de sector con contador ──────────────────────────────────────────────
+// El contador refleja cuántas empresas quedarían si se aplicase ese chip, dados el
+// resto de filtros activos (búsqueda, estado, provincia, centro).
+const sectoresConContador = computed(() => {
+  return sectores.value
+    .map(sector => ({
+      sector,
+      count: empresas.value.filter(e =>
+        empresaCumpleFiltros(e, { omitirSector: true }) && e.sector === sector
+      ).length,
+    }))
+    .sort((a, b) => b.count - a.count || a.sector.localeCompare(b.sector, 'es'))
+})
+
+function alternarSector(sector) {
+  filtroSectores.value = filtroSectores.value.includes(sector) ? filtroSectores.value.filter(x => x !== sector) : [...filtroSectores.value, sector]
+}
+function alternarFamilia(id) {
+  const k = String(id)
+  filtroFamilias.value = filtroFamilias.value.includes(k) ? filtroFamilias.value.filter(x => x !== k) : [...filtroFamilias.value, k]
+}
+
+// Desplegable de sectores: plegado por defecto para no ocupar media pantalla al entrar
+const sectoresAbierto = ref(false)
+
+// Nombre de familia profesional canónico a partir del familia_id de un proyecto,
+// para usar el mismo icono/color que /retos (BibliotecaMicroretos.vue) — a
+// diferencia del sector de la empresa, que es texto libre y no garantiza match.
+function familiaNombreProyecto(p) {
+  return familias.value.find(f => String(f.id) === String(p.familia_id))?.nombre || ''
+}
+
+// Los canónicos y, detrás, cualquier valor antiguo que aún tenga alguna empresa en BD
+const estadosContacto = computed(() => [...ORDEN_ESTADO, ...new Set(empresas.value.map(e => e.estado_contacto).filter(est => est && !ORDEN_ESTADO.includes(est)))])
 
 // ─── Interacción empresas ─────────────────────────────────────────────────────
+// Se listan como máximo 6 miniaturas de proyecto por empresa; el resto queda tras
+// un "ver más". Solo una empresa puede estar expandida a la vez, así que basta un
+// único ref en vez de un Set por empresa.
+const MAX_PROYECTOS_VISIBLES = 6
+const proyectosExpandido = ref(false)
+function proyectosVisibles(empresa) {
+  const todos = proyectosDeEmpresa(empresa.id)
+  return proyectosExpandido.value ? todos : todos.slice(0, MAX_PROYECTOS_VISIBLES)
+}
+
 function toggleEmpresa(empresa) {
   if (empresaExpandida.value?.id === empresa.id) {
     empresaExpandida.value = null
@@ -189,17 +235,68 @@ function toggleEmpresa(empresa) {
   } else {
     empresaExpandida.value = empresa
     panelActivo.value = ''
+    proyectosExpandido.value = false
     emailOk.value = false
     emailError.value = ''
-    validacionOk.value = false
-    validacionError.value = ''
     emailForm.value = { remitente: 'info@viaoptima.es', asunto: '', mensaje: '' }
-    validForm.value = { remitente: 'info@viaoptima.es', proyecto_uuid: '', mensaje: '' }
   }
 }
 
+// Enviar email / validación piden la contraseña del módulo una vez por sesión. El
+// backend es quien la exige (423 si la sesión no está desbloqueada); este flag solo
+// evita pedirla de nuevo en cada panel.
+const envioDesbloqueado = ref(false)
+const panelPendiente    = ref('')   // panel que se abrirá al acertar la contraseña
+
 function abrirPanel(panel) {
-  panelActivo.value = panelActivo.value === panel ? '' : panel
+  if (panelActivo.value === panel) {
+    panelActivo.value = ''
+    return
+  }
+  if (!envioDesbloqueado.value) {
+    panelPendiente.value = panel
+    return
+  }
+  panelActivo.value = panel
+}
+
+function onEnvioDesbloqueado() {
+  envioDesbloqueado.value = true
+  panelActivo.value = panelPendiente.value
+  panelPendiente.value = ''
+}
+
+// La sesión del servidor puede haber caducado: se vuelve a pedir la contraseña
+function pedirDesbloqueoDeNuevo(panel) {
+  envioDesbloqueado.value = false
+  panelPendiente.value = panel
+}
+
+// ─── Proyectos asociados a cada empresa ────────────────────────────────────────
+function proyectosDeEmpresa(empresaId) {
+  return todosProyectos.value.filter(p => String(p.empresa_id) === String(empresaId))
+}
+
+// Misma nomenclatura de estado que ProyectoCard.vue, para que la etiqueta de un
+// proyecto se lea igual aquí que en el Taller de Ideas.
+function etiquetaProyecto(p) {
+  if (p.estado === 'en_edicion') return 'En edición'
+  if (p.estado === 'archivado')  return 'Archivado'
+  if (p.estado === 'completado') return 'Completado'
+  if (p.estado === 'validado')   return 'Validado'
+  return 'Sin validar'
+}
+function colorProyecto(p) {
+  if (p.estado === 'en_edicion') return 'bg-amber-50 border-amber-200 text-amber-700'
+  if (p.estado === 'archivado')  return 'bg-gray-100 border-gray-200 text-gray-400'
+  if (p.estado === 'completado') return 'bg-sky-50 border-sky-300 text-sky-700'
+  if (p.estado === 'validado')   return 'bg-empresas/10 border-empresas/30 text-empresas-dark'
+  return 'bg-violet-50 border-violet-300 text-violet-700'
+}
+
+const proyectoFichaUuid = ref(null)
+function abrirFichaProyecto(uuid) {
+  proyectoFichaUuid.value = uuid
 }
 
 // ─── Enviar email ─────────────────────────────────────────────────────────────
@@ -213,37 +310,21 @@ async function enviarEmail() {
     emailForm.value.asunto = ''
     emailForm.value.mensaje = ''
   } catch (e) {
+    if (e.response?.status === 423) return pedirDesbloqueoDeNuevo('email')
     emailError.value = e.response?.data?.message || 'Error al enviar el correo.'
   } finally {
     enviandoEmail.value = false
   }
 }
 
-// ─── Enviar enlace de validación ──────────────────────────────────────────────
-async function enviarValidacionEmail() {
-  enviandoValidacion.value = true
-  validacionError.value = ''
-  validacionOk.value = false
-  try {
-    await api.post(`/empresas/${empresaExpandida.value.id}/enviar-validacion`, validForm.value)
-    validacionOk.value = true
-    validForm.value.proyecto_uuid = ''
-    validForm.value.mensaje = ''
-  } catch (e) {
-    validacionError.value = e.response?.data?.message || 'Error al enviar el enlace.'
-  } finally {
-    enviandoValidacion.value = false
-  }
-}
-
 // ─── helpers ──────────────────────────────────────────────────────────────────
 const estadoColor = {
-  'Activo':         'bg-emerald-50 text-emerald-700 border-emerald-200',
-  'Contactado':     'bg-blue-50 text-blue-700 border-blue-200',
-  'Reunión fijada': 'bg-amber-50 text-amber-700 border-amber-200',
-  'Pendiente':      'bg-orange-50 text-orange-700 border-orange-200',
-  'Sin contactar':  'bg-gray-100 text-gray-500 border-gray-200',
-  'No interesado':  'bg-red-50 text-red-700 border-red-200',
+  'En colaboración activa':         'bg-empresas/10 text-empresas-dark border-empresas/20',
+  'Llamado - Información obtenida': 'bg-blue-50 text-blue-700 border-blue-200',
+  'Llamado - Llamar más tarde':     'bg-amber-50 text-amber-700 border-amber-200',
+  'Pendiente de llamar':            'bg-orange-50 text-orange-700 border-orange-200',
+  'Llamado - Negativa':             'bg-red-50 text-red-700 border-red-200',
+  'Descartada':                     'bg-gray-100 text-gray-500 border-gray-200',
 }
 function badgeEstado(e) {
   return estadoColor[e] || 'bg-gray-100 text-gray-500 border-gray-200'
@@ -251,93 +332,163 @@ function badgeEstado(e) {
 
 function limpiarFiltros() {
   busqueda.value        = ''
-  filtroFamilia.value   = ''
   filtroEstado.value    = ''
   filtroProvincia.value = ''
-  filtroSector.value    = ''
+  filtroSectores.value  = []
   filtroCentro.value    = ''
+  filtroFamilias.value  = []
 }
 
-// ─── Acordeón de centros ──────────────────────────────────────────────────────
-const centrosCerrados = ref(new Set())
-
-function toggleCentro(nombre) {
-  const s = new Set(centrosCerrados.value)
-  s.has(nombre) ? s.delete(nombre) : s.add(nombre)
-  centrosCerrados.value = s
+// ─── Filtro de estado con contadores ──────────────────────────────────────────
+// Sustituye a los antiguos chips de estadísticas (activas, contactadas, reunión…):
+// cada opción cuenta las empresas que quedarían con ese estado, dados el resto de
+// filtros activos (mismo criterio que los chips de sector).
+// Estado de contacto (lateral, radio con contador de las empresas que quedarían)
+const ESTADO_PUNTO = {
+  'En colaboración activa': 'bg-empresas', 'Llamado - Información obtenida': 'bg-blue-500', 'Llamado - Llamar más tarde': 'bg-amber-500',
+  'Pendiente de llamar': 'bg-orange-500', 'Llamado - Negativa': 'bg-red-500', 'Descartada': 'bg-gray-300',
 }
+const conteoEstados = computed(() => {
+  const base = empresas.value.filter(e => empresaCumpleFiltros(e, { omitirEstado: true }))
+  return { '': base.length, ...Object.fromEntries(estadosContacto.value.map(est => [est, base.filter(e => e.estado_contacto === est).length])) }
+})
+const estadosConEmpresas = computed(() => estadosContacto.value.filter(est => conteoEstados.value[est] || filtroEstado.value === est))
+// Familias del lateral con contador (sin el propio filtro de familia)
+const familiasPanel = computed(() => {
+  const base = empresas.value.filter(e => empresaCumpleFiltros(e, { omitirFamilia: true }))
+  return opcionesFamilia.value.map(o => ({ id: String(o.value), nombre: o.label, n: base.filter(e => (e.familias || []).some(f => String(f.id) === String(o.value))).length }))
+    .filter(f => f.n || filtroFamilias.value.includes(f.id))
+    .sort((a, b) => b.n - a.n || a.nombre.localeCompare(b.nombre, 'es'))
+})
+const sectoresVisibles = computed(() => {
+  const todos = sectoresConContador.value
+  if (sectoresExpandidos.value || todos.length <= 8) return todos
+  return [...todos.slice(0, 8), ...todos.slice(8).filter(s => filtroSectores.value.includes(s.sector))]
+})
 
-const SIN_CENTRO = '— Sin centro asignado —'
+const nombreFamilia = (id) => opcionesFamilia.value.find(o => String(o.value) === String(id))?.label || ''
+// Título de resultados: una sola familia elegida
+const nivelesTitulo = computed(() => filtroFamilias.value.length === 1
+  ? [{ etiqueta: 'Familia profesional', valor: nombreFamilia(filtroFamilias.value[0]), subir: () => {}, quitar: () => { filtroFamilias.value = [] } }]
+  : [])
 
-const empresasPorCentro = computed(() => {
-  const mapa = {}
-  for (const e of empresasFiltradas.value) {
-    const key = e.centro_educativo || SIN_CENTRO
-    if (!mapa[key]) mapa[key] = []
-    mapa[key].push(e)
+const filtrosLateral = computed(() => filtroFamilias.value.length + filtroSectores.value.length + (filtroEstado.value ? 1 : 0))
+const hayFiltrosActivos = computed(() =>
+  !!(busqueda.value || filtroEstado.value || filtroProvincia.value || filtroSectores.value.length || filtroCentro.value || filtroFamilias.value.length))
+
+// ── Paginación (12: se reparte entero en 1, 2, 3 o 4 columnas) ───────────────
+const POR_PAGINA = 12
+const { pagina, totalPaginas, itemsPagina } = usePaginacion(empresasFiltradas, POR_PAGINA)
+watch([empresasFiltradas, orden], () => { pagina.value = 0 })
+const paginasVisibles = computed(() => {
+  const n = totalPaginas.value, a = pagina.value
+  const ini = Math.max(0, Math.min(a - 2, n - 5)), fin = Math.min(n, ini + 5)
+  return Array.from({ length: fin - ini }, (_, i) => ini + i)
+})
+function irAPagina(i) {
+  pagina.value = i
+  document.getElementById('resultados-empresas')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+const columnas = computed(() => panelFiltrosAbierto.value ? 'md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3' : 'md:grid-cols-2 xl:grid-cols-3')
+
+// ── Ficha de la empresa (antes, acordeón; ahora ventana accesible) ───────────
+// Abrirla = toggleEmpresa (reinicia formularios). Escape la cierra salvo que haya algo encima
+// (contraseña del envío o ficha de un proyecto), y el foco vuelve a la tarjeta.
+function abrirFicha(e, panel = '') {
+  if (empresaExpandida.value?.id !== e.id) toggleEmpresa(e)
+  if (panel) abrirPanel(panel)
+}
+function cerrarFicha() { empresaExpandida.value = null; panelActivo.value = '' }
+const panelFicha = ref(null)
+let focoPrevio = null
+function alTeclearFicha(ev) {
+  if (!panelFicha.value || panelPendiente.value || proyectoFichaUuid.value) return
+  if (ev.key === 'Escape') { cerrarFicha(); return }
+  if (ev.key !== 'Tab') return
+  const nodos = [...panelFicha.value.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')].filter(n => n.offsetParent !== null)
+  if (!nodos.length) return
+  const [primero, ultimo] = [nodos[0], nodos[nodos.length - 1]]
+  if (!panelFicha.value.contains(document.activeElement)) { ev.preventDefault(); primero.focus(); return }
+  if (ev.shiftKey && document.activeElement === primero) { ev.preventDefault(); ultimo.focus() }
+  else if (!ev.shiftKey && document.activeElement === ultimo) { ev.preventDefault(); primero.focus() }
+}
+watch(() => !!empresaExpandida.value, async (v, antes) => {
+  if (v) {
+    focoPrevio = document.activeElement
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', alTeclearFicha)
+    await nextTick()
+    panelFicha.value?.focus()
+  } else if (antes) {
+    document.removeEventListener('keydown', alTeclearFicha)
+    document.body.style.overflow = ''
+    focoPrevio?.focus?.()
   }
-  return mapa
 })
 
-const centrosOrdenados = computed(() => {
-  const keys = Object.keys(empresasPorCentro.value)
-  return keys
-    .filter(k => k !== SIN_CENTRO)
-    .sort((a, b) => a.localeCompare(b, 'es'))
-    .concat(keys.includes(SIN_CENTRO) ? [SIN_CENTRO] : [])
+// ── Menú «⋯» de cada tarjeta ─────────────────────────────────────────────────
+const menuEmpresa = ref(null)
+function cerrarMenuFuera(ev) { if (!ev.target.closest?.('[data-menu-raiz]')) menuEmpresa.value = null }
+function cerrarMenuEsc(ev) { if (ev.key === 'Escape') menuEmpresa.value = null }
+watch(menuEmpresa, (v) => {
+  const m = v ? 'addEventListener' : 'removeEventListener'
+  document[m]('click', cerrarMenuFuera, true)
+  document[m]('keydown', cerrarMenuEsc)
 })
-
-// ─── Estadísticas de contacto ─────────────────────────────────────────────────
-const estadisticasContacto = computed(() => {
-  const counts = {}
-  for (const e of empresas.value) {
-    const est = e.estado_contacto || 'Sin contactar'
-    counts[est] = (counts[est] || 0) + 1
-  }
-  return counts
+onUnmounted(() => {
+  document.removeEventListener('click', cerrarMenuFuera, true)
+  document.removeEventListener('keydown', cerrarMenuEsc)
+  document.removeEventListener('keydown', alTeclearFicha)
+  document.body.style.overflow = ''
 })
-
-const totalActivas     = computed(() => estadisticasContacto.value['Activo'] || 0)
-const totalContactadas = computed(() => estadisticasContacto.value['Contactado'] || 0)
-const totalReunion     = computed(() => estadisticasContacto.value['Reunión fijada'] || 0)
-
+const contactoDe = (e) => e.email_contacto || e.email_general || ''
+const avisoCopia = ref('')
+async function copiarEmail(email) {
+  try { await navigator.clipboard.writeText(email); avisoCopia.value = 'Email copiado' } catch { avisoCopia.value = email }
+  setTimeout(() => { avisoCopia.value = '' }, 2500)
+}
 
 </script>
 
 <template>
-  <div class="min-h-screen font-sans text-[#1F2937] pt-12 md:pt-12">
+  <div class="min-h-screen font-sans text-[#1F2937] pt-16 md:pt-16">
 
     <!-- Fondo decorativo -->
     <div class="fixed top-0 right-0 w-150 h-100
-                bg-[#99CC33] opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
+                bg-primary-400 opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
 
     <!-- ══════════════════════════════════════════════════════
-         GATE: Modal oscuro de contraseña
+         CONTRASEÑA: antes de enviar email o validación a una empresa
     ═════════════════════════════════════════════════════════ -->
-    <AccesoEmpresasModal v-if="!desbloqueado" @desbloqueado="onDesbloqueado" @cerrar="onCerrarAcceso" />
+    <AccesoEmpresasModal v-if="panelPendiente" :motivo="panelPendiente" @desbloqueado="onEnvioDesbloqueado" @cerrar="panelPendiente = ''" />
+
+    <!-- ══════════════════════════════════════════════════════
+         FICHA DE PROYECTO: al pulsar una miniatura en una empresa
+    ═════════════════════════════════════════════════════════ -->
+    <ProyectoFichaModal :proyecto-uuid="proyectoFichaUuid" @close="proyectoFichaUuid = null" />
 
     <!-- ══════════════════════════════════════════════════════
          MODAL BIENVENIDA: ¿Qué necesitas?
     ═════════════════════════════════════════════════════════ -->
     <Transition name="bv-fade">
-      <div v-if="desbloqueado && mostrarBienvenida"
+      <div v-if="mostrarBienvenida"
            class="fixed inset-0 z-[9998] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
         <div class="relative bg-white border border-gray-200 rounded-[2rem]
                     shadow-2xl max-w-md w-full p-8">
 
           <!-- Cabecera -->
           <div class="flex items-center gap-3 mb-6">
-            <div class="w-12 h-12 rounded-2xl bg-[#00A859]/10 border border-[#00A859]/20
+            <div class="w-12 h-12 rounded-2xl bg-empresas/10 border border-empresas/20
                         flex items-center justify-center shrink-0">
-              <svg class="w-6 h-6 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg class="w-6 h-6 text-empresas-dark" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
                 <polyline points="9 22 9 12 15 12 15 22" stroke-width="2"/>
               </svg>
             </div>
             <div>
-              <p class="text-[10px] font-black uppercase tracking-widest text-[#00A859] mb-0.5">Directorio de empresas</p>
-              <h2 class="text-xl font-black tracking-tight text-[#121212]">¿Qué necesitas?</h2>
+              <p class="text-[10px] font-black uppercase tracking-widest text-empresas-dark mb-0.5">Directorio de empresas</p>
+              <h2 class="text-xl font-black tracking-tight text-azul-noche">¿Qué necesitas?</h2>
             </div>
           </div>
 
@@ -346,12 +497,12 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
 
             <button @click="abrirBienvenida('contactar')"
                     class="w-full flex items-start gap-4 p-4 rounded-2xl border border-gray-200
-                           bg-gray-50 hover:bg-[#00A859]/8 hover:border-[#00A859]/30
+                           bg-gray-50 hover:bg-empresas/8 hover:border-empresas/30
                            transition-all duration-200 text-left group">
-              <div class="w-9 h-9 rounded-xl bg-[#00A859]/10 border border-[#00A859]/20
+              <div class="w-9 h-9 rounded-xl bg-empresas/10 border border-empresas/20
                           flex items-center justify-center shrink-0 mt-0.5
-                          group-hover:bg-[#00A859]/20 transition-colors">
-                <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          group-hover:bg-empresas/20 transition-colors">
+                <svg class="w-4 h-4 text-empresas" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                 </svg>
@@ -359,24 +510,6 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
               <div>
                 <p class="font-black text-[#1F2937] text-sm mb-0.5">Contactar empresa</p>
                 <p class="text-xs text-gray-500 leading-relaxed">Enviar un email directo a la empresa.</p>
-              </div>
-            </button>
-
-            <button @click="abrirBienvenida('validar')"
-                    class="w-full flex items-start gap-4 p-4 rounded-2xl border border-gray-200
-                           bg-gray-50 hover:bg-amber-50 hover:border-amber-200
-                           transition-all duration-200 text-left group">
-              <div class="w-9 h-9 rounded-xl bg-amber-50 border border-amber-200
-                          flex items-center justify-center shrink-0 mt-0.5
-                          group-hover:bg-amber-100 transition-colors">
-                <svg class="w-4 h-4 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-              </div>
-              <div>
-                <p class="font-black text-[#1F2937] text-sm mb-0.5">Enviar validación</p>
-                <p class="text-xs text-gray-500 leading-relaxed">Compartir enlace de propuesta con la empresa.</p>
               </div>
             </button>
 
@@ -401,7 +534,7 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
           </div>
 
           <button @click="abrirBienvenida('listar')"
-                  class="w-full text-center text-[10px] font-bold text-gray-400
+                  class="w-full min-h-9 rounded-full text-center text-[10px] font-bold text-gray-400
                          hover:text-gray-600 transition-colors py-1">
             Saltar
           </button>
@@ -428,8 +561,8 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                 {{ modoEjemplo === 'contactar' ? 'el formulario de contacto' : 'el formulario de validación' }}
               </p>
             </div>
-            <button @click="mostrarEjemplo = false"
-                    class="w-8 h-8 rounded-xl bg-gray-100 hover:bg-gray-200
+            <button @click="mostrarEjemplo = false" aria-label="Cerrar"
+                    class="w-9 h-9 shrink-0 rounded-full bg-gray-100 hover:bg-gray-200
                            flex items-center justify-center transition-colors">
               <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
@@ -442,7 +575,7 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
             <div :class="[
               'flex items-start gap-3 p-4 rounded-2xl border',
               modoEjemplo === 'contactar'
-                ? 'bg-[#00A859]/8 border-[#00A859]/25 text-[#00A859]'
+                ? 'bg-empresas/8 border-empresas/25 text-empresas'
                 : 'bg-amber-50 border-amber-200 text-amber-700'
             ]">
               <svg class="w-5 h-5 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -456,10 +589,6 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                     Busca la empresa en el listado, despliégala y pulsa
                     <strong>«Enviar email»</strong> para contactarla directamente.
                   </template>
-                  <template v-else>
-                    Busca la empresa en el listado, despliégala y pulsa
-                    <strong>«Enviar validación»</strong> para compartir el enlace de la propuesta.
-                  </template>
                 </p>
               </div>
             </div>
@@ -470,8 +599,8 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
 
             <!-- Cabecera empresa -->
             <div class="flex items-center gap-4 px-5 py-4">
-              <div class="w-9 h-9 rounded-xl bg-[#00A859]/10 border border-[#00A859]/15
-                          flex items-center justify-center shrink-0 font-black text-sm text-[#00A859]">
+              <div class="w-9 h-9 rounded-xl bg-empresas/10 border border-empresas/15
+                          flex items-center justify-center shrink-0 font-black text-sm text-empresas">
                 T
               </div>
               <div class="flex-1 min-w-0">
@@ -491,7 +620,7 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                   <span class="text-[10px] text-gray-400">
                     {{ empresaEjemplo.municipio }}, {{ empresaEjemplo.provincia }}
                   </span>
-                  <span class="text-[10px] text-[#00A859]">{{ empresaEjemplo.email_contacto }}</span>
+                  <span class="text-[10px] text-empresas">{{ empresaEjemplo.email_contacto }}</span>
                 </div>
               </div>
             </div>
@@ -514,11 +643,11 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                     </div>
                     <div class="flex justify-between gap-3">
                       <span class="text-[10px] text-gray-400">Teléfono</span>
-                      <span class="text-[10px] text-[#00A859]">{{ empresaEjemplo.telefono }}</span>
+                      <span class="text-[10px] text-empresas">{{ empresaEjemplo.telefono }}</span>
                     </div>
                     <div class="flex justify-between gap-3">
                       <span class="text-[10px] text-gray-400">Email general</span>
-                      <span class="text-[10px] text-[#00A859]">{{ empresaEjemplo.email_general }}</span>
+                      <span class="text-[10px] text-empresas">{{ empresaEjemplo.email_general }}</span>
                     </div>
                     <div class="flex justify-between gap-3">
                       <span class="text-[10px] text-gray-400">Persona de contacto</span>
@@ -538,8 +667,8 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                     <p class="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-2">Familias profesionales</p>
                     <div class="flex flex-wrap gap-1.5">
                       <span v-for="f in empresaEjemplo.familias" :key="f.id"
-                            class="text-[9px] px-2 py-0.5 rounded-full bg-[#00A859]/10
-                                   border border-[#00A859]/20 text-[#00A859] font-medium">
+                            class="text-[9px] px-2 py-0.5 rounded-full bg-empresas/10
+                                   border border-empresas/20 text-empresas font-medium">
                         {{ f.nombre }}
                       </span>
                     </div>
@@ -550,21 +679,21 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                 <div class="space-y-3">
                   <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Acciones</p>
 
-                  <div class="grid grid-cols-2 gap-2 items-end">
+                  <div class="grid grid-cols-1 gap-2 items-end">
 
                     <!-- Botón Enviar email -->
                     <div class="flex flex-col items-stretch gap-1">
                       <div v-if="modoEjemplo === 'contactar'"
                            class="flex flex-col items-center gap-0.5 animate-bounce">
-                        <span class="text-[9px] font-black text-[#00A859] uppercase tracking-wider">pulsa aquí</span>
-                        <svg class="w-4 h-4 text-[#00A859]" fill="currentColor" viewBox="0 0 24 24">
+                        <span class="text-[9px] font-black text-empresas uppercase tracking-wider">pulsa aquí</span>
+                        <svg class="w-4 h-4 text-empresas" fill="currentColor" viewBox="0 0 24 24">
                           <path d="M12 20l-8-8h5V4h6v8h5z"/>
                         </svg>
                       </div>
                       <button :class="[
-                        'flex items-center justify-center gap-2 py-2.5 px-3 rounded-2xl border text-xs font-bold transition-all',
+                        'flex items-center justify-center gap-2 py-2.5 px-3 rounded-full border text-xs font-bold transition-all',
                         modoEjemplo === 'contactar'
-                          ? 'bg-[#00A859]/8 border-[#00A859]/25 text-[#00A859] ring-2 ring-[#00A859]/40 ring-offset-1'
+                          ? 'bg-empresas/8 border-empresas/25 text-empresas ring-2 ring-empresas/40 ring-offset-1'
                           : 'bg-gray-50 border-gray-200 text-gray-600'
                       ]">
                         <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -575,28 +704,6 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                       </button>
                     </div>
 
-                    <!-- Botón Enviar validación -->
-                    <div class="flex flex-col items-stretch gap-1">
-                      <div v-if="modoEjemplo === 'validar'"
-                           class="flex flex-col items-center gap-0.5 animate-bounce">
-                        <span class="text-[9px] font-black text-amber-600 uppercase tracking-wider">pulsa aquí</span>
-                        <svg class="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M12 20l-8-8h5V4h6v8h5z"/>
-                        </svg>
-                      </div>
-                      <button :class="[
-                        'flex items-center justify-center gap-2 py-2.5 px-3 rounded-2xl border text-xs font-bold transition-all',
-                        modoEjemplo === 'validar'
-                          ? 'bg-amber-50 border-amber-200 text-amber-700 ring-2 ring-amber-300/60 ring-offset-1'
-                          : 'bg-gray-50 border-gray-200 text-gray-600'
-                      ]">
-                        <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                        </svg>
-                        Enviar validación
-                      </button>
-                    </div>
 
                   </div>
 
@@ -604,10 +711,6 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
                     <template v-if="modoEjemplo === 'contactar'">
                       Al pulsar «Enviar email» se abre un formulario para escribir asunto y mensaje.
                       El correo se envía a la dirección registrada de la empresa.
-                    </template>
-                    <template v-else>
-                      Al pulsar «Enviar validación» podrás seleccionar una propuesta publicada
-                      y enviar su enlace a la empresa para que la valide.
                     </template>
                   </p>
                 </div>
@@ -619,8 +722,8 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
           <!-- Footer -->
           <div class="px-6 py-5">
             <button @click="mostrarEjemplo = false"
-                    class="w-full py-3 rounded-full bg-[#00A859] text-white text-xs font-black
-                           uppercase tracking-widest transition-all hover:bg-[#009950]">
+                    class="w-full py-3 rounded-full bg-empresas text-white text-xs font-black
+                           uppercase tracking-widest transition-all hover:bg-empresas/90">
               Entendido, ir al listado
             </button>
           </div>
@@ -633,606 +736,551 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
          CONTENIDO PRINCIPAL
     ═════════════════════════════════════════════════════════ -->
     <div
-      v-if="desbloqueado"
-      class="relative z-10 max-w-5xl mx-auto px-6 py-10 pl-24"
+      class="relative z-10 mx-auto max-w-[90rem] px-4 pb-10 pt-5 sm:px-6 lg:px-8"
       :class="isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3'"
       style="transition: opacity 0.4s ease, transform 0.4s ease"
     >
 
-      <!-- Cabecera -->
-      <div class="mb-8">
-        <div class="flex items-center gap-3 mb-2">
-          <div class="w-10 h-10 rounded-xl bg-[#00A859]/10 border border-[#00A859]/20
-                      flex items-center justify-center shrink-0">
-            <svg class="w-5 h-5 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" stroke-width="1.5"/>
-              <polyline points="9 22 9 12 15 12 15 22" stroke-width="1.5"/>
-            </svg>
-          </div>
-          <div>
-            <h1 class="text-2xl font-black tracking-tight text-[#121212]">
-              Directorio de <span class="text-[#00A859]">Empresas</span>
-            </h1>
-            <p class="text-gray-400 text-xs">{{ empresas.length }} empresas en la base de datos</p>
-          </div>
-        </div>
-        <button @click="mostrarBienvenida = true"
-                class="mt-2 text-[10px] font-bold text-gray-400 hover:text-[#00A859]
-                       transition-colors flex items-center gap-1.5">
-          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-          </svg>
-          ¿Qué necesitas? Ver guía
-        </button>
-      </div>
-
-      <!-- Stats chips -->
-      <div v-if="!cargando && empresas.length"
-           class="mb-5 flex flex-wrap gap-3 items-center">
-        <div class="flex flex-wrap gap-2 items-center
-                    bg-white/70 rounded-[1.4rem] border border-gray-100 shadow-sm
-                    px-2 py-1.5">
-
-          <!-- Total empresas -->
-          <div class="flex items-center gap-2 px-3 py-1.5 bg-white rounded-2xl border border-gray-100 shadow-sm">
-            <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <!-- Cabecera de sección (mismo estilo que Retos y proyectos) -->
+      <CabeceraSeccion data-tour="emp-cabecera" titulo="Directorio de" destacado="Empresas" color="text-empresas" volver="/seccion/empresas"
+                       subtitulo="Consulta y contacta con las empresas registradas en la base de datos de DUALAB."
+                       class="mb-5">
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- Guía: qué se puede hacer en esta pantalla -->
+          <button type="button" data-tour="emp-ayuda" @click="mostrarBienvenida = true" class="accion-secundaria" title="¿Qué necesitas? Opciones y guía de esta pantalla">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5"/>
+                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
             </svg>
-            <span class="font-black text-xl text-[#1F2937]">{{ empresas.length }}</span>
-            <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">empresas</span>
-          </div>
-
-          <!-- Total centros -->
-          <div class="flex items-center gap-2 px-3 py-1.5 bg-white rounded-2xl border border-gray-100 shadow-sm">
-            <svg class="w-4 h-4 text-[#99CC33]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/>
-            </svg>
-            <span class="font-black text-xl text-[#1F2937]">{{ centrosOrdenados.length }}</span>
-            <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">centros</span>
-          </div>
-
-          <!-- Activas -->
-          <div v-if="totalActivas > 0"
-               class="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 rounded-2xl border border-emerald-100 shadow-sm">
-            <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-            <span class="font-black text-xl text-emerald-700">{{ totalActivas }}</span>
-            <span class="text-xs font-semibold text-emerald-600 uppercase tracking-wider">activas</span>
-          </div>
-
-          <!-- Contactadas -->
-          <div v-if="totalContactadas > 0"
-               class="flex items-center gap-2 px-3 py-1.5 bg-blue-50 rounded-2xl border border-blue-100 shadow-sm">
-            <svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-            </svg>
-            <span class="font-black text-xl text-blue-700">{{ totalContactadas }}</span>
-            <span class="text-xs font-semibold text-blue-600 uppercase tracking-wider">contactadas</span>
-          </div>
-
-          <!-- Reunión fijada -->
-          <div v-if="totalReunion > 0"
-               class="flex items-center gap-2 px-3 py-1.5 bg-amber-50 rounded-2xl border border-amber-100 shadow-sm">
-            <svg class="w-4 h-4 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-            </svg>
-            <span class="font-black text-xl text-amber-700">{{ totalReunion }}</span>
-            <span class="text-xs font-semibold text-amber-600 uppercase tracking-wider">reunión</span>
-          </div>
-
-          <!-- Filtrado activo -->
-          <div v-if="empresasFiltradas.length !== empresas.length"
-               class="flex items-center gap-2 px-3 py-1.5 bg-violet-50 rounded-2xl border border-violet-100 shadow-sm">
-            <svg class="w-4 h-4 text-violet-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/>
-            </svg>
-            <span class="font-black text-xl text-violet-700">{{ empresasFiltradas.length }}</span>
-            <span class="text-xs font-semibold text-violet-600 uppercase tracking-wider">mostrando</span>
-          </div>
-
-        </div>
-      </div>
-
-      <!-- Filtros -->
-      <div class="mb-5 rounded-[2rem] bg-white border border-gray-100 shadow-sm p-4">
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-
-          <!-- Búsqueda -->
-          <div class="relative lg:col-span-2">
-            <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-300 pointer-events-none"
-                 fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <circle cx="11" cy="11" r="8" stroke-width="2"/>
-              <path d="M21 21l-4.35-4.35" stroke-width="2" stroke-linecap="round"/>
-            </svg>
-            <input
-              v-model="busqueda"
-              type="text"
-              placeholder="Buscar empresa por nombre..."
-              class="w-full pl-9 pr-4 py-2.5 bg-white border border-gray-200 rounded-2xl
-                     text-sm text-[#1F2937] placeholder-gray-400 shadow-sm
-                     focus:outline-none focus:border-[#00A859] transition-colors"
-            />
-          </div>
-
-          <select v-model="filtroFamilia"
-                  class="px-3 py-2.5 bg-white border border-gray-200 rounded-2xl shadow-sm
-                         text-sm text-[#1F2937] focus:outline-none focus:border-[#00A859] transition-colors">
-            <option value="">Todas las familias</option>
-            <option v-for="f in familias" :key="f.id" :value="String(f.id)">{{ f.nombre }}</option>
-          </select>
-
-          <select v-model="filtroCentro"
-                  class="px-3 py-2.5 bg-white border border-gray-200 rounded-2xl shadow-sm
-                         text-sm text-[#1F2937] focus:outline-none focus:border-[#00A859] transition-colors">
-            <option value="">Todos los centros</option>
-            <option v-for="c in centros" :key="c" :value="c">{{ c }}</option>
-          </select>
-
-          <select v-model="filtroEstado"
-                  class="px-3 py-2.5 bg-white border border-gray-200 rounded-2xl shadow-sm
-                         text-sm text-[#1F2937] focus:outline-none focus:border-[#00A859] transition-colors">
-            <option value="">Todos los estados</option>
-            <option v-for="e in estadosContacto" :key="e" :value="e">{{ e }}</option>
-          </select>
-
-          <select v-model="filtroProvincia"
-                  class="px-3 py-2.5 bg-white border border-gray-200 rounded-2xl shadow-sm
-                         text-sm text-[#1F2937] focus:outline-none focus:border-[#00A859] transition-colors">
-            <option value="">Todas las provincias</option>
-            <option v-for="p in provincias" :key="p" :value="p">{{ p }}</option>
-          </select>
-
-          <select v-model="filtroSector"
-                  class="px-3 py-2.5 bg-white border border-gray-200 rounded-2xl shadow-sm
-                         text-sm text-[#1F2937] focus:outline-none focus:border-[#00A859] transition-colors">
-            <option value="">Todos los sectores</option>
-            <option v-for="s in sectores" :key="s" :value="s">{{ s }}</option>
-          </select>
-
-        </div>
-
-        <div class="flex items-center justify-between mt-3">
-          <p class="text-[10px] text-gray-400">
-            {{ empresasFiltradas.length }} empresa{{ empresasFiltradas.length !== 1 ? 's' : '' }}
-            en {{ centrosOrdenados.length }} centro{{ centrosOrdenados.length !== 1 ? 's' : '' }}
-          </p>
-          <button
-            v-if="busqueda || filtroFamilia || filtroEstado || filtroProvincia || filtroSector || filtroCentro"
-            @click="limpiarFiltros"
-            class="text-[10px] font-bold text-gray-400 hover:text-[#00A859] transition-colors uppercase tracking-widest"
-          >
-            Limpiar filtros
+            Ayuda
           </button>
         </div>
-      </div>
+      </CabeceraSeccion>
 
-      <!-- Cargando -->
-      <div v-if="cargando" class="flex flex-col items-center justify-center py-24">
-        <svg class="animate-spin w-10 h-10 text-[#00A859] mb-3" viewBox="0 0 24 24">
-          <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
-        </svg>
-        <p class="text-gray-400 text-xs uppercase tracking-widest">Cargando empresas...</p>
-      </div>
+      <!-- Filtros principales (FiltrosPanel común): buscador + «Más filtros» · centro y provincia -->
+      <FiltrosPanel data-tour="emp-filtros" separadores v-model:busqueda="busqueda" placeholder="Buscar empresa por nombre o razón social…" class="mb-5">
+        <template #curso>
+          <!-- «Más filtros» en la fila del buscador (como en las demás bibliotecas) -->
+          <button type="button" data-tour="emp-mas-filtros" @click="panelFiltrosAbierto = !panelFiltrosAbierto" :aria-expanded="panelFiltrosAbierto"
+                  aria-controls="filtros-rapidos" :title="panelFiltrosAbierto ? 'Ocultar los filtros rápidos' : 'Mostrar los filtros rápidos'"
+                  class="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full border px-5 text-sm font-semibold transition-colors"
+                  :class="panelFiltrosAbierto ? 'border-rol-fuerte/30 bg-rol/10 text-rol-fuerte' : 'border-rol-fuerte/30 bg-white text-rol-fuerte hover:bg-rol-fuerte/5'">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
+            <span>Más filtros</span>
+            <span v-if="!panelFiltrosAbierto && filtrosLateral"
+                  class="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-rol-fuerte px-1 text-[11px] font-bold text-white">{{ filtrosLateral }}</span>
+          </button>
+        </template>
+        <FiltroSelect v-if="centros.length > 1" v-model="filtroCentro" label="Centro educativo" todos="Todos los centros" :opciones="centros" />
+        <FiltroSelect v-if="provincias.length > 1" v-model="filtroProvincia" label="Provincia" todos="Todas las provincias" :opciones="provincias" />
+      </FiltrosPanel>
 
-      <!-- Lista agrupada por centro -->
-      <div v-else-if="centrosOrdenados.length" class="space-y-3">
-        <div v-for="centro in centrosOrdenados" :key="centro">
+      <div class="flex flex-col gap-5 lg:flex-row lg:items-start">
 
-          <!-- Cabecera del centro (desplegable) -->
-          <div class="bg-white rounded-[1.75rem] border shadow-sm overflow-hidden transition-all duration-300"
-               :class="!centrosCerrados.has(centro) ? 'border-[#00A859]/25 shadow-md' : 'border-gray-100'">
+        <!-- ═══ Filtros rápidos ═══ -->
+        <aside id="filtros-rapidos" data-tour="emp-filtros-rapidos" aria-label="Filtros rápidos"
+               class="w-full shrink-0 rounded-2xl border border-borde bg-white p-4 shadow-sm lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:w-64 lg:overflow-y-auto xl:w-72"
+               :class="panelFiltrosAbierto ? 'block' : 'hidden'">
+          <div class="mb-3 flex items-center justify-between gap-2">
+            <h2 class="text-base font-bold text-azul-noche">Filtros rápidos</h2>
+            <button v-if="hayFiltrosActivos" type="button" @click="limpiarFiltros"
+                    class="inline-flex h-9 items-center rounded-full px-3 text-sm font-semibold text-rol-fuerte hover:bg-rol/10">Limpiar</button>
+          </div>
 
-            <button @click="toggleCentro(centro)"
-                    class="w-full flex items-center gap-4 px-6 py-5 text-left hover:bg-gray-50/70 transition-colors duration-150">
-              <!-- Icono centro -->
-              <div class="w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 transition-all duration-200"
-                   :class="!centrosCerrados.has(centro) ? 'bg-[#1F2937]' : 'bg-gray-100'">
-                <svg class="w-5 h-5 transition-colors duration-200"
-                     :class="!centrosCerrados.has(centro) ? 'text-[#99CC33]' : 'text-gray-400'"
-                     fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/>
-                </svg>
-              </div>
-              <!-- Info -->
-              <div class="flex-1 min-w-0">
-                <h2 class="font-black text-base truncate"
-                    :class="centro === SIN_CENTRO ? 'text-gray-400 italic' : 'text-[#1F2937]'">
-                  {{ centro }}
-                </h2>
-                <p class="text-xs text-gray-400 font-medium mt-0.5 flex flex-wrap items-center gap-x-1">
-                  <span>
-                    {{ empresasPorCentro[centro].length }}
-                    {{ empresasPorCentro[centro].length !== 1 ? 'empresas' : 'empresa' }}
-                  </span>
-                  <template v-if="empresasPorCentro[centro].filter(e => e.estado_contacto === 'Activo').length">
-                    <span class="text-gray-300">·</span>
-                    <span class="text-emerald-500 font-semibold">
-                      {{ empresasPorCentro[centro].filter(e => e.estado_contacto === 'Activo').length }}
-                      activa{{ empresasPorCentro[centro].filter(e => e.estado_contacto === 'Activo').length > 1 ? 's' : '' }}
-                    </span>
-                  </template>
-                  <template v-if="empresasPorCentro[centro].filter(e => e.estado_contacto === 'Reunión fijada').length">
-                    <span class="text-gray-300">·</span>
-                    <span class="text-amber-500 font-semibold">
-                      {{ empresasPorCentro[centro].filter(e => e.estado_contacto === 'Reunión fijada').length }}
-                      reunión{{ empresasPorCentro[centro].filter(e => e.estado_contacto === 'Reunión fijada').length > 1 ? 'es' : '' }}
-                    </span>
-                  </template>
-                  <template v-if="empresasPorCentro[centro].filter(e => e.estado_contacto === 'Contactado').length">
-                    <span class="text-gray-300">·</span>
-                    <span class="text-blue-400 font-semibold">
-                      {{ empresasPorCentro[centro].filter(e => e.estado_contacto === 'Contactado').length }}
-                      contactada{{ empresasPorCentro[centro].filter(e => e.estado_contacto === 'Contactado').length > 1 ? 's' : '' }}
-                    </span>
-                  </template>
-                </p>
-              </div>
-              <!-- Chevron -->
-              <svg class="w-5 h-5 text-gray-400 transition-transform duration-300 shrink-0"
-                   :class="!centrosCerrados.has(centro) ? 'rotate-180' : ''"
-                   fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
-              </svg>
+          <div class="border-t border-borde pt-3" role="radiogroup" aria-labelledby="titulo-filtro-estado">
+            <p id="titulo-filtro-estado" class="mb-1.5 text-sm font-semibold text-azul-noche">Estado de contacto</p>
+            <label class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="radio" name="emp-filtro-estado" value="" v-model="filtroEstado" class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="h-2.5 w-2.5 shrink-0 rounded-full bg-gray-200" aria-hidden="true" />
+              <span class="min-w-0 flex-1 text-sm text-azul-noche">Todos</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ conteoEstados[''] }}</span>
+            </label>
+            <label v-for="est in estadosConEmpresas" :key="est" class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="radio" name="emp-filtro-estado" :value="est" v-model="filtroEstado" class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="ESTADO_PUNTO[est] || 'bg-gray-300'" aria-hidden="true" />
+              <span class="min-w-0 flex-1 truncate text-sm text-azul-noche" :title="est">{{ est }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ conteoEstados[est] }}</span>
+            </label>
+          </div>
+
+          <div v-if="sectoresConContador.length" class="mt-3 border-t border-borde pt-3" role="group" aria-labelledby="titulo-filtro-sector">
+            <p id="titulo-filtro-sector" class="mb-1.5 text-sm font-semibold text-azul-noche" title="Actividad económica a la que se dedica la empresa">Sector</p>
+            <label v-for="sct in sectoresVisibles" :key="sct.sector" class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="checkbox" :checked="filtroSectores.includes(sct.sector)" @change="alternarSector(sct.sector)" class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="min-w-0 flex-1 truncate text-sm text-azul-noche" :title="sct.sector">{{ sct.sector }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ sct.count }}</span>
+            </label>
+            <button v-if="sectoresConContador.length > 8" type="button" @click="sectoresExpandidos = !sectoresExpandidos"
+                    class="mt-1 inline-flex h-8 items-center rounded-full px-1 text-sm font-semibold text-rol-fuerte hover:underline">
+              {{ sectoresExpandidos ? 'Ver menos' : `Ver todos (${sectoresConContador.length})` }}
             </button>
+          </div>
 
-            <!-- Empresas del centro -->
-            <Transition name="slide-down">
-              <div v-if="!centrosCerrados.has(centro)"
-                   class="border-t border-gray-100 px-3 pb-3 pt-2 space-y-2">
-                <div
-                  v-for="empresa in empresasPorCentro[centro]"
-                  :key="empresa.id"
-                  class="rounded-2xl border overflow-hidden transition-all duration-200 bg-white"
-                  :class="empresaExpandida?.id === empresa.id
-                    ? 'border-[#00A859]/20 shadow-md'
-                    : 'border-gray-100 shadow-sm hover:border-gray-200 hover:shadow'"
-                >
-                  <button @click="toggleEmpresa(empresa)"
-                          class="w-full flex items-center gap-4 px-5 py-4 text-left">
-                    <div class="w-9 h-9 rounded-xl bg-[#00A859]/10 border border-[#00A859]/15
-                                flex items-center justify-center shrink-0 font-black text-sm text-[#00A859] select-none">
-                      {{ (empresa.nombre_comercial || '?')[0].toUpperCase() }}
-                    </div>
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <span class="font-bold text-sm text-[#121212] truncate">{{ empresa.nombre_comercial }}</span>
-                        <span v-if="empresa.estado_contacto"
-                              :class="['text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border',
-                                       badgeEstado(empresa.estado_contacto)]">
-                          {{ empresa.estado_contacto }}
-                        </span>
-                      </div>
-                      <div class="flex items-center gap-3 mt-0.5 flex-wrap">
-                        <span v-if="empresa.sector" class="text-[10px] text-gray-400">{{ empresa.sector }}</span>
-                        <span v-if="empresa.municipio" class="text-[10px] text-gray-400">
-                          {{ empresa.municipio }}<span v-if="empresa.provincia">, {{ empresa.provincia }}</span>
-                        </span>
-                        <span v-if="empresa.email_general || empresa.email_contacto"
-                              class="text-[10px] text-[#00A859]">
-                          {{ empresa.email_contacto || empresa.email_general }}
-                        </span>
-                      </div>
-                    </div>
-                    <svg class="w-4 h-4 text-gray-300 transition-transform duration-200 shrink-0"
-                         :class="empresaExpandida?.id === empresa.id ? 'rotate-180' : ''"
-                         fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
-                    </svg>
-                  </button>
+          <div v-if="familiasPanel.length" class="mt-3 border-t border-borde pt-3" role="group" aria-labelledby="titulo-filtro-familia">
+            <p id="titulo-filtro-familia" class="mb-1.5 text-sm font-semibold text-azul-noche">Familia profesional</p>
+            <label v-for="f in familiasPanel" :key="f.id" class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="checkbox" :checked="filtroFamilias.includes(f.id)" @change="alternarFamilia(f.id)" class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="min-w-0 flex-1 truncate text-sm text-azul-noche" :title="f.nombre">{{ f.nombre }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ f.n }}</span>
+            </label>
+          </div>
+        </aside>
 
-                  <Transition name="slide-down">
-                    <div v-if="empresaExpandida?.id === empresa.id" class="border-t border-gray-100">
-                      <div class="p-5 grid grid-cols-1 md:grid-cols-2 gap-5">
+        <!-- ═══ Resultados ═══ -->
+        <section id="resultados-empresas" class="min-w-0 flex-1 scroll-mt-24" aria-label="Empresas">
+          <div class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <TituloResultados :niveles="nivelesTitulo" :cargando="cargando">
+              <template v-if="cargando">Cargando empresas…</template>
+              <template v-else>{{ empresasFiltradas.length }} {{ empresasFiltradas.length === 1 ? 'empresa' : 'empresas' }}</template>
+            </TituloResultados>
+            <div v-if="filtroEstado || filtroSectores.length || filtroFamilias.length > 1" class="flex w-full flex-wrap gap-1.5 sm:order-last">
+              <button v-if="filtroEstado" type="button" @click="filtroEstado = ''" class="chip-filtro" :aria-label="`Quitar filtro ${filtroEstado}`">
+                <span class="h-2 w-2 rounded-full" :class="ESTADO_PUNTO[filtroEstado]" aria-hidden="true" />{{ filtroEstado }}<span aria-hidden="true">✕</span>
+              </button>
+              <button v-for="sct in filtroSectores" :key="'s-' + sct" type="button" @click="alternarSector(sct)" class="chip-filtro max-w-full" :aria-label="`Quitar filtro ${sct}`">
+                <span class="truncate">{{ sct }}</span><span aria-hidden="true">✕</span>
+              </button>
+              <button v-for="id in (filtroFamilias.length > 1 ? filtroFamilias : [])" :key="'f-' + id" type="button" @click="alternarFamilia(id)"
+                      class="inline-flex h-9 max-w-full items-center gap-1.5 rounded-full bg-rol/10 px-3 text-xs font-semibold text-rol-fuerte hover:bg-rol/15"
+                      :aria-label="`Quitar filtro ${nombreFamilia(id)}`">
+                <span class="truncate">{{ nombreFamilia(id) }}</span><span aria-hidden="true">✕</span>
+              </button>
+            </div>
+            <label data-tour="emp-orden" class="flex items-center gap-2 text-sm text-texto-secundario">
+              <span class="hidden sm:inline">Ordenar por</span>
+              <select v-model="orden" class="h-9 rounded-xl px-3 text-sm text-azul-noche" aria-label="Ordenar empresas">
+                <option value="nombre">Nombre (A-Z)</option>
+                <option value="estado">Estado de contacto</option>
+                <option value="proyectos">Más retos ajustados</option>
+              </select>
+            </label>
+          </div>
 
-                        <!-- Ficha de datos -->
-                        <div class="space-y-4">
-                          <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Datos de la empresa</p>
-                          <div class="space-y-2">
-                            <template v-if="empresa.razon_social">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Razón social</span>
-                                <span class="text-[10px] text-gray-700 text-right">{{ empresa.razon_social }}</span>
-                              </div>
-                            </template>
-                            <template v-if="empresa.cif">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">CIF</span>
-                                <span class="text-[10px] text-gray-700">{{ empresa.cif }}</span>
-                              </div>
-                            </template>
-                            <template v-if="empresa.telefono">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Teléfono</span>
-                                <a :href="`tel:${empresa.telefono}`" class="text-[10px] text-[#00A859] hover:underline">
-                                  {{ empresa.telefono }}
-                                </a>
-                              </div>
-                            </template>
-                            <template v-if="empresa.email_general">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Email general</span>
-                                <a :href="`mailto:${empresa.email_general}`"
-                                   class="text-[10px] text-[#00A859] hover:underline truncate">
-                                  {{ empresa.email_general }}
-                                </a>
-                              </div>
-                            </template>
-                            <template v-if="empresa.web">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Web</span>
-                                <a :href="empresa.web.startsWith('http') ? empresa.web : 'https://'+empresa.web"
-                                   target="_blank" rel="noopener"
-                                   class="text-[10px] text-[#00A859] hover:underline truncate">
-                                  {{ empresa.web }}
-                                </a>
-                              </div>
-                            </template>
-                            <template v-if="empresa.persona_contacto">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Persona de contacto</span>
-                                <span class="text-[10px] text-gray-700">
-                                  {{ empresa.persona_contacto }}
-                                  <span v-if="empresa.posicion_contacto" class="text-gray-400">
-                                    · {{ empresa.posicion_contacto }}
-                                  </span>
-                                </span>
-                              </div>
-                            </template>
-                            <template v-if="empresa.email_contacto">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Email contacto</span>
-                                <a :href="`mailto:${empresa.email_contacto}`"
-                                   class="text-[10px] text-[#00A859] hover:underline truncate">
-                                  {{ empresa.email_contacto }}
-                                </a>
-                              </div>
-                            </template>
-                            <template v-if="empresa.actividad">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Actividad</span>
-                                <span class="text-[10px] text-gray-700 text-right max-w-[60%]">{{ empresa.actividad }}</span>
-                              </div>
-                            </template>
-                            <template v-if="empresa.tamano">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Tamaño</span>
-                                <span class="text-[10px] text-gray-700">{{ empresa.tamano }}</span>
-                              </div>
-                            </template>
-                            <template v-if="empresa.horario_atencion">
-                              <div class="flex justify-between gap-3">
-                                <span class="text-[10px] text-gray-400">Horario</span>
-                                <span class="text-[10px] text-gray-700 text-right">{{ empresa.horario_atencion }}</span>
-                              </div>
-                            </template>
-                          </div>
+          <!-- Carga -->
+          <div v-if="cargando" class="grid grid-cols-1 gap-4" :class="columnas" aria-busy="true">
+            <div v-for="n in 6" :key="n" class="h-56 animate-pulse rounded-2xl border border-borde bg-white" />
+            <span class="sr-only">Cargando empresas…</span>
+          </div>
 
-                          <div v-if="empresa.direccion || empresa.municipio" class="pt-3 border-t border-gray-100">
-                            <p class="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-2">Dirección</p>
-                            <p class="text-[10px] text-gray-500 leading-relaxed">
-                              <span v-if="empresa.direccion">
-                                {{ empresa.direccion }}
-                                <span v-if="empresa.numero"> {{ empresa.numero }}</span>
-                                <span v-if="empresa.otros_direccion">, {{ empresa.otros_direccion }}</span>
-                              </span>
-                              <br v-if="empresa.direccion && (empresa.municipio || empresa.codigo_postal)"/>
-                              <span v-if="empresa.codigo_postal">{{ empresa.codigo_postal }} </span>
-                              <span v-if="empresa.municipio">{{ empresa.municipio }}</span>
-                              <span v-if="empresa.provincia">, {{ empresa.provincia }}</span>
-                            </p>
-                          </div>
+          <!-- Sin resultados -->
+          <div v-else-if="!empresasFiltradas.length" data-tour="emp-vacio" class="rounded-2xl border border-dashed border-borde bg-white px-6 py-14 text-center">
+            <h3 class="text-lg font-bold text-azul-noche">No hay empresas con estos filtros</h3>
+            <p class="mx-auto mt-1 max-w-md text-sm text-texto-secundario">Prueba a quitar algún filtro.</p>
+            <button v-if="hayFiltrosActivos" type="button" @click="limpiarFiltros" class="accion-secundaria mt-4">Limpiar filtros</button>
+          </div>
 
-                          <div v-if="empresa.familias?.length" class="pt-3 border-t border-gray-100">
-                            <p class="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-2">
-                              Familias profesionales
-                            </p>
-                            <div class="flex flex-wrap gap-1.5">
-                              <span v-for="f in empresa.familias" :key="f.id"
-                                    class="text-[9px] px-2 py-0.5 rounded-full bg-[#00A859]/10
-                                           border border-[#00A859]/20 text-[#00A859] font-medium">
-                                {{ f.nombre }}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        <!-- Acciones -->
-                        <div class="space-y-3">
-                          <p class="text-[9px] font-black uppercase tracking-widest text-gray-400">Acciones</p>
-
-                          <div class="grid grid-cols-2 gap-2">
-                            <button
-                              @click="abrirPanel('email')"
-                              :class="[
-                                'flex items-center justify-center gap-2 py-2.5 px-3 rounded-2xl border text-xs font-bold transition-all',
-                                panelActivo === 'email'
-                                  ? 'bg-[#00A859]/8 border-[#00A859]/25 text-[#00A859]'
-                                  : 'bg-gray-50 border-gray-200 text-gray-600 hover:border-gray-300 hover:text-[#1F2937]'
-                              ]"
-                            >
-                              <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-                              </svg>
-                              Enviar email
-                            </button>
-
-                            <button
-                              @click="abrirPanel('validacion')"
-                              :class="[
-                                'flex items-center justify-center gap-2 py-2.5 px-3 rounded-2xl border text-xs font-bold transition-all',
-                                panelActivo === 'validacion'
-                                  ? 'bg-amber-50 border-amber-200 text-amber-700'
-                                  : 'bg-gray-50 border-gray-200 text-gray-600 hover:border-gray-300 hover:text-[#1F2937]'
-                              ]"
-                            >
-                              <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                              </svg>
-                              Enviar validación
-                            </button>
-                          </div>
-
-                          <!-- Formulario email -->
-                          <Transition name="slide-down">
-                            <div v-if="panelActivo === 'email'"
-                                 class="rounded-2xl bg-[#00A859]/5 border border-[#00A859]/15 p-4 space-y-3">
-                              <p class="text-[9px] font-black uppercase tracking-widest text-[#00A859]">Enviar correo</p>
-                              <div v-if="emailOk"
-                                   class="flex items-center gap-2 p-3 rounded-xl bg-[#00A859]/10 border border-[#00A859]/20">
-                                <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
-                                </svg>
-                                <p class="text-xs font-bold text-[#00A859]">Correo enviado correctamente.</p>
-                              </div>
-                              <template v-if="!emailOk">
-                                <div>
-                                  <label class="block text-[9px] text-gray-500 uppercase tracking-wider mb-1">Remitente (tu email)</label>
-                                  <input v-model="emailForm.remitente" type="email"
-                                         class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
-                                                text-xs text-[#1F2937] placeholder-gray-400 shadow-sm
-                                                focus:outline-none focus:border-[#00A859] transition-colors"/>
-                                </div>
-                                <div>
-                                  <label class="block text-[9px] text-gray-500 uppercase tracking-wider mb-1">Destinatario</label>
-                                  <p class="text-xs text-gray-600 px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl shadow-sm">
-                                    {{ empresa.email_contacto || empresa.email_general || 'Sin email registrado' }}
-                                  </p>
-                                </div>
-                                <div>
-                                  <label class="block text-[9px] text-gray-500 uppercase tracking-wider mb-1">Asunto</label>
-                                  <input v-model="emailForm.asunto" type="text" placeholder="Asunto del correo..."
-                                         class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
-                                                text-xs text-[#1F2937] placeholder-gray-400 shadow-sm
-                                                focus:outline-none focus:border-[#00A859] transition-colors"/>
-                                </div>
-                                <div>
-                                  <label class="block text-[9px] text-gray-500 uppercase tracking-wider mb-1">Mensaje</label>
-                                  <textarea v-model="emailForm.mensaje" rows="4" placeholder="Escribe tu mensaje aquí..."
-                                            class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
-                                                   text-xs text-[#1F2937] placeholder-gray-400 shadow-sm resize-none
-                                                   focus:outline-none focus:border-[#00A859] transition-colors"/>
-                                </div>
-                                <p v-if="emailError" class="text-xs text-red-500 font-medium">{{ emailError }}</p>
-                                <button @click="enviarEmail"
-                                        :disabled="enviandoEmail || !emailForm.asunto || !emailForm.mensaje ||
-                                                   !(empresa.email_contacto || empresa.email_general)"
-                                        class="w-full py-2.5 rounded-full bg-[#00A859] text-white text-xs font-black
-                                               uppercase tracking-widest transition-all shadow-sm
-                                               hover:bg-[#009950] disabled:opacity-40 disabled:cursor-not-allowed">
-                                  {{ enviandoEmail ? 'Enviando...' : 'Enviar correo' }}
-                                </button>
-                                <p v-if="!(empresa.email_contacto || empresa.email_general)"
-                                   class="text-[10px] text-amber-600 text-center">
-                                  Esta empresa no tiene email registrado.
-                                </p>
-                              </template>
-                            </div>
-                          </Transition>
-
-                          <!-- Formulario validación -->
-                          <Transition name="slide-down">
-                            <div v-if="panelActivo === 'validacion'"
-                                 class="rounded-2xl bg-amber-50 border border-amber-200 p-4 space-y-3">
-                              <p class="text-[9px] font-black uppercase tracking-widest text-amber-700">
-                                Enviar enlace de validación
-                              </p>
-                              <div v-if="validacionOk"
-                                   class="flex items-center gap-2 p-3 rounded-xl bg-amber-100 border border-amber-200">
-                                <svg class="w-4 h-4 text-amber-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
-                                </svg>
-                                <p class="text-xs font-bold text-amber-800">Enlace enviado correctamente.</p>
-                              </div>
-                              <template v-if="!validacionOk">
-                                <div>
-                                  <label class="block text-[9px] text-gray-500 uppercase tracking-wider mb-1">Remitente (tu email)</label>
-                                  <input v-model="validForm.remitente" type="email"
-                                         class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
-                                                text-xs text-[#1F2937] placeholder-gray-400 shadow-sm
-                                                focus:outline-none focus:border-amber-400 transition-colors"/>
-                                </div>
-                                <div>
-                                  <label class="block text-[9px] text-gray-500 uppercase tracking-wider mb-1">Propuesta a validar</label>
-                                  <select v-model="validForm.proyecto_uuid"
-                                          class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
-                                                 text-xs text-[#1F2937] shadow-sm
-                                                 focus:outline-none focus:border-amber-400 transition-colors">
-                                    <option value="">Selecciona una propuesta publicada...</option>
-                                    <option v-for="p in proyectos" :key="p.uuid" :value="p.uuid">
-                                      {{ p.titulo }}<template v-if="p.empresa_nombre"> · {{ p.empresa_nombre }}</template>
-                                    </option>
-                                  </select>
-                                  <p v-if="proyectos.length === 0" class="text-[10px] text-gray-400 mt-1">
-                                    No hay propuestas publicadas. Publícalas en el StartUp Day.
-                                  </p>
-                                </div>
-                                <div>
-                                  <label class="block text-[9px] text-gray-500 uppercase tracking-wider mb-1">
-                                    Mensaje adicional <span class="normal-case font-normal">(opcional)</span>
-                                  </label>
-                                  <textarea v-model="validForm.mensaje" rows="3"
-                                            placeholder="Añade contexto o instrucciones adicionales para la empresa..."
-                                            class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
-                                                   text-xs text-[#1F2937] placeholder-gray-400 shadow-sm resize-none
-                                                   focus:outline-none focus:border-amber-400 transition-colors"/>
-                                </div>
-                                <p v-if="validacionError" class="text-xs text-red-500 font-medium">{{ validacionError }}</p>
-                                <button @click="enviarValidacionEmail"
-                                        :disabled="enviandoValidacion || !validForm.proyecto_uuid ||
-                                                   !(empresa.email_contacto || empresa.email_general)"
-                                        class="w-full py-2.5 rounded-full bg-amber-500 text-white text-xs font-black
-                                               uppercase tracking-widest transition-all shadow-sm
-                                               hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed">
-                                  {{ enviandoValidacion ? 'Enviando...' : 'Enviar enlace de validación' }}
-                                </button>
-                                <p v-if="!(empresa.email_contacto || empresa.email_general)"
-                                   class="text-[10px] text-amber-600 text-center">
-                                  Esta empresa no tiene email registrado.
-                                </p>
-                              </template>
-                            </div>
-                          </Transition>
-
-                        </div>
-                      </div>
-                    </div>
-                  </Transition>
-
+          <!-- Tarjetas (las de cada fila, misma altura; pie siempre abajo) -->
+          <ul v-else data-tour="emp-lista" class="grid grid-cols-1 gap-4" :class="columnas">
+            <li v-for="(empresa, i) in itemsPagina" :key="empresa.id" :data-tour="i === 0 ? 'emp-tarjeta' : undefined"
+                class="relative flex min-w-0 flex-col rounded-2xl border border-borde bg-white p-4 shadow-sm transition-shadow hover:shadow-md"
+                :class="{ 'z-10': menuEmpresa === empresa.id }">
+              <div class="flex min-w-0 items-start gap-3">
+                <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-empresas/10 font-heading text-base font-bold text-empresas-dark select-none" aria-hidden="true">
+                  {{ (empresa.nombre_comercial || '?')[0].toUpperCase() }}
+                </span>
+                <div class="min-w-0 flex-1">
+                  <h3 class="line-clamp-2 min-h-11 font-heading text-base font-bold leading-snug text-azul-noche" :title="empresa.nombre_comercial">{{ empresa.nombre_comercial }}</h3>
+                  <p class="truncate text-sm text-texto-secundario">
+                    {{ [empresa.municipio, empresa.provincia].filter(Boolean).join(', ') || 'Sin ubicación' }}
+                  </p>
                 </div>
               </div>
-            </Transition>
 
+              <div class="mt-2 flex min-h-6 flex-wrap items-center gap-1.5">
+                <span v-if="empresa.estado_contacto" :class="['inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold', badgeEstado(empresa.estado_contacto)]">
+                  {{ empresa.estado_contacto }}
+                </span>
+                <span v-if="centros.length > 1 && empresa.centro_educativo" class="max-w-full truncate rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold text-azul-noche" :title="empresa.centro_educativo">
+                  {{ empresa.centro_educativo }}
+                </span>
+              </div>
+
+              <!-- Sector y familias, cada uno en su línea (como familia/módulos en las demás bibliotecas) -->
+              <dl class="mt-3 grid min-h-[3.75rem] gap-1.5 text-sm">
+                <div class="flex min-w-0 items-center gap-2">
+                  <dt class="flex shrink-0 items-center gap-2">
+                    <span class="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-empresas/10 text-empresas-dark" aria-hidden="true">
+                      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                    </span>
+                    <span class="w-14 text-xs font-semibold text-texto-secundario">Sector</span>
+                  </dt>
+                  <dd class="min-w-0 truncate font-semibold text-azul-noche" :title="empresa.sector">{{ empresa.sector || '—' }}</dd>
+                </div>
+                <div class="flex min-w-0 items-center gap-2">
+                  <dt class="flex shrink-0 items-center gap-2">
+                    <span class="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-rol/10 text-rol-fuerte" aria-hidden="true">
+                      <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    </span>
+                    <span class="w-14 text-xs font-semibold text-texto-secundario">{{ (empresa.familias?.length || 0) > 1 ? 'Familias' : 'Familia' }}</span>
+                  </dt>
+                  <dd class="flex min-w-0 items-center gap-1.5">
+                    <span class="min-w-0 truncate font-semibold text-azul-noche" :title="(empresa.familias || []).map(f => f.nombre).join(', ')">{{ empresa.familias?.[0]?.nombre || '—' }}</span>
+                    <span v-if="(empresa.familias?.length || 0) > 1" class="shrink-0 text-xs font-semibold text-texto-secundario"
+                          :title="empresa.familias.slice(1).map(f => f.nombre).join(', ')">+{{ empresa.familias.length - 1 }}</span>
+                  </dd>
+                </div>
+              </dl>
+
+              <p class="mt-2 min-h-5 truncate text-sm text-empresas-dark" :title="contactoDe(empresa)">{{ contactoDe(empresa) || ' ' }}</p>
+
+              <span class="min-h-3 flex-1" aria-hidden="true" />
+              <!-- Pie: proyectos + «Ver ficha» y «⋯» (mismo esquema que las demás bibliotecas) -->
+              <div class="flex items-center gap-2 border-t border-borde pt-3">
+                <span class="min-w-0 flex-1 truncate text-xs text-texto-secundario">
+                  {{ proyectosDeEmpresa(empresa.id).length }} {{ proyectosDeEmpresa(empresa.id).length === 1 ? 'reto ajustado' : 'retos ajustados' }}
+                </span>
+                <button type="button" @click="abrirFicha(empresa)" :data-tour="i === 0 ? 'emp-ver-ficha' : undefined"
+                        class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-rol-fuerte/40 bg-white px-4 text-sm font-semibold text-rol-fuerte transition-colors hover:bg-rol-fuerte/5">
+                  <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
+                  Ver ficha
+                </button>
+                <div class="relative shrink-0" data-menu-raiz>
+                  <button type="button" @click="menuEmpresa = menuEmpresa === empresa.id ? null : empresa.id" :data-tour="i === 0 ? 'emp-menu' : undefined"
+                          :aria-expanded="menuEmpresa === empresa.id" aria-haspopup="menu" :aria-label="`Más acciones de «${empresa.nombre_comercial}»`"
+                          class="inline-flex h-9 w-9 items-center justify-center rounded-full border border-borde text-texto-secundario hover:bg-gray-50">
+                    <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.6"/><circle cx="10" cy="10" r="1.6"/><circle cx="16" cy="10" r="1.6"/></svg>
+                  </button>
+                  <div v-if="menuEmpresa === empresa.id" role="menu"
+                       class="absolute bottom-full right-0 z-30 mb-1 w-[min(15rem,calc(100vw-3rem))] rounded-xl border border-borde bg-white py-1 shadow-lg">
+                    <button type="button" role="menuitem" @click="menuEmpresa = null; abrirFicha(empresa, 'email')"
+                            class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Enviar email</button>
+                    <button v-if="contactoDe(empresa)" type="button" role="menuitem" @click="menuEmpresa = null; copiarEmail(contactoDe(empresa))"
+                            class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Copiar email</button>
+                  </div>
+                </div>
+              </div>
+            </li>
+          </ul>
+
+          <!-- Paginación -->
+          <div v-if="!cargando && totalPaginas > 1" data-tour="emp-paginacion" class="mt-5 flex flex-col flex-wrap items-center justify-between gap-3 sm:flex-row">
+            <p class="text-sm text-texto-secundario">Mostrando {{ itemsPagina.length }} de {{ empresasFiltradas.length }} empresas</p>
+            <nav class="flex flex-wrap items-center justify-center gap-1" aria-label="Paginación de empresas">
+              <button type="button" @click="irAPagina(0)" :disabled="pagina === 0" aria-label="Primera página"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">«</button>
+              <button type="button" @click="irAPagina(pagina - 1)" :disabled="pagina === 0" aria-label="Página anterior"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">‹</button>
+              <button v-for="i in paginasVisibles" :key="i" type="button" @click="irAPagina(i)"
+                      :aria-current="i === pagina ? 'page' : undefined" :aria-label="`Página ${i + 1}`"
+                      class="inline-flex h-9 min-w-9 items-center justify-center rounded-full px-2 text-sm font-semibold"
+                      :class="i === pagina ? 'bg-rol-fuerte text-white' : 'text-azul-noche hover:bg-gray-100'">{{ i + 1 }}</button>
+              <button type="button" @click="irAPagina(pagina + 1)" :disabled="pagina >= totalPaginas - 1" aria-label="Página siguiente"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">›</button>
+              <button type="button" @click="irAPagina(totalPaginas - 1)" :disabled="pagina >= totalPaginas - 1" aria-label="Última página"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">»</button>
+            </nav>
+          </div>
+        </section>
+      </div>
+
+    <!-- ══ FICHA DE LA EMPRESA (ventana accesible): datos, envío de email y de validación, proyectos ══ -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="empresaExpandida" class="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-azul-noche/60 p-4 backdrop-blur-sm"
+             @mousedown.self="cerrarFicha">
+          <div ref="panelFicha" role="dialog" aria-modal="true" aria-labelledby="titulo-ficha-empresa" tabindex="-1"
+               class="relative my-4 flex max-h-[92dvh] w-[min(64rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-[2rem] bg-white shadow-2xl outline-none">
+            <template v-for="empresa in [empresaExpandida]" :key="empresa.id">
+              <header class="flex items-start gap-3 border-b border-borde px-5 pb-4 pt-5 sm:px-6">
+                <span class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-empresas/10 font-heading text-base font-bold text-empresas-dark" aria-hidden="true">
+                  {{ (empresa.nombre_comercial || '?')[0].toUpperCase() }}
+                </span>
+                <div class="min-w-0 flex-1">
+                  <h2 id="titulo-ficha-empresa" class="font-heading text-lg font-bold text-azul-noche sm:text-xl">{{ empresa.nombre_comercial }}</h2>
+                  <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                    <span v-if="empresa.estado_contacto" :class="['rounded-full border px-2 py-0.5 font-semibold', badgeEstado(empresa.estado_contacto)]">{{ empresa.estado_contacto }}</span>
+                    <span v-if="empresa.centro_educativo" class="rounded-full bg-gray-100 px-2 py-0.5 font-semibold text-azul-noche">{{ empresa.centro_educativo }}</span>
+                  </div>
+                </div>
+                <button type="button" @click="cerrarFicha" aria-label="Cerrar la ficha de la empresa"
+                        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gray-100 text-texto-secundario hover:bg-gray-200 hover:text-azul-noche">
+                  <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </header>
+              <div class="flex-1 overflow-y-auto p-5 sm:p-6">
+      <div class="grid grid-cols-1 gap-5 md:grid-cols-2">
+
+                              <!-- Ficha de datos -->
+                              <div class="space-y-4">
+                                <p class="text-sm font-semibold text-texto-secundario">Datos de la empresa</p>
+
+                                <!-- Sector y familias: lo primero de la ficha -->
+                                <div v-if="empresa.sector || empresa.familias?.length"
+                                     class="space-y-3 rounded-2xl border border-empresas/15 bg-empresas/5 p-4">
+                                  <div v-if="empresa.sector">
+                                    <p class="mb-1 text-xs font-semibold text-empresas-dark">Sector</p>
+                                    <p class="text-sm font-black text-azul-noche break-words">{{ empresa.sector }}</p>
+                                  </div>
+                                  <div v-if="empresa.familias?.length">
+                                    <p class="mb-1.5 text-xs font-semibold text-empresas-dark">
+                                      {{ empresa.familias.length === 1 ? 'Familia profesional' : 'Familias profesionales' }}
+                                    </p>
+                                    <div class="flex flex-wrap gap-1.5">
+                                      <span v-for="f in empresa.familias" :key="f.id"
+                                            class="inline-flex max-w-full items-center gap-1.5 rounded-full border border-gray-200 bg-white px-2.5 py-1 text-xs font-bold text-azul-noche">
+                                        <svg :class="['h-3.5 w-3.5 shrink-0', colorFamilia(f.nombre).icon]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                          <path v-for="d in iconoFamilia(f.nombre)" :key="d" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="d"/>
+                                        </svg>
+                                        <span class="min-w-0 break-words">{{ f.nombre }}</span>
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div class="space-y-2">
+                                  <template v-if="empresa.razon_social">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Razón social</span>
+                                      <span class="text-sm text-azul-noche text-right">{{ empresa.razon_social }}</span>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.cif">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">CIF</span>
+                                      <span class="text-sm text-azul-noche">{{ empresa.cif }}</span>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.telefono">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Teléfono</span>
+                                      <a :href="`tel:${empresa.telefono}`" class="text-sm text-empresas hover:underline">
+                                        {{ empresa.telefono }}
+                                      </a>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.email_general">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Email general</span>
+                                      <a :href="`mailto:${empresa.email_general}`"
+                                         class="text-sm text-empresas hover:underline truncate">
+                                        {{ empresa.email_general }}
+                                      </a>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.web">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Web</span>
+                                      <a :href="empresa.web.startsWith('http') ? empresa.web : 'https://'+empresa.web"
+                                         target="_blank" rel="noopener"
+                                         class="text-sm text-empresas hover:underline truncate">
+                                        {{ empresa.web }}
+                                      </a>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.persona_contacto">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Persona de contacto</span>
+                                      <span class="text-sm text-azul-noche">
+                                        {{ empresa.persona_contacto }}
+                                        <span v-if="empresa.posicion_contacto" class="text-texto-secundario">
+                                          · {{ empresa.posicion_contacto }}
+                                        </span>
+                                      </span>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.email_contacto">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Email contacto</span>
+                                      <a :href="`mailto:${empresa.email_contacto}`"
+                                         class="text-sm text-empresas hover:underline truncate">
+                                        {{ empresa.email_contacto }}
+                                      </a>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.actividad">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Actividad</span>
+                                      <span class="text-sm text-azul-noche text-right max-w-[60%]">{{ empresa.actividad }}</span>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.tamano">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Tamaño</span>
+                                      <span class="text-sm text-azul-noche">{{ empresa.tamano }}</span>
+                                    </div>
+                                  </template>
+                                  <template v-if="empresa.horario_atencion">
+                                    <div class="flex justify-between gap-3">
+                                      <span class="text-sm text-texto-secundario">Horario</span>
+                                      <span class="text-sm text-azul-noche text-right">{{ empresa.horario_atencion }}</span>
+                                    </div>
+                                  </template>
+                                </div>
+
+                                <div v-if="empresa.direccion || empresa.municipio" class="pt-3 border-t border-borde">
+                                  <p class="text-sm font-semibold text-texto-secundario mb-2">Dirección</p>
+                                  <p class="text-sm text-texto-secundario leading-relaxed">
+                                    <span v-if="empresa.direccion">
+                                      {{ empresa.direccion }}
+                                      <span v-if="empresa.numero"> {{ empresa.numero }}</span>
+                                      <span v-if="empresa.otros_direccion">, {{ empresa.otros_direccion }}</span>
+                                    </span>
+                                    <br v-if="empresa.direccion && (empresa.municipio || empresa.codigo_postal)"/>
+                                    <span v-if="empresa.codigo_postal">{{ empresa.codigo_postal }} </span>
+                                    <span v-if="empresa.municipio">{{ empresa.municipio }}</span>
+                                    <span v-if="empresa.provincia">, {{ empresa.provincia }}</span>
+                                  </p>
+                                </div>
+
+                              </div>
+
+                              <!-- Acciones -->
+                              <div class="space-y-3">
+                                <p class="text-sm font-semibold text-texto-secundario">Acciones</p>
+
+                                <div class="grid grid-cols-1 gap-2">
+                                  <button
+                                    @click="abrirPanel('email')"
+                                    :class="[
+                                      'flex items-center justify-center gap-2 py-2.5 px-3 rounded-full border text-sm font-bold transition-all',
+                                      panelActivo === 'email'
+                                        ? 'bg-empresas/8 border-empresas/25 text-empresas'
+                                        : 'bg-gray-50 border-gray-200 text-gray-600 hover:border-gray-300 hover:text-azul-noche'
+                                    ]"
+                                  >
+                                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                                    </svg>
+                                    Enviar email
+                                  </button>
+
+                                </div>
+
+                                <!-- Formulario email -->
+                                <Transition name="slide-down">
+                                  <div v-if="panelActivo === 'email'"
+                                       class="rounded-2xl bg-empresas/5 border border-empresas/15 p-4 space-y-3">
+                                    <p class="text-sm font-semibold text-empresas-dark">Enviar correo</p>
+                                    <div v-if="emailOk"
+                                         class="flex items-center gap-2 p-3 rounded-xl bg-empresas/10 border border-empresas/20">
+                                      <svg class="w-4 h-4 text-empresas" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
+                                      </svg>
+                                      <p class="text-sm font-bold text-empresas">Correo enviado correctamente.</p>
+                                    </div>
+                                    <template v-if="!emailOk">
+                                      <div>
+                                        <label class="block text-xs font-semibold text-texto-secundario mb-1">Remitente (tu email)</label>
+                                        <input v-model="emailForm.remitente" type="email"
+                                               class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
+                                                      text-sm text-azul-noche placeholder-gray-400 shadow-sm
+                                                      focus:outline-none focus:border-empresas focus:bg-white focus:ring-4 focus:ring-empresas/20 transition-colors"/>
+                                      </div>
+                                      <div>
+                                        <label class="block text-xs font-semibold text-texto-secundario mb-1">Destinatario</label>
+                                        <p class="text-sm text-gray-600 px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl shadow-sm">
+                                          {{ empresa.email_contacto || empresa.email_general || 'Sin email registrado' }}
+                                        </p>
+                                      </div>
+                                      <div>
+                                        <label class="block text-xs font-semibold text-texto-secundario mb-1">Asunto</label>
+                                        <input v-model="emailForm.asunto" type="text" placeholder="Asunto del correo..."
+                                               class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
+                                                      text-sm text-azul-noche placeholder-gray-400 shadow-sm
+                                                      focus:outline-none focus:border-empresas focus:bg-white focus:ring-4 focus:ring-empresas/20 transition-colors"/>
+                                      </div>
+                                      <div>
+                                        <label class="block text-xs font-semibold text-texto-secundario mb-1">Mensaje</label>
+                                        <textarea v-model="emailForm.mensaje" rows="4" placeholder="Escribe tu mensaje aquí..."
+                                                  class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2
+                                                         text-sm text-azul-noche placeholder-gray-400 shadow-sm resize-none
+                                                         focus:outline-none focus:border-empresas focus:bg-white focus:ring-4 focus:ring-empresas/20 transition-colors"/>
+                                      </div>
+                                      <p v-if="emailError" class="text-sm text-red-500 font-medium">{{ emailError }}</p>
+                                      <button @click="enviarEmail"
+                                              :disabled="enviandoEmail || !emailForm.asunto || !emailForm.mensaje ||
+                                                         !(empresa.email_contacto || empresa.email_general)"
+                                              class="w-full py-2.5 rounded-full bg-empresas text-white text-sm font-black
+                                                     transition-all shadow-sm
+                                                     hover:bg-empresas/90 disabled:opacity-40 disabled:cursor-not-allowed">
+                                        {{ enviandoEmail ? 'Enviando...' : 'Enviar correo' }}
+                                      </button>
+                                      <p v-if="!(empresa.email_contacto || empresa.email_general)"
+                                         class="text-sm text-amber-600 text-center">
+                                        Esta empresa no tiene email registrado.
+                                      </p>
+                                    </template>
+                                  </div>
+                                </Transition>
+
+                                <!-- Proyectos asociados a esta empresa: se ven de entrada hasta
+                                     MAX_PROYECTOS_VISIBLES miniaturas; si hay más, una tarjeta
+                                     "ver más" destacada (borde discontinuo) las despliega todas. -->
+                                <div v-if="proyectosDeEmpresa(empresa.id).length" class="pt-3 border-t border-borde">
+                                  <p class="text-sm font-semibold text-texto-secundario mb-2">
+                                    Retos ajustados asociados
+                                    <span class="text-gray-300 normal-case font-semibold">
+                                      ({{ proyectosDeEmpresa(empresa.id).length }})
+                                    </span>
+                                  </p>
+                                  <div class="flex flex-wrap gap-2.5">
+                                    <button
+                                      v-for="p in proyectosVisibles(empresa)"
+                                      :key="p.uuid"
+                                      @click="abrirFichaProyecto(p.uuid)"
+                                      class="group shrink-0 w-28 text-left rounded-xl border border-borde bg-white
+                                             overflow-hidden hover:border-empresas/30 hover:shadow-sm transition-all"
+                                    >
+                                      <div class="h-20 w-full overflow-hidden">
+                                        <img v-if="p.imagen_portada_url" :src="p.imagen_portada_url" :alt="p.titulo"
+                                             class="w-full h-full object-cover
+                                                    group-hover:scale-105 transition-transform duration-200"/>
+                                        <div v-else
+                                             :class="['w-full h-full flex items-center justify-center bg-gradient-to-br', colorFamilia(familiaNombreProyecto(p)).bg]">
+                                          <svg :class="['w-7 h-7', colorFamilia(familiaNombreProyecto(p)).icon]"
+                                               fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path v-for="d in iconoFamilia(familiaNombreProyecto(p))" :key="d"
+                                              stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" :d="d" />
+                                          </svg>
+                                        </div>
+                                      </div>
+                                      <div class="p-2 space-y-1.5">
+                                        <p class="text-xs font-bold text-azul-noche leading-snug line-clamp-2">{{ p.titulo }}</p>
+                                        <span :class="['inline-block text-[11px] font-semibold px-1.5 py-0.5 rounded-full border', colorProyecto(p)]">
+                                          {{ etiquetaProyecto(p) }}
+                                        </span>
+                                      </div>
+                                    </button>
+
+                                    <!-- Ver más / ver menos: mismo tamaño que una miniatura, pero con
+                                         borde discontinuo para que se note que es una acción, no un proyecto. -->
+                                    <button
+                                      v-if="proyectosDeEmpresa(empresa.id).length > MAX_PROYECTOS_VISIBLES"
+                                      @click="proyectosExpandido = !proyectosExpandido"
+                                      class="shrink-0 w-28 h-full min-h-[8.5rem] rounded-xl border-2 border-dashed
+                                             border-empresas/30 bg-empresas/5 hover:bg-empresas/10
+                                             flex flex-col items-center justify-center gap-1 text-empresas transition-colors"
+                                    >
+                                      <svg class="w-5 h-5 transition-transform duration-200"
+                                           :class="proyectosExpandido ? 'rotate-180' : ''"
+                                           fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
+                                      </svg>
+                                      <span class="text-sm font-black leading-none">
+                                        {{ proyectosExpandido ? 'Ver menos' : `+${proyectosDeEmpresa(empresa.id).length - MAX_PROYECTOS_VISIBLES}` }}
+                                      </span>
+                                      <span v-if="!proyectosExpandido" class="text-xs font-semibold">
+                                        Ver más
+                                      </span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                              </div>
+                            </div>
+              </div>
+            </template>
           </div>
         </div>
-      </div>
+      </Transition>
+    </Teleport>
 
-      <!-- Sin resultados -->
-      <div v-else-if="!cargando"
-           class="text-center py-24 rounded-[2rem] border border-dashed border-gray-200 bg-white shadow-sm">
-        <div class="w-14 h-14 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-4">
-          <svg class="w-7 h-7 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-              d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
-            <polyline points="9 22 9 12 15 12 15 22" stroke-width="1.5"/>
-          </svg>
-        </div>
-        <p class="text-gray-400 text-sm">No se han encontrado empresas con estos filtros.</p>
-        <button @click="limpiarFiltros"
-                class="mt-3 text-xs font-bold text-[#00A859] hover:text-[#009950] transition-colors">
-          Limpiar filtros
-        </button>
-      </div>
+    <!-- Aviso al copiar -->
+    <Transition name="fade">
+      <p v-if="avisoCopia" role="status"
+         class="fixed bottom-14 right-4 z-[60] max-w-[calc(100vw-2rem)] rounded-2xl bg-azul-noche px-4 py-3 text-sm font-semibold text-white shadow-xl">{{ avisoCopia }}</p>
+    </Transition>
 
     </div>
   </div>
@@ -1257,4 +1305,7 @@ const totalReunion     = computed(() => estadisticasContacto.value['Reunión fij
 }
 
 select option { background: white; color: #1F2937; }
+
+.chip-filtro { display: inline-flex; height: 2.25rem; align-items: center; gap: 0.375rem; border-radius: 9999px; background: #f3f4f6; padding: 0 0.75rem; font-size: 0.75rem; font-weight: 600; color: var(--color-azul-noche); }
+.chip-filtro:hover { background: #e5e7eb; }
 </style>

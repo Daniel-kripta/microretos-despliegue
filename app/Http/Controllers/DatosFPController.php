@@ -4,16 +4,34 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 use App\Models\CicloFormativo;
 use App\Models\Modulo;
 use App\Models\ResultadoAprendizaje;
 use App\Models\Empresa;
 use App\Models\Familia;
 use App\Models\CentroEducativo;
+use App\Models\Encuentro;
+use App\Models\Microproyecto;
 use App\Http\Requests\AsociarEmpresasCentroRequest;
+use App\Http\Requests\StoreCicloRequest;
+use App\Http\Requests\StoreEmpresaRequest;
+use App\Http\Requests\UpdateCicloRequest;
+use App\Http\Requests\UpdateEmpresaRequest;
+use App\Http\Requests\UpdateDiagnosticoEmpresaRequest;
+use App\Http\Requests\UpdateInteresEmpresaRequest;
+use App\Http\Resources\CicloFormativoResource;
+use App\Http\Resources\EmpresaResource;
+use App\Http\Resources\EmpresaDashboardResource;
+use App\Services\EmpresaFamiliaService;
 
 class DatosFPController extends Controller
 {
+    // Techo de seguridad para GET /empresas: el frontend filtra y pagina en cliente,
+    // pero sin límite un catálogo que crece podría agotar memoria en una sola petición.
+    private const MAX_EMPRESAS_LISTADO = 2000;
+
     // ==========================================
     // FLUJO B2B: Empresas
     // ==========================================
@@ -21,6 +39,7 @@ class DatosFPController extends Controller
     /**
      * GET /empresas
      * Devuelve las empresas disponibles. Docentes y admin de centro: solo las de su centro.
+     * Rol empresa: solo la suya. Superadmin: todas.
      */
     public function getEmpresas(Request $request)
     {
@@ -28,31 +47,49 @@ class DatosFPController extends Controller
         // tienen el mismo nombre JSON → la relación machaca el string y rompe el frontend.
         // El string legacy es suficiente para el selector de centros.
         $user  = $request->user();
-        $query = Empresa::orderBy('nombre_comercial');
+        // Plantillas del catálogo sin datos para generar retos: fuera (solo las ve superadmin,
+        // que no tiene filtro de centro). Se gestionan desde /empresas/dashboard.
+        $query = Empresa::with('familias:id,nombre')->sinCatalogoInutilizable()->orderBy('nombre_comercial');
 
-        if ($user && ($user->isDocente() || $user->isAdmin())) {
+        if ($user->isDocente() || $user->isAdmin()) {
             $query->delCentroDe($user);
+        } elseif ($user->isEmpresa()) {
+            $query->whereKey($user->empresa_id);
+        } elseif (!$user->gestionaTodosLosUsuarios()) {
+            // Ninguna; superadmin y admin_central_dualab las ven todas (en Usuarios asignan empresa a una cuenta)
+            $query->whereRaw('0 = 1');
         }
 
-        return response()->json($query->get());
+        return response()->json(
+            EmpresaResource::collection($query->take(self::MAX_EMPRESAS_LISTADO)->get())
+        );
     }
 
     /**
      * GET /empresas/{id}/familias
      * Devuelve las familias profesionales vinculadas a una empresa.
      */
-    public function getFamiliasPorEmpresa($idEmpresa)
+    public function getFamiliasPorEmpresa(Request $request, $idEmpresa)
     {
         $empresa = Empresa::with('familias')->find($idEmpresa);
+        $user    = $request->user();
 
-        if (!$empresa) {
+        // Mismo alcance que GET /empresas. Una empresa fuera de alcance responde 404
+        // (no 403) para no revelar qué ids existen en otros centros.
+        $enAlcance = $empresa && (
+            $user->isSuperAdmin()
+            || (($user->isDocente() || $user->isAdmin()) && $empresa->perteneceAlCentroDe($user))
+            || ($user->isEmpresa() && (int) $user->empresa_id === (int) $empresa->id)
+        );
+
+        if (!$enAlcance) {
             return response()->json([], 404);
         }
 
         // Devolvemos siempre strings (nombres) para mantener compatibilidad con el frontend.
         // El frontend usa el nombre directamente en la URL /familias/{nombre}/ciclos.
         if ($empresa->familias->isNotEmpty()) {
-            return response()->json($empresa->familias->pluck('nombre'));
+            return response()->json($empresa->familias->pluck('nombre')->unique()->values());
         }
 
         // Fallback legacy: columna 'familia' string todavía sin normalizar
@@ -60,6 +97,7 @@ class DatosFPController extends Controller
             DB::table('empresa_familia')
                 ->where('empresa_id', $idEmpresa)
                 ->whereNotNull('familia')
+                ->distinct()
                 ->pluck('familia')
         );
     }
@@ -70,14 +108,18 @@ class DatosFPController extends Controller
 
     public function getFamilias()
     {
+        $conDatos = Familia::conDatosParaRetos()->pluck('id')->flip();
+
         $familias = Familia::select('id', 'nombre', 'imagen_url')
             ->withCount('ciclos')
             ->orderBy('nombre')
             ->get()
-            ->map(function ($familia) {
+            ->map(function ($familia) use ($conDatos) {
                 if ($familia->imagen_url) {
                     $familia->imagen_url = asset($familia->imagen_url);
                 }
+                // Tiene módulos y RA/CE: se puede generar un reto para ella
+                $familia->setAttribute('con_datos_retos', $conDatos->has($familia->id));
                 return $familia;
             });
 
@@ -96,42 +138,42 @@ class DatosFPController extends Controller
             ? CicloFormativo::where('familia_id', $familiaModel->id)
             : CicloFormativo::where('familia', $nombreFamilia); // fallback defensivo
 
-        if ($request->filled('centro')) {
-            $centro = $request->centro;
-
-            // Primero buscamos por centro_id normalizado
-            $centroModel = CentroEducativo::where('nombre', $centro)->first();
-
-            if ($centroModel) {
-                $ciclosDelCentro = DB::table('centro_ciclo')
-                    ->where('centro_id', $centroModel->id)
-                    ->pluck('ciclo_id');
-            } else {
-                // Fallback legacy: columna 'centro_educativo' string
-                $ciclosDelCentro = DB::table('centro_ciclo')
-                    ->where('centro_educativo', $centro)
-                    ->pluck('ciclo_id');
-            }
-
-            // Solo filtramos si el centro ya tiene ciclos vinculados.
-            // Si está vacío (centro recién creado o sin configurar), devolvemos
-            // todos los ciclos de la familia para que la empresa sea usable.
-            if ($ciclosDelCentro->isNotEmpty()) {
-                $query->whereIn('id', $ciclosDelCentro);
-            }
+        // Solo se filtra si el centro ya tiene ciclos vinculados; si no (centro recién creado
+        // o sin configurar), se devuelven todos los de la familia para que la empresa sea usable.
+        $ciclosDelCentro = CicloFormativo::idsDelCentro($request->filled('centro') ? (string) $request->centro : null);
+        if ($ciclosDelCentro !== null) {
+            $query->whereIn('id', $ciclosDelCentro);
         }
 
-        return response()->json($query->orderBy('nombre')->get());
+        $ciclos = $query->orderBy('nombre')->get();
+
+        // Ciclo con módulos y RA/CE: sin ellos el generador no puede completar el reto
+        $conDatos = CicloFormativo::conDatosParaRetos()->whereIn('id', $ciclos->pluck('id'))->pluck('id')->flip();
+        // Y en qué cursos: hay ciclos con RA/CE cargados solo en 1º (el generador desactiva el otro)
+        $cursosConDatos = Modulo::whereIn('idcicloformativo', $ciclos->pluck('id'))
+            ->whereHas('ras.criteriosEvaluacion')
+            ->distinct()->get(['idcicloformativo', 'curso'])
+            ->groupBy('idcicloformativo');
+        $ciclos->each(function ($c) use ($conDatos, $cursosConDatos) {
+            $c->setAttribute('con_datos_retos', $conDatos->has($c->id));
+            $c->setAttribute('cursos_con_datos', ($cursosConDatos[$c->id] ?? collect())->pluck('curso')->map(fn ($n) => (int) $n)->sort()->values());
+        });
+
+        return response()->json($ciclos);
     }
 
     public function getModulos($idCiclo)
     {
-        return response()->json(
-            Modulo::where('idcicloformativo', $idCiclo)
-                ->orderBy('curso')
-                ->orderBy('nombre')
-                ->get()
-        );
+        $modulos = Modulo::where('idcicloformativo', $idCiclo)
+            ->orderBy('curso')
+            ->orderBy('nombre')
+            ->get();
+
+        // Módulo con RA y CE cargados: los que no tienen no aportan nada al reto
+        $conRaCe = Modulo::whereIn('id', $modulos->pluck('id'))->whereHas('ras.criteriosEvaluacion')->pluck('id')->flip();
+        $modulos->each(fn ($m) => $m->setAttribute('con_ra_ce', $conRaCe->has($m->id)));
+
+        return response()->json($modulos);
     }
 
     public function getRaCe($idModulo)
@@ -168,31 +210,19 @@ class DatosFPController extends Controller
      */
     public function getCentros()
     {
-        $centros = CentroEducativo::orderBy('nombre')->get();
+        // Dos consultas en total (centros y sus ciclos con familia), no una por centro. Misma forma que antes:
+        // ciclos ordenados por familia y nombre, con familia_id y familia_nombre planos.
+        $centros = CentroEducativo::with(['ciclos:ciclos_formativos.id,ciclos_formativos.nombre,ciclos_formativos.familia_id', 'ciclos.familia:id,nombre'])
+            ->orderBy('nombre')->get();
 
-        return response()->json($centros->map(function ($centro) {
-            $ciclos = DB::table('centro_ciclo')
-                ->where('centro_id', $centro->id)
-                ->join('ciclos_formativos', 'ciclos_formativos.id', '=', 'centro_ciclo.ciclo_id')
-                ->leftJoin('familias', 'familias.id', '=', 'ciclos_formativos.familia_id')
-                ->select(
-                    'ciclos_formativos.id',
-                    'ciclos_formativos.nombre',
-                    'familias.id as familia_id',
-                    'familias.nombre as familia_nombre'
-                )
-                ->distinct()
-                ->orderBy('familias.nombre')
-                ->orderBy('ciclos_formativos.nombre')
-                ->get();
-
-            return [
-                'id'     => $centro->id,
-                'nombre' => $centro->nombre,
-                'img'    => $centro->img,
-                'ciclos' => $ciclos,
-            ];
-        }));
+        return response()->json($centros->map(fn ($centro) => [
+            'id'     => $centro->id,
+            'nombre' => $centro->nombre,
+            'img'    => $centro->img,
+            'ciclos' => $centro->ciclos->unique('id')
+                ->map(fn ($c) => ['id' => $c->id, 'nombre' => $c->nombre, 'familia_id' => $c->familia_id, 'familia_nombre' => $c->familia?->nombre])
+                ->sortBy(fn ($c) => \Illuminate\Support\Str::lower(\Illuminate\Support\Str::ascii(($c['familia_nombre'] ?? '') . "\0" . $c['nombre'])))->values(),
+        ]));
     }
 
     /**
@@ -214,8 +244,51 @@ class DatosFPController extends Controller
     }
 
     /**
+     * POST /centros/{id}/impacto-cambio
+     * Previsualiza, SIN GUARDAR NADA, cuántos registros denormalizados (que copiaron el
+     * nombre/municipio del centro en su momento — ver actualizarCentro()) se actualizarían
+     * si se confirma el cambio propuesto. El frontend llama a esto antes de actualizarCentro()
+     * para poder mostrar el aviso "esto va a afectar a X empresas, Y encuentros, Z proyectos".
+     */
+    public function impactoCambioCentro(Request $request, $id)
+    {
+        $centro = CentroEducativo::find($id);
+
+        if (!$centro) {
+            return response()->json(['error' => 'Centro no encontrado'], 404);
+        }
+
+        $request->validate([
+            'nombre'    => 'required|string|max:255',
+            'municipio' => 'nullable|string|max:255',
+        ]);
+
+        $cambiaNombre    = $request->nombre !== $centro->nombre;
+        $cambiaMunicipio = ($request->municipio ?: null) !== ($centro->municipio ?: null);
+
+        if (!$cambiaNombre && !$cambiaMunicipio) {
+            return response()->json(['requiere_confirmacion' => false]);
+        }
+
+        return response()->json([
+            'requiere_confirmacion' => true,
+            'cambia_nombre'         => $cambiaNombre,
+            'cambia_municipio'      => $cambiaMunicipio,
+            'afectados' => [
+                'empresas'   => Empresa::where('centro_id', $id)->count(),
+                'encuentros' => Encuentro::where('centro_educativo_id', $id)->count(),
+                'proyectos'  => Microproyecto::where('centro_id', $id)->count(),
+            ],
+        ]);
+    }
+
+    /**
      * PUT /centros/{id}
-     * Actualiza el nombre y los ciclos de un centro educativo.
+     * Actualiza el nombre, municipio y los ciclos de un centro educativo, y propaga el
+     * cambio de nombre/municipio a los registros que guardaron una copia en su momento
+     * (Empresa.centro_educativo, Encuentro.centro_educativo, Microproyecto.datos_centro) —
+     * antes de esto solo se propagaba a Empresa/centro_ciclo, dejando Encuentro y
+     * Microproyecto desactualizados si se renombraba un centro.
      * Los ciclos anteriores se reemplazan completamente por los nuevos.
      */
     public function actualizarCentro(Request $request, $id)
@@ -228,23 +301,42 @@ class DatosFPController extends Controller
 
         $request->validate([
             'nombre'      => 'required|string|max:255|unique:centro_educativo,nombre,' . $id,
+            'municipio'   => 'nullable|string|max:255',
             'ciclosIds'   => 'required|array|min:1',
             'ciclosIds.*' => 'integer|exists:ciclos_formativos,id',
             'img'         => 'sometimes|nullable|string|max:2048',
         ]);
 
-        $nombreAnterior = $centro->nombre;
-        $update = ['nombre' => $request->nombre];
+        $nombreAnterior    = $centro->nombre;
+        $municipioAnterior = $centro->municipio;
+        $update = ['nombre' => $request->nombre, 'municipio' => $request->municipio];
         if ($request->has('img')) $update['img'] = $request->img;
         $centro->update($update);
 
-        // Si cambió el nombre, actualizar el campo legacy en empresas y en centro_ciclo
-        if ($nombreAnterior !== $request->nombre) {
-            Empresa::where('centro_educativo', $nombreAnterior)
-                ->update(['centro_educativo' => $request->nombre]);
-            DB::table('centro_ciclo')
-                ->where('centro_id', $id)
-                ->update(['centro_educativo' => $request->nombre]);
+        $cambioNombre    = $nombreAnterior !== $request->nombre;
+        $cambioMunicipio = $municipioAnterior !== $request->municipio;
+
+        if ($cambioNombre) {
+            // Por centro_id (no por el nombre viejo): así se corrigen también las
+            // empresas cuyo string legacy ya estuviera desincronizado del real.
+            Empresa::where('centro_id', $id)->update(['centro_educativo' => $centro->nombre]);
+            DB::table('centro_ciclo')->where('centro_id', $id)->update(['centro_educativo' => $centro->nombre]);
+            Encuentro::where('centro_educativo_id', $id)->update(['centro_educativo' => $centro->nombre]);
+        }
+
+        if ($cambioNombre || $cambioMunicipio) {
+            // datos_centro es JSON (snapshot tomado por el wizard) — no se puede
+            // actualizar con un solo UPDATE, hay que leer y rescribir cada fila
+            // conservando docente_nombre/docente_email tal cual estaban.
+            Microproyecto::where('centro_id', $id)->whereNotNull('datos_centro')
+                ->chunkById(200, function ($proyectos) use ($centro) {
+                    foreach ($proyectos as $proyecto) {
+                        $datos = $proyecto->datos_centro;
+                        $datos['nombre']    = $centro->nombre;
+                        $datos['municipio'] = $centro->municipio;
+                        $proyecto->update(['datos_centro' => $datos]);
+                    }
+                });
         }
 
         // Reemplazar todos los ciclos del centro
@@ -260,7 +352,7 @@ class DatosFPController extends Controller
 
         return response()->json([
             'message' => 'Centro actualizado correctamente',
-            'centro'  => ['id' => $centro->id, 'nombre' => $centro->nombre, 'img' => $centro->img],
+            'centro'  => ['id' => $centro->id, 'nombre' => $centro->nombre, 'municipio' => $centro->municipio, 'img' => $centro->img],
         ]);
     }
 
@@ -272,12 +364,13 @@ class DatosFPController extends Controller
     {
         $request->validate([
             'nombre'      => 'required|string|max:255|unique:centro_educativo,nombre',
+            'municipio'   => 'nullable|string|max:255',
             'ciclosIds'   => 'required|array|min:1',
             'ciclosIds.*' => 'integer|exists:ciclos_formativos,id',
             'img'         => 'sometimes|nullable|string|max:2048',
         ]);
 
-        $centro = CentroEducativo::create($request->only(['nombre', 'img']));
+        $centro = CentroEducativo::create($request->only(['nombre', 'municipio', 'img']));
 
         $rows = collect($request->ciclosIds)->map(fn($cicloId) => [
             'centro_id'        => $centro->id,
@@ -289,7 +382,7 @@ class DatosFPController extends Controller
 
         return response()->json([
             'message' => 'Centro educativo creado correctamente',
-            'centro'  => ['id' => $centro->id, 'nombre' => $centro->nombre, 'img' => $centro->img],
+            'centro'  => ['id' => $centro->id, 'nombre' => $centro->nombre, 'municipio' => $centro->municipio, 'img' => $centro->img],
         ], 201);
     }
 
@@ -382,53 +475,43 @@ class DatosFPController extends Controller
     // CRUD CICLOS FORMATIVOS
     // ==========================================
 
-    public function storeCiclo(Request $request)
+    public function storeCiclo(StoreCicloRequest $request)
     {
-        $request->validate([
-            'nombre'      => 'required|string|max:255',
-            'familia_id'  => 'required|integer|exists:familias,id',
-            'grado'       => 'nullable|string|max:100',
-            'siglasGrado' => 'nullable|string|max:3',
-        ]);
-
-        $familia = Familia::find($request->familia_id);
+        $datos   = $request->validated();
+        /** @var Familia $familia  validado con exists:familias,id en StoreCicloRequest */
+        $familia = Familia::find($datos['familia_id']);
 
         $ciclo = CicloFormativo::create([
             'idCiclo'     => 0,
-            'nombre'      => $request->nombre,
+            'nombre'      => $datos['nombre'],
             'familia'     => $familia->nombre,
-            'familia_id'  => $request->familia_id,
-            'grado'       => $request->grado,
-            'siglasGrado' => $request->siglasGrado ?? 'FP',
+            'familia_id'  => $familia->id,
+            'grado'       => $datos['grado'] ?? null,
+            'siglasGrado' => $datos['siglasGrado'] ?? 'FP',
         ]);
 
-        return response()->json(['message' => 'Ciclo creado', 'ciclo' => $ciclo], 201);
+        return response()->json(['message' => 'Ciclo creado', 'ciclo' => new CicloFormativoResource($ciclo)], 201);
     }
 
-    public function updateCiclo(Request $request, $id)
+    public function updateCiclo(UpdateCicloRequest $request, $id)
     {
         $ciclo = CicloFormativo::find($id);
         if (!$ciclo) return response()->json(['error' => 'Ciclo no encontrado'], 404);
 
-        $request->validate([
-            'nombre'      => 'required|string|max:255',
-            'familia_id'  => 'required|integer|exists:familias,id',
-            'grado'       => 'nullable|string|max:100',
-            'siglasGrado' => 'nullable|string|max:3',
-        ]);
+        $datos   = $request->validated();
+        /** @var Familia $familia  validado con exists:familias,id en StoreCicloRequest */
+        $familia = Familia::find($datos['familia_id']);
 
-        $familia = Familia::find($request->familia_id);
-
-        $ciclo->nombre      = $request->nombre;
-        $ciclo->familia_id  = $request->familia_id;
+        $ciclo->nombre      = $datos['nombre'];
+        $ciclo->familia_id  = $familia->id;
         $ciclo->familia     = $familia->nombre;
-        $ciclo->grado       = $request->grado;
-        if ($request->filled('siglasGrado')) {
-            $ciclo->siglasGrado = $request->siglasGrado;
+        $ciclo->grado       = $datos['grado'] ?? null;
+        if (!empty($datos['siglasGrado'])) {
+            $ciclo->siglasGrado = $datos['siglasGrado'];
         }
         $ciclo->save();
 
-        return response()->json(['message' => 'Ciclo actualizado', 'ciclo' => $ciclo]);
+        return response()->json(['message' => 'Ciclo actualizado', 'ciclo' => new CicloFormativoResource($ciclo)]);
     }
 
     public function destroyCiclo($id)
@@ -453,45 +536,104 @@ class DatosFPController extends Controller
     // GUARDADO Y ACTUALIZACIÓN DE EMPRESAS
     // ==========================================
 
-    public function guardarEmpresa(Request $request)
+    // Campos del formulario (camelCase, contrato del frontend) → columnas de empresas.
+    // centroEducativo, familia y ciclosIds no están aquí: tienen tratamiento propio.
+    private const CAMPOS_EMPRESA = [
+        'nombreComercial'  => 'nombre_comercial',
+        'razonSocial'      => 'razon_social',
+        'cif'              => 'cif',
+        'sector'           => 'sector',
+        'tamano'           => 'tamano',
+        'nivelDigitalizacion' => 'nivel_digitalizacion',
+        'web'              => 'web',
+        'actividad'        => 'actividad',
+        'personaContacto'  => 'persona_contacto',
+        'telefono'         => 'telefono',
+        'emailGeneral'     => 'email_general',
+        'direccion'        => 'direccion',
+        'municipio'        => 'municipio',
+        'provincia'        => 'provincia',
+        'codigoPostal'     => 'codigo_postal',
+        'diaANormal'       => 'dia_a_normal',
+        'friccionArea'     => 'friccion_area',
+        'friccionProblema' => 'friccion_problema',
+        'consecuencias'    => 'consecuencias',
+        'restricciones'    => 'restricciones',
+        'loQueNoQuieren'   => 'lo_que_no_quieren',
+        'expectativasAlumno' => 'expectativas_alumno',
+        'esSimulada'       => 'es_simulada',
+        'estadoContacto'   => 'estado_contacto',
+    ];
+
+    private const COLUMNAS_DIAGNOSTICO = [
+        'dia_a_normal', 'friccion_area', 'friccion_problema',
+        'consecuencias', 'restricciones', 'lo_que_no_quieren', 'expectativas_alumno',
+    ];
+    // Listas guardadas como texto "a, b, c": se comparan como conjunto, no como texto,
+    // porque el frontend las parte y las vuelve a unir (puede cambiar espacios/orden).
+    private const COLUMNAS_LISTA = ['consecuencias', 'restricciones'];
+
+    /** @param array<string, mixed> $updateData */
+    private function cambiaDiagnostico(Empresa $empresa, array $updateData): bool
     {
-        $auth = $request->user();
-        $estadosPermitidos = ['Pendiente de llamar', 'Llamado - Información obtenida', 'Llamado - Negativa', 'Llamado - Llamar más tarde', 'En colaboración activa', 'Descartada'];
+        $normalizar = function (string $columna, mixed $valor): string {
+            $texto = trim((string) $valor);
+            if (!in_array($columna, self::COLUMNAS_LISTA, true)) return $texto;
+            $items = array_filter(array_map('trim', explode(',', $texto)), fn ($i) => $i !== '');
+            sort($items);
+            return implode(',', $items);
+        };
+        foreach (self::COLUMNAS_DIAGNOSTICO as $columna) {
+            if (!array_key_exists($columna, $updateData)) continue;
+            if ($normalizar($columna, $updateData[$columna]) !== $normalizar($columna, $empresa->getAttribute($columna))) {
+                return true;
+            }
+        }
+        return false;
+    }
 
-        $request->validate([
-            'nombreComercial'  => 'required|string|max:255',
-            'razonSocial'      => 'nullable|string|max:255',
-            'cif'              => 'nullable|string|max:20',
-            'sector'           => 'nullable|string|max:255',
-            'tamano'           => 'nullable|string|max:50',
-            'web'              => 'nullable|string|max:255',
-            'actividad'        => 'nullable|string|max:500',
-            'personaContacto'  => 'nullable|string|max:255',
-            'telefono'         => 'nullable|string|max:20',
-            'emailGeneral'     => 'nullable|email|max:255',
-            'direccion'        => 'nullable|string|max:255',
-            'municipio'        => 'nullable|string|max:255',
-            'provincia'        => 'nullable|string|max:255',
-            'codigoPostal'     => 'nullable|string|max:10',
-            'diaANormal'       => 'nullable|string|max:1000',
-            'friccionArea'     => 'nullable|string|max:400',
-            'friccionProblema' => 'nullable|string|max:1200',
-            'restricciones'    => 'nullable|string|max:600',
-            'loQueNoQuieren'   => 'nullable|string|max:500',
-            'consecuencias'    => 'nullable',
-            'esSimulada'       => 'nullable|boolean',
-            'estadoContacto'   => 'nullable|string|in:' . implode(',', $estadosPermitidos),
-        ]);
+    /** Traduce solo los campos validados que llegaron en la petición a columnas de BD. */
+    private function columnasEmpresa(array $validated): array
+    {
+        $columnas = [];
+        foreach (self::CAMPOS_EMPRESA as $campo => $columna) {
+            if (array_key_exists($campo, $validated)) {
+                $columnas[$columna] = $validated[$campo];
+            }
+        }
+        return $columnas;
+    }
 
-        $consecuenciasTexto = is_array($request->consecuencias)
-            ? implode(', ', $request->consecuencias)
-            : $request->consecuencias;
+    /** Vincula los ciclos seleccionados al centro de la empresa. */
+    private function vincularCiclosCentro(?int $centroId, ?string $centroNombre, array $ciclosIds): void
+    {
+        if (!$centroId || empty($ciclosIds)) {
+            return;
+        }
+
+        $rows = collect($ciclosIds)->map(fn ($cicloId) => [
+            'centro_id'        => $centroId,
+            'centro_educativo' => $centroNombre,  // legacy
+            'ciclo_id'         => $cicloId,
+        ])->all();
+        DB::table('centro_ciclo')->insertOrIgnore($rows);
+    }
+
+    public function guardarEmpresa(StoreEmpresaRequest $request, EmpresaFamiliaService $familias)
+    {
+        $auth      = $request->user();
+        $validated = $request->validated();
 
         // Admin de centro: la empresa que crea es siempre de su propio centro, nunca
         // el que mande el cliente — solo superadmin puede elegir centro libremente.
-        $centroEducativoNombre = $request->centroEducativo;
-        if ($auth->isAdmin()) {
-            $centroEducativoNombre = $auth->centroEducativo?->nombre;
+        $centroEducativoNombre = $auth->isAdmin()
+            ? $auth->centroEducativo?->nombre
+            : ($validated['centroEducativo'] ?? null);
+
+        // Un admin sin centro asignado no puede dar de alta: la empresa quedaría huérfana.
+        if ($auth->isAdmin() && !$centroEducativoNombre) {
+            Log::warning('Alta de empresa denegada: admin sin centro asignado.', ['user_id' => $auth?->id]);
+            return response()->json(['error' => 'Tu cuenta no tiene centro asignado: contacta con DUALAB.'], 422);
         }
 
         // Resolvemos o creamos el centro educativo
@@ -501,58 +643,27 @@ class DatosFPController extends Controller
             $centroId = $centro->id;
         }
 
-        $empresa = Empresa::create([
-            'nombre_comercial'  => $request->nombreComercial,
-            'razon_social'      => $request->razonSocial,
-            'cif'               => $request->cif,
-            'centro_educativo'  => $centroEducativoNombre, // legacy
-            'centro_id'         => $centroId,
-            'sector'            => $request->sector,
-            'tamano'            => $request->tamano,
-            'web'               => $request->web,
-            'actividad'         => $request->actividad,
-            'persona_contacto'  => $request->personaContacto,
-            'telefono'          => $request->telefono,
-            'email_general'     => $request->emailGeneral,
-            'direccion'         => $request->direccion,
-            'municipio'         => $request->municipio,
-            'provincia'         => $request->provincia,
-            'codigo_postal'     => $request->codigoPostal,
-            'dia_a_normal'      => $request->diaANormal,
-            'friccion_area'     => $request->friccionArea,
-            'friccion_problema' => $request->friccionProblema,
-            'consecuencias'     => $consecuenciasTexto,
-            'restricciones'     => $request->restricciones,
-            'lo_que_no_quieren' => $request->loQueNoQuieren,
-            'es_simulada'       => $request->boolean('esSimulada', false),
-            'estado_contacto'   => $request->estadoContacto,
-        ]);
-
-        // Guardamos la familia usando FK si existe, además del string legacy
-        if ($request->filled('familia')) {
-            $familiaModel = Familia::where('nombre', $request->familia)->first();
-            DB::table('empresa_familia')->insert([
-                'empresa_id' => $empresa->id,
-                'familia'    => $request->familia,                    // legacy
-                'familia_id' => $familiaModel?->id,                   // normalizado
-                'created_at' => now(),
-                'updated_at' => now(),
+        $empresa = DB::transaction(function () use ($validated, $centroEducativoNombre, $centroId, $familias) {
+            $empresa = Empresa::create($this->columnasEmpresa($validated) + [
+                'centro_educativo' => $centroEducativoNombre, // legacy
+                'centro_id'        => $centroId,
+                'es_simulada'      => (bool) ($validated['esSimulada'] ?? false),
             ]);
-        }
 
-        // Vinculamos los ciclos al nuevo centro si el usuario los seleccionó
-        if ($centroId && $request->filled('ciclosIds') && is_array($request->ciclosIds)) {
-            $rows = collect($request->ciclosIds)->map(fn($cicloId) => [
-                'centro_id'         => $centroId,
-                'centro_educativo'  => $centroEducativoNombre,  // legacy
-                'ciclo_id'          => $cicloId,
-            ])->all();
-            DB::table('centro_ciclo')->insertOrIgnore($rows);
-        }
+            // Una sola empresa con todas sus familias (nunca una empresa por familia)
+            $familias->anadirPorNombre($empresa->id, $validated['familias'] ?? [$validated['familia']]);
+            $familias->guardarIntereses($empresa->id, $validated['interesesFamilia'] ?? []);
+
+            return $empresa;
+        });
+
+        $this->vincularCiclosCentro($centroId, $centroEducativoNombre, $validated['ciclosIds'] ?? []);
 
         return response()->json([
             'message' => 'Empresa creada correctamente',
-            'empresa' => $empresa,
+            // Con familias cargadas: el generador inserta/reemplaza esta empresa en su
+            // lista local y el filtro por familia la necesita sin recargar.
+            'empresa' => new EmpresaResource($empresa->load('familias:id,nombre')),
         ]);
     }
 
@@ -562,15 +673,18 @@ class DatosFPController extends Controller
      */
     public function getDashboardEmpresas()
     {
-        $empresas = Empresa::with('familias')
+        $empresas = Empresa::with('familias:id,nombre')
+            // Marca qué plantillas del catálogo pueden usar los centros (ver Empresa::scopeCatalogoUsable)
+            ->withExists(['familias as disponible_para_retos' => fn ($q) => $q->conDatosParaRetos()])
+            // Aviso del modal de eliminar: cuántos retos quedarán marcados con la empresa en la papelera
+            ->withCount('microretos')
+            // Por dónde llegó si vino de una captación (1 = entrevista, 2 = formulario web): una subconsulta, sin N+1
+            ->withMin('captaciones', 'origen_id')
             ->orderBy('nombre_comercial')
+            ->take(self::MAX_EMPRESAS_LISTADO)
             ->get();
 
-        return response()->json($empresas->map(function ($empresa) {
-            $data = $empresa->toArray();
-            $data['familias_nombres'] = $empresa->familias->pluck('nombre')->toArray();
-            return $data;
-        }));
+        return response()->json(EmpresaDashboardResource::collection($empresas));
     }
 
     /**
@@ -591,128 +705,160 @@ class DatosFPController extends Controller
         return response()->json(['message' => 'Empresa movida a la papelera']);
     }
 
-    public function actualizarEmpresa(Request $request, $id)
+    public function actualizarEmpresa(UpdateEmpresaRequest $request, EmpresaFamiliaService $familias, $id)
     {
+        /** @var Empresa|null $empresa  {id} es un único id, nunca un array */
         $empresa = Empresa::find($id);
 
         if (!$empresa) {
             return response()->json(['error' => 'Empresa no encontrada'], 404);
         }
 
+        /** @var \App\Models\User $auth  ruta bajo auth:sanctum + docente */
         $auth = $request->user();
-        if ($auth->isAdmin() && !$empresa->perteneceAlCentroDe($auth)) {
-            return response()->json(['error' => 'No autorizado: esta empresa no pertenece a tu centro educativo.'], 403);
+        $permiso = Gate::inspect('update', $empresa);
+        if ($permiso->denied()) {
+            Log::warning('Edición de empresa denegada.', ['empresa_id' => $empresa->id, 'user_id' => $auth->id]);
+            return response()->json(['error' => $permiso->message()], 403);
         }
 
-        $estadosPermitidos = ['Pendiente de llamar', 'Llamado - Información obtenida', 'Llamado - Negativa', 'Llamado - Llamar más tarde', 'En colaboración activa', 'Descartada'];
+        $validated = $request->validated();
+        // Hoy EmpresaPolicy::update solo deja pasar a superadmin. Las comprobaciones por rol
+        // de aquí abajo se mantienen como segunda barrera por si la Policy se relaja.
+        // Vincular ciclos al centro es gestión del centro (admin/superadmin), no del docente.
+        if ($auth->isDocente()) {
+            unset($validated['ciclosIds'], $validated['estadoContacto']);
+        }
 
-        $request->validate([
-            'nombreComercial'  => 'required|string|max:255',
-            'razonSocial'      => 'nullable|string|max:255',
-            'cif'              => 'nullable|string|max:20',
-            'sector'           => 'nullable|string|max:255',
-            'tamano'           => 'nullable|string|max:50',
-            'web'              => 'nullable|string|max:255',
-            'actividad'        => 'nullable|string|max:500',
-            'personaContacto'  => 'nullable|string|max:255',
-            'telefono'         => 'nullable|string|max:20',
-            'emailGeneral'     => 'nullable|email|max:255',
-            'direccion'        => 'nullable|string|max:255',
-            'municipio'        => 'nullable|string|max:255',
-            'provincia'        => 'nullable|string|max:255',
-            'codigoPostal'     => 'nullable|string|max:10',
-            'diaANormal'       => 'nullable|string|max:1000',
-            'friccionArea'     => 'nullable|string|max:400',
-            'friccionProblema' => 'nullable|string|max:1200',
-            'restricciones'    => 'nullable|string|max:600',
-            'loQueNoQuieren'   => 'nullable|string|max:500',
-            'consecuencias'    => 'nullable',
-            'esSimulada'       => 'nullable|boolean',
-            'estadoContacto'   => 'nullable|string|in:' . implode(',', $estadosPermitidos),
-        ]);
+        // Solo se actualizan los campos que llegan: el Generador de Retos envía únicamente
+        // el diagnóstico y no debe vaciar CIF, contacto, dirección, etc.
+        $updateData = $this->columnasEmpresa($validated);
 
-        $consecuenciasTexto = is_array($request->consecuencias)
-            ? implode(', ', $request->consecuencias)
-            : $request->consecuencias;
+        // Real ↔ ficticia solo lo cambia superadmin (DuaLab): si no, un admin podría marcar
+        // una empresa real como ficticia y editar después su diagnóstico protegido. Solo se
+        // bloquea si cambia: el modal de edición reenvía siempre el valor actual.
+        if (array_key_exists('es_simulada', $updateData)
+            && (bool) $updateData['es_simulada'] !== (bool) $empresa->es_simulada
+            && !$auth->isSuperAdmin()) {
+            Log::warning('Cambio de real/ficticia de empresa denegado.', [
+                'empresa_id' => $empresa->id,
+                'user_id'    => $auth->id,
+            ]);
+            return response()->json(['error' => 'Solo DUALAB puede cambiar si una empresa es real o ficticia. Ponte en contacto con DUALAB.'], 403);
+        }
 
-        // Admin de centro: no puede mover la empresa a otro centro ni desvincularla del
-        // suyo — el campo se ignora y se mantiene el centro actual (que ya se comprobó
+        // El diagnóstico de una empresa real solo lo cambia superadmin (DuaLab), igual que
+        // en PATCH /empresas/{id}/diagnostico. Solo se bloquea si de verdad cambia: el
+        // modal de "Base de datos" reenvía el diagnóstico intacto al editar el contacto.
+        if ($this->cambiaDiagnostico($empresa, $updateData)) {
+            $decision = Gate::inspect('actualizarDiagnostico', $empresa);
+            if ($decision->denied()) {
+                Log::warning('Edición de diagnóstico de empresa denegada.', [
+                    'empresa_id' => $empresa->id,
+                    'user_id'    => $request->user()?->id,
+                ]);
+                return response()->json(['error' => $decision->message()], 403);
+            }
+        }
+
+        // Admin de centro y docente: no pueden mover la empresa a otro centro ni desvincularla
+        // del suyo — el campo se ignora y se mantiene el centro actual (que ya se comprobó
         // arriba que es el propio). Solo superadmin puede reasignar libremente.
-        $centroEducativoNombre = $request->centroEducativo;
-        if ($auth->isAdmin()) {
-            $centroEducativoNombre = $empresa->centro_educativo;
+        $centroEducativoNombre = $empresa->centro_educativo;
+        $centroId              = $empresa->centro_id;
+        if ($auth->isSuperAdmin() && array_key_exists('centroEducativo', $validated)) {
+            $centroEducativoNombre = $validated['centroEducativo'];
+            $centroId = $centroEducativoNombre
+                ? CentroEducativo::firstOrCreate(['nombre' => $centroEducativoNombre])->id
+                : null;
+            $updateData['centro_educativo'] = $centroEducativoNombre; // legacy
+            $updateData['centro_id']        = $centroId;
         }
 
-        // Resolvemos o creamos el centro educativo
-        $centroId = $empresa->centro_id;
-        if ($auth->isAdmin()) {
-            // Se mantiene el centro_id actual (ya validado arriba).
-        } elseif ($request->filled('centroEducativo')) {
-            $centro   = CentroEducativo::firstOrCreate(['nombre' => $request->centroEducativo]);
-            $centroId = $centro->id;
-        } elseif ($request->has('centroEducativo') && !$request->centroEducativo) {
-            $centroId = null;
-        }
+        DB::transaction(function () use ($empresa, $updateData, $validated, $familias) {
+            $empresa->update($updateData);
 
-        $updateData = [
-            'nombre_comercial'  => $request->nombreComercial,
-            'razon_social'      => $request->razonSocial,
-            'cif'               => $request->cif,
-            'centro_educativo'  => $centroEducativoNombre, // legacy
-            'centro_id'         => $centroId,
-            'sector'            => $request->sector,
-            'tamano'            => $request->tamano,
-            'web'               => $request->web,
-            'actividad'         => $request->actividad,
-            'persona_contacto'  => $request->personaContacto,
-            'telefono'          => $request->telefono,
-            'email_general'     => $request->emailGeneral,
-            'direccion'         => $request->direccion,
-            'municipio'         => $request->municipio,
-            'provincia'         => $request->provincia,
-            'codigo_postal'     => $request->codigoPostal,
-            'dia_a_normal'      => $request->diaANormal,
-            'friccion_area'     => $request->friccionArea,
-            'friccion_problema' => $request->friccionProblema,
-            'consecuencias'     => $consecuenciasTexto,
-            'restricciones'     => $request->restricciones,
-            'lo_que_no_quieren' => $request->loQueNoQuieren,
-        ];
+            // 'familias' = conjunto completo (modal de edición); 'familia' suelta solo añade
+            if (array_key_exists('familias', $validated)) {
+                $familias->sincronizarPorNombre($empresa->id, $validated['familias']);
+            } elseif (!empty($validated['familia'])) {
+                $familias->anadirPorNombre($empresa->id, [$validated['familia']]);
+            }
+            if (array_key_exists('interesesFamilia', $validated)) {
+                $familias->guardarIntereses($empresa->id, $validated['interesesFamilia'] ?? []);
+            }
+        });
 
-        if ($request->has('esSimulada')) {
-            $updateData['es_simulada'] = $request->boolean('esSimulada');
-        }
-        if ($request->has('estadoContacto')) {
-            $updateData['estado_contacto'] = $request->estadoContacto;
-        }
-
-        $empresa->update($updateData);
-
-        if ($request->filled('familia')) {
-            $familiaModel = Familia::where('nombre', $request->familia)->first();
-            DB::table('empresa_familia')->updateOrInsert(
-                ['empresa_id' => $id],
-                [
-                    'familia'    => $request->familia,      // legacy
-                    'familia_id' => $familiaModel?->id,     // normalizado
-                    'updated_at' => now(),
-                ]
-            );
-        }
-
-        // Vinculamos los ciclos al nuevo centro si el usuario los seleccionó
-        if ($centroId && $request->filled('ciclosIds') && is_array($request->ciclosIds)) {
-            $rows = collect($request->ciclosIds)->map(fn($cicloId) => [
-                'centro_id'         => $centroId,
-                'centro_educativo'  => $centroEducativoNombre,  // legacy
-                'ciclo_id'          => $cicloId,
-            ])->all();
-            DB::table('centro_ciclo')->insertOrIgnore($rows);
-        }
+        $this->vincularCiclosCentro($centroId, $centroEducativoNombre, $validated['ciclosIds'] ?? []);
 
         return response()->json([
             'message' => 'Empresa actualizada correctamente',
-            'empresa' => $empresa,
+            // Con familias cargadas: el generador inserta/reemplaza esta empresa en su
+            // lista local y el filtro por familia la necesita sin recargar.
+            'empresa' => new EmpresaResource($empresa->load('familias:id,nombre')),
+        ]);
+    }
+
+    /**
+     * PATCH /empresas/{id}/diagnostico — el docente actualiza el diagnóstico (P1–P4) desde
+     * el Generador de Retos. Solo empresas ficticias de su centro (o cualquiera si es
+     * superadmin): ver EmpresaPolicy::actualizarDiagnostico.
+     */
+    public function actualizarDiagnosticoEmpresa(UpdateDiagnosticoEmpresaRequest $request, int $id): \Illuminate\Http\JsonResponse
+    {
+        $empresa = Empresa::find($id);
+        if (!$empresa) {
+            return response()->json(['error' => 'Empresa no encontrada'], 404);
+        }
+
+        $decision = Gate::inspect('actualizarDiagnostico', $empresa);
+        if ($decision->denied()) {
+            Log::warning('Edición de diagnóstico de empresa denegada.', [
+                'empresa_id' => $empresa->id,
+                'user_id'    => $request->user()?->id,
+            ]);
+            return response()->json(['error' => $decision->message()], 403);
+        }
+
+        $empresa->update($this->columnasEmpresa($request->validated()));
+
+        return response()->json([
+            'message' => 'Diagnóstico actualizado',
+            'empresa' => new EmpresaResource($empresa->load('familias:id,nombre')),
+        ]);
+    }
+
+    /**
+     * PATCH /empresas/{id}/interes — para qué quiere la empresa al alumnado de una familia
+     * vinculada. Mismas reglas que el diagnóstico: ficticias de su centro, reales solo DuaLab.
+     */
+    public function actualizarInteresEmpresa(UpdateInteresEmpresaRequest $request, EmpresaFamiliaService $familias, int $id): \Illuminate\Http\JsonResponse
+    {
+        $empresa = Empresa::find($id);
+        if (!$empresa) {
+            return response()->json(['error' => 'Empresa no encontrada'], 404);
+        }
+
+        $decision = Gate::inspect('actualizarInteres', $empresa);
+        if ($decision->denied()) {
+            Log::warning('Edición de interés de empresa denegada.', [
+                'empresa_id' => $empresa->id,
+                'user_id'    => $request->user()?->id,
+            ]);
+            return response()->json(['error' => $decision->message()], 403);
+        }
+
+        $validated = $request->validated();
+        $vinculada = $empresa->familias()->where('familias.nombre', $validated['familia'])->exists();
+        if (!$vinculada) {
+            return response()->json(['error' => 'Esa familia no está vinculada a la empresa.'], 422);
+        }
+
+        $familias->guardarIntereses($empresa->id, [$validated['familia'] => $validated['interes'] ?? '']);
+
+        return response()->json([
+            'message' => 'Interés actualizado',
+            'empresa' => new EmpresaResource($empresa->load('familias')),
         ]);
     }
 
@@ -723,7 +869,7 @@ class DatosFPController extends Controller
             return response()->json(['error' => 'Empresa no encontrada'], 404);
         }
 
-        if ($request->user()->isAdmin() && !$empresa->perteneceAlCentroDe($request->user())) {
+        if ($request->user()?->isAdmin() && !$empresa->perteneceAlCentroDe($request->user())) {
             return response()->json(['error' => 'No autorizado: esta empresa no pertenece a tu centro educativo.'], 403);
         }
 

@@ -1,23 +1,40 @@
 <script setup>
+// Biblioteca de proyectos: un solo explorador (mismo esquema que la Biblioteca de retos).
+// Pestañas «Completados | En proceso» arriba (por defecto Completados); barra de filtros común a las dos (buscador,
+// ciclo, módulo, nivel) y, en «Filtros rápidos», familia + el filtro propio de cada pestaña:
+// Estado en «En proceso» y Validado por en «Completados». /proyectos/terminados redirige aquí.
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { useRouter, useRoute, onBeforeRouteUpdate } from 'vue-router';
+import CabeceraSeccion from '../components/CabeceraSeccion.vue'
+import { modulosDeProyecto, modulosDisponibles as listarModulos } from '../utils/modulos.js'
+import { useRouter, useRoute } from 'vue-router';
 import api from '../api.js';
 import BienvenidaStartupDayModal from '../components/BienvenidaStartupDayModal.vue';
 import EliminarProyectoModal from '../components/EliminarProyectoModal.vue';
+import ProyectoCard from '../components/ProyectoCard.vue';
+import RecordatorioPropuestaFlotante from '../components/RecordatorioPropuestaFlotante.vue';
 import { useUIState } from '../composables/useUIState.js';
+import { usePaginacion } from '../composables/usePaginacion.js';
 import { useAuthStore } from '../stores/auth.js';
+import { useCursoAcademicoStore, cursoDeProyecto, etiquetaCurso } from '../stores/cursoAcademico.js';
+import SelectorCurso from '../components/SelectorCurso.vue';
+import { useRoleTheme } from '../composables/useRoleTheme.js';
+import FiltrosPanel from '../components/FiltrosPanel.vue';
+import FiltroSegmentado from '../components/FiltroSegmentado.vue';
+import FiltroSelect from '../components/FiltroSelect.vue';
+import { useFiltroEmpresaSector } from '../composables/useFiltroEmpresaSector.js';
+import TituloResultados from '../components/TituloResultados.vue';
+import { usePanelFiltros } from '../composables/usePanelFiltros.js';
 
 const router = useRouter();
 const route  = useRoute();
 const { tourActivo } = useUIState();
 const authStore = useAuthStore();
+const { theme } = useRoleTheme();
 
 // ── Datos ───────────────────────────────────────────────────────────────────
-const proyectos    = ref([]);
-const cargando     = ref(true);
-const busqueda     = ref('');
-const filtroEstado = ref('todos');
-const isLoaded     = ref(false);
+const proyectos = ref([]);
+const cargando  = ref(true);
+const errorCarga = ref('');
 
 // ── Modal bienvenida ────────────────────────────────────────────────────────
 const guiaBienvenida = ref(false);
@@ -35,11 +52,11 @@ const refBtnGuia  = ref(null);
 const tourRefs = { refBusqueda, refFiltros, refGrid, refBtnNuevo, refBtnGuia };
 
 const guiaPasosDataBase = [
-  { ref: 'refBusqueda', seccion: 'busqueda',  texto: 'Usa el buscador para encontrar propuestas y proyectos por título, empresa o centro educativo. La búsqueda filtra en tiempo real a medida que escribes.' },
-  { ref: 'refFiltros',  seccion: 'filtros',   texto: 'Filtra por estado: Validados (proyectos aprobados por empresa), Pendiente validar (propuestas enviadas, esperando respuesta), En edición (borradores), Archivados o Todos. Puedes combinar filtro y buscador a la vez.' },
-  { ref: 'refGrid',     seccion: 'grid',      texto: 'Aquí aparecen las propuestas y proyectos registrados. Cada tarjeta muestra título, empresa, ciclo y estado. Pulsa en una tarjeta para ver el detalle completo.' },
-  { ref: 'refBtnNuevo', seccion: 'btn-nuevo', texto: 'Pulsa aquí para crear una nueva propuesta StartUp Day. Necesitarás haber registrado previamente un encuentro en el Dashboard Docente para poder vincularla al reto correspondiente.' },
-  { ref: 'refBtnGuia',  seccion: null,        texto: 'Pulsa este botón en cualquier momento para volver a ver esta guía y repasar el funcionamiento de la sección.' },
+  { ref: 'refFiltros',  seccion: 'filtros',   texto: 'Elige qué quieres ver: «Completados» (retos ajustados que los grupos ya han terminado, se abre por defecto) o «En proceso» (borradores, pendientes de validar, validados y archivados). El número indica cuántos hay con los filtros actuales.' },
+  { ref: 'refBusqueda', seccion: 'busqueda',  texto: 'Busca por título, empresa o centro y filtra por ciclo, módulo y nivel. En «Más filtros» tienes la familia profesional y el estado (en proceso) o quién lo validó (completados).' },
+  { ref: 'refGrid',     seccion: 'grid',      texto: 'Aquí aparecen los retos ajustados. Cada tarjeta muestra su estado con un color, el curso, los módulos y la empresa. Pulsa en una tarjeta para ver el detalle completo.' },
+  { ref: 'refBtnNuevo', seccion: 'btn-nuevo', texto: 'Pulsa aquí para trabajar un reto: el Ajuste del reto te guía paso a paso para adaptarlo a tu alumnado. Cuando lo valides, podrás llevarlo al aula en un encuentro.' },
+  { ref: 'refBtnGuia',  seccion: null,        texto: 'Pulsa «Ayuda» en cualquier momento para ver qué puedes hacer aquí o volver a esta guía.' },
 ];
 
 const guiaPasosData = authStore.isEmpresa
@@ -96,9 +113,11 @@ watch(modoGuia, (val) => {
   tourActivo.value = val;
   if (val) {
     window.addEventListener('scroll', onScrollGuia, { passive: true });
+    window.addEventListener('resize', onScrollGuia, { passive: true });
     nextTick(scrollYRecalcular);
   } else {
     window.removeEventListener('scroll', onScrollGuia);
+    window.removeEventListener('resize', onScrollGuia);
   }
 });
 
@@ -124,84 +143,279 @@ function seleccionarOpcionBienvenida(opcion) {
   // 'trabajar' → se queda en la vista
 }
 
-onMounted(async () => {
-  setTimeout(() => { isLoaded.value = true; }, 80);
-  if (route.query.filtro) filtroEstado.value = String(route.query.filtro);
+async function cargarProyectos() {
+  cargando.value = true;
+  errorCarga.value = '';
   try {
     const res = await api.get('/startup/proyectos');
     proyectos.value = res.data;
+  } catch {
+    errorCarga.value = 'No se han podido cargar los retos ajustados. Comprueba la conexión e inténtalo de nuevo.';
   } finally {
     cargando.value = false;
   }
-  await nextTick();
-  // Auto-disparo desactivado — reactivar poniendo guiaBienvenida.value = true si se necesita de nuevo.
+}
+
+onMounted(() => {
+  normalizarUrlAntigua();
+  cargarProyectos();
+  // Auto-disparo de la bienvenida desactivado — reactivar con guiaBienvenida.value = true.
 });
 
 onUnmounted(() => {
   tourActivo.value = false;
   window.removeEventListener('scroll', onScrollGuia);
+  window.removeEventListener('resize', onScrollGuia);
 });
 
-onBeforeRouteUpdate(async () => {
-  modoGuia.value = false;
-  pasoGuia.value = 1;
-  await nextTick();
+// ── Curso académico compartido (store): todo lo que se lista y cuenta sale de aquí ──
+const cursoStore     = useCursoAcademicoStore();
+const proyectosCurso = computed(() => proyectos.value.filter(p => cursoStore.coincide(cursoDeProyecto(p))));
+const cursosConDatos = computed(() => [...new Set(proyectos.value.map(cursoDeProyecto))]);
+
+// ── Pestaña: «Completados» (por defecto, lo que luce el trabajo hecho) | «En proceso»
+// (en la URL: ?ver=proceso). ?ver=completados también vale (enlaces y redirección antiguos).
+const ambito = computed(() => (route.query.ver === 'proceso' ? 'proceso' : 'completados'));
+const esCompletado = p => p.estado === 'completado';
+async function elegirAmbito(valor) {
+  if (valor === ambito.value) return;
+  // Cada pestaña tiene su filtro propio: al cambiar se quita el de la otra. Primero la URL
+  // y después los filtros, para que la sincronización filtros → URL no la pise.
+  await router.replace({ query: { ...route.query, ver: valor === 'proceso' ? 'proceso' : undefined, estado: undefined } });
+  filtroEstados.value = [];
+  filtroValidador.value = [];
+}
+
+// ── Filtros ─────────────────────────────────────────────────────────────────
+// Proyectos sin familia (antiguos): nunca se ocultan, tienen su propia casilla.
+const SIN_FAMILIA = '__sin_familia__';
+// 'Agraria' oculta como opción de filtro a petición de Cynthia (2026-09-28); sus
+// proyectos siguen apareciendo sin filtro de familia.
+const FAMILIAS_OCULTAS = ['Agraria'];
+
+const aLista = v => (v == null ? [] : (Array.isArray(v) ? v : [v]).map(String).filter(Boolean));
+
+// Enlaces antiguos: ?filtro=<estado>, ?capa=estados|detalle|todos&familia=…&estado=…
+// → la pestaña y los filtros equivalentes. Se calcula antes de crear los filtros (así nacen
+// ya marcados) y al montar se deja la URL limpia.
+const queryAntigua = (() => {
+  const q = route.query;
+  if (!q.filtro && !q.capa) return null;
+  const estado = String(q.filtro || q.estado || '');
+  const query = { familia: q.familia || undefined };
+  // Sin estado o con uno en proceso → pestaña «En proceso» (era lo que mostraban esos enlaces)
+  if (estado !== 'completado') query.ver = 'proceso';
+  if (estado && estado !== 'todos' && estado !== 'completado') query.estado = estado;
+  return query;
+})();
+function normalizarUrlAntigua() {
+  if (queryAntigua) router.replace({ query: queryAntigua });
+}
+const busqueda        = ref('');
+const filtroFamilias  = ref(aLista(route.query.familia));
+const filtroCiclo     = ref('');
+const filtroModulo    = ref('');
+const filtroCurso     = ref('');
+const filtroEstados   = ref(aLista((queryAntigua || route.query).estado).filter(e => e !== 'completado'));
+const filtroValidador = ref([]);
+const filtroEmpresa   = ref('');
+const filtroSector    = ref('');   // sector de la empresa
+// Empresa y Sector: la empresa ya entra con su enlace a lo suyo, así que no los ve
+const mostrarFiltroEmpresa = !authStore.isEmpresa;
+// «De quién»: el docente ve también los compartidos con él; el admin, los de su centro; el
+// superadmin, todos. Por defecto, los propios (es_mio lo marca el backend). La empresa no lo ve.
+const mostrarFiltroQuien = !authStore.isEmpresa;
+const filtroQuien = ref(mostrarFiltroQuien ? 'mios' : '');
+const opcionesQuien = [
+  { value: 'mios', label: 'Míos' },
+  { value: 'otros', label: authStore.isSuperAdmin ? 'De otros' : authStore.isAdmin ? 'De mi centro' : 'Compartidos' },
+  { value: '', label: 'Todos' },
+];
+const orden           = ref('recientes');  // 'recientes' | 'antiguos' | 'titulo' | 'nivel'
+const familiasExpandidas = ref(false);
+// «Filtros rápidos»: abierto en escritorio, plegado en móvil; se reajusta al cambiar el ancho
+const panelFiltrosAbierto = usePanelFiltros();
+const columnasProyectos = computed(() => panelFiltrosAbierto.value
+  ? 'md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3'
+  : 'md:grid-cols-2 xl:grid-cols-3');
+
+// Familia y estado viven en la URL: al volver de la ficha de un proyecto (atrás del
+// navegador) siguen marcados.
+watch(() => route.query.familia, (v) => {
+  const lista = aLista(v);
+  if (lista.join('|') !== filtroFamilias.value.join('|')) filtroFamilias.value = lista;
 });
+watch([filtroFamilias, filtroEstados], ([familias, estados]) => {
+  if (aLista(route.query.familia).join('|') === familias.join('|') && aLista(route.query.estado).join('|') === estados.join('|')) return;
+  router.replace({ query: { ...route.query, familia: familias.length ? familias : undefined, estado: estados.length ? estados : undefined } });
+});
+// Dependencias: el módulo y el nivel dependen del ciclo; el ciclo, de la familia.
+watch(filtroFamilias, () => { filtroCiclo.value = ''; filtroModulo.value = ''; filtroCurso.value = ''; });
+watch(filtroCiclo, () => { filtroModulo.value = ''; filtroCurso.value = ''; });
 
-function getEtiqueta(p) {
-  if (p.estado === 'en_edicion') return 'En edición';
-  if (p.estado === 'archivado')  return 'Archivado';
-  if (p.estado === 'completado') return 'Completado';
-  if (p.estado === 'validado') {
-    if (p.empresa_validado && p.docente_validado) return 'Validado · Completo';
-    if (p.empresa_validado)  return 'Validado · Empresa';
-    if (p.docente_validado)  return 'Validado · Docente';
-    return 'Validado';
-  }
-  if (p.empresa_no_valida_aun)    return 'No validar aún';
-  if (p.enviado_a_empresa_mail)   return 'Esperando respuesta';
-  return 'Pendiente enviar';
-}
-function getColor(p) {
-  if (p.estado === 'en_edicion') return 'bg-amber-50 border-amber-200 text-amber-700';
-  if (p.estado === 'archivado')  return 'bg-gray-100 border-gray-200 text-gray-400';
-  if (p.estado === 'completado') return 'bg-sky-50 border-sky-300 text-sky-700';
-  if (p.estado === 'validado') {
-    if (p.docente_validado && !p.empresa_validado) return 'bg-emerald-50 border-emerald-300 text-emerald-700';
-    return 'bg-[#00A859]/10 border-[#00A859]/30 text-[#00A859]';
-  }
-  if (p.empresa_no_valida_aun)   return 'bg-red-50 border-red-300 text-red-700';
-  if (p.enviado_a_empresa_mail)  return 'bg-blue-50 border-blue-200 text-blue-700';
-  return 'bg-violet-50 border-violet-300 text-violet-700';
-}
+const coincideFamilias = p => !filtroFamilias.value.length
+  || filtroFamilias.value.includes(p.familia_nombre || SIN_FAMILIA);
 
-const filtroOpciones = ['validado', 'completado', 'propuesta', 'en_edicion', 'archivado', 'todos'];
-const filtroLabels   = { todos: 'Todos', en_edicion: 'En edición', propuesta: 'Pendiente validar', validado: 'Validados', completado: 'Completados', archivado: 'Archivado' };
-
-const conteosPorEstado = computed(() => ({
-  validado:   proyectos.value.filter(p => p.estado === 'validado').length,
-  completado: proyectos.value.filter(p => p.estado === 'completado').length,
-  propuesta:  proyectos.value.filter(p => p.estado === 'propuesta').length,
-  en_edicion: proyectos.value.filter(p => p.estado === 'en_edicion').length,
-  archivado:  proyectos.value.filter(p => p.estado === 'archivado').length,
-  todos:      proyectos.value.length,
-}));
-
-const proyectosFiltrados = computed(() => {
-  let lista = proyectos.value;
-  if (filtroEstado.value !== 'todos') {
-    lista = lista.filter(p => p.estado === filtroEstado.value);
-  }
-  if (busqueda.value.trim()) {
-    const q = busqueda.value.toLowerCase();
-    lista = lista.filter(p =>
+// Filtros comunes a las dos pestañas (barra superior + familia)
+function aplicarComunes(lista) {
+  let out = lista.filter(coincideFamilias);
+  if (filtroQuien.value) out = out.filter(p => !!p.es_mio === (filtroQuien.value === 'mios'));
+  if (filtroCiclo.value) out = out.filter(p => p.ciclo_nombre === filtroCiclo.value);
+  if (filtroModulo.value) out = out.filter(p => modulosDeProyecto(p).includes(filtroModulo.value));
+  if (filtroCurso.value) out = out.filter(p => String(p.curso) === String(filtroCurso.value));
+  if (filtroEmpresa.value || filtroSector.value) out = out.filter(cumpleEmpresaSector);
+  const q = busqueda.value.trim().toLowerCase();
+  if (q) {
+    out = out.filter(p =>
       p.titulo?.toLowerCase().includes(q) ||
       p.empresa_nombre?.toLowerCase().includes(q) ||
       p.centro_nombre?.toLowerCase().includes(q)
     );
   }
-  return lista;
+  return out;
+}
+
+// Estado (solo «En proceso»). Sin ninguno marcado se ve todo lo vivo: los archivados
+// solo aparecen al marcar «Archivados».
+const ESTADOS_PROCESO = [
+  { key: 'validado',   label: 'Validados',             punto: 'bg-emerald-500' },
+  { key: 'propuesta',  label: 'Sin validar', punto: 'bg-violet-500' },
+  { key: 'en_edicion', label: 'En edición',            punto: 'bg-amber-500' },
+  { key: 'archivado',  label: 'Archivados',            punto: 'bg-gray-400' },
+];
+const ETIQUETA_ESTADO = Object.fromEntries(ESTADOS_PROCESO.map(e => [e.key, e.label]));
+const pasaEstado = p => filtroEstados.value.length ? filtroEstados.value.includes(p.estado) : p.estado !== 'archivado';
+
+// Validado por (solo «Completados»): un proyecto solo llega a completado desde validado y
+// conserva empresa_validado / docente_validado; si lo validaron ambos sale en los dos.
+const VALIDADORES = [
+  { key: 'empresa', label: 'Empresa', prueba: p => !!p.empresa_validado, icono: 'bg-empresas/10 text-empresas-dark' },
+  { key: 'docente', label: 'Docente', prueba: p => !!p.docente_validado, icono: 'bg-centros/10 text-centros' },
+];
+const pasaValidador = p => !filtroValidador.value.length
+  || VALIDADORES.some(v => filtroValidador.value.includes(v.key) && v.prueba(p));
+
+const enProcesoComunes   = computed(() => aplicarComunes(proyectosCurso.value.filter(p => !esCompletado(p))));
+const completadosComunes = computed(() => aplicarComunes(proyectosCurso.value.filter(esCompletado)));
+const listaEnProceso     = computed(() => enProcesoComunes.value.filter(pasaEstado));
+const listaCompletados   = computed(() => completadosComunes.value.filter(pasaValidador));
+const proyectosFiltrados = computed(() => ambito.value === 'completados' ? listaCompletados.value : listaEnProceso.value);
+
+// Contadores del lateral: respetan los demás filtros, no el propio grupo
+const conteoEstados = computed(() => Object.fromEntries(ESTADOS_PROCESO.map(e =>
+  [e.key, enProcesoComunes.value.filter(p => p.estado === e.key).length])));
+const conteoValidadores = computed(() => Object.fromEntries(VALIDADORES.map(v =>
+  [v.key, completadosComunes.value.filter(v.prueba).length])));
+
+// Base de cada pestaña sin filtros: alimenta las familias y las opciones de la barra
+const baseAmbito = computed(() => proyectosCurso.value.filter(p => (ambito.value === 'completados') === esCompletado(p)));
+const familiasPanel = computed(() => {
+  const mapa = new Map();
+  baseAmbito.value.forEach(p => {
+    const clave = p.familia_nombre || SIN_FAMILIA;
+    if (FAMILIAS_OCULTAS.includes(clave)) return;
+    mapa.set(clave, (mapa.get(clave) || 0) + 1);
+  });
+  return [...mapa.entries()]
+    .map(([nombre, n]) => ({ nombre, n, label: nombre === SIN_FAMILIA ? 'Sin familia asignada' : nombre }))
+    .sort((a, b) => (a.nombre === SIN_FAMILIA) - (b.nombre === SIN_FAMILIA) || b.n - a.n || a.label.localeCompare(b.label));
 });
+const familiasPanelVisibles = computed(() => {
+  const todas = familiasPanel.value;
+  if (familiasExpandidas.value || todas.length <= 6) return todas;
+  // Las marcadas siempre a la vista aunque no estén entre las 6 primeras.
+  return [...todas.slice(0, 6), ...todas.slice(6).filter(f => filtroFamilias.value.includes(f.nombre))];
+});
+const etiquetaFamilia = nombre => (nombre === SIN_FAMILIA ? 'Sin familia asignada' : nombre);
+
+const baseFamilia = computed(() => baseAmbito.value.filter(coincideFamilias));
+const ciclosDisponibles = computed(() =>
+  [...new Set(baseFamilia.value.map(p => p.ciclo_nombre).filter(Boolean))].sort((a, b) => a.localeCompare(b)));
+const baseCiclo = computed(() => filtroCiclo.value ? baseFamilia.value.filter(p => p.ciclo_nombre === filtroCiclo.value) : baseFamilia.value);
+const modulosDisponibles = computed(() => listarModulos(baseCiclo.value, modulosDeProyecto));
+const cursosDisponibles = computed(() =>
+  [...new Set(baseCiclo.value.map(p => p.curso).filter(v => v != null && v !== ''))].sort((a, b) => String(a).localeCompare(String(b))));
+// 'ambos_cursos' = vale para 1º y 2º (como «Ambos» en la Biblioteca de retos)
+const etiquetaNivel = cu => (cu === 'ambos_cursos' ? 'Ambos' : `${cu}º`);
+const opcionesNivel = computed(() => [{ value: '', label: 'Todos' }, ...cursosDisponibles.value.map(cu => ({ value: cu, label: etiquetaNivel(cu) }))]);
+// Empresa y Sector (juntos en la barra): cada uno acota las opciones del otro
+const { empresasDisponibles, sectoresDisponibles, cumpleEmpresaSector } = useFiltroEmpresaSector(baseFamilia, {
+  empresa: filtroEmpresa, sector: filtroSector,
+});
+
+// Niveles elegidos para el título de los resultados (TituloResultados): una sola familia →
+// ciclo → módulo. Quitar un nivel quita también los que dependen de él (watches de arriba).
+const nivelesTitulo = computed(() => {
+  const niveles = [];
+  if (filtroFamilias.value.length === 1) {
+    niveles.push({ etiqueta: 'Familia profesional', valor: etiquetaFamilia(filtroFamilias.value[0]),
+      subir: () => { filtroCiclo.value = ''; filtroModulo.value = ''; }, quitar: () => { filtroFamilias.value = []; } });
+  }
+  if (filtroCiclo.value) niveles.push({ etiqueta: 'Ciclo formativo', valor: filtroCiclo.value, subir: () => { filtroModulo.value = ''; }, quitar: () => { filtroCiclo.value = ''; } });
+  if (filtroModulo.value) niveles.push({ etiqueta: 'Módulo', valor: filtroModulo.value, subir: () => {}, quitar: () => { filtroModulo.value = ''; } });
+  return niveles;
+});
+const familiaEnTitulo = computed(() => nivelesTitulo.value[0]?.etiqueta === 'Familia profesional');
+
+// (En la plantilla los refs llegan desenvueltos: por eso una función por filtro.)
+const alternar = (lista, valor) => lista.includes(valor) ? lista.filter(v => v !== valor) : [...lista, valor];
+function alternarFamilia(nombre) { filtroFamilias.value = alternar(filtroFamilias.value, nombre); }
+function alternarEstado(key) { filtroEstados.value = alternar(filtroEstados.value, key); }
+function alternarValidador(key) { filtroValidador.value = alternar(filtroValidador.value, key); }
+
+const filtroPropioActivo = computed(() => ambito.value === 'completados' ? filtroValidador.value.length > 0 : filtroEstados.value.length > 0);
+const hayFiltrosActivos = computed(() => !!(busqueda.value.trim() || filtroFamilias.value.length || filtroCiclo.value
+  || (mostrarFiltroQuien && filtroQuien.value !== 'mios')
+  || filtroModulo.value || filtroCurso.value || filtroEmpresa.value || filtroSector.value || filtroPropioActivo.value));
+
+// Proyectos de la pestaña que cumplen los filtros en otros cursos académicos (como en la
+// Biblioteca de retos): el curso se elige aparte y, si no, el filtro parece quedarse corto.
+const enOtrosCursos = computed(() => {
+  if (cursoStore.curso === null || !hayFiltrosActivos.value) return [];
+  const completados = ambito.value === 'completados';
+  const fuera = proyectos.value.filter(p => !cursoStore.coincide(cursoDeProyecto(p)) && completados === esCompletado(p));
+  const conteo = {};
+  aplicarComunes(fuera).filter(completados ? pasaValidador : pasaEstado).forEach(p => {
+    const y = cursoDeProyecto(p);
+    if (y != null) conteo[y] = (conteo[y] || 0) + 1;
+  });
+  return Object.entries(conteo).map(([y, n]) => ({ curso: Number(y), n })).sort((a, b) => b.curso - a.curso);
+});
+function limpiarFiltros() {
+  busqueda.value = '';
+  filtroFamilias.value = [];
+  filtroCiclo.value = '';
+  filtroModulo.value = '';
+  filtroCurso.value = '';
+  filtroEmpresa.value = '';
+  filtroSector.value = '';
+  filtroEstados.value = [];
+  filtroValidador.value = [];
+  filtroQuien.value = mostrarFiltroQuien ? 'mios' : '';
+}
+
+// ── Orden y paginación (12 por página, ver POR_PAGINA) ──────
+const fechaProyecto = p => new Date(p.updated_at || p.created_at || 0).getTime();
+const proyectosOrdenados = computed(() => {
+  const lista = [...proyectosFiltrados.value];
+  if (orden.value === 'titulo') return lista.sort((a, b) => (a.titulo || '').localeCompare(b.titulo || '', 'es'));
+  if (orden.value === 'nivel') return lista.sort((a, b) => String(a.curso ?? '').localeCompare(String(b.curso ?? ''), 'es', { numeric: true }));
+  return lista.sort((a, b) => orden.value === 'antiguos' ? fechaProyecto(a) - fechaProyecto(b) : fechaProyecto(b) - fechaProyecto(a));
+});
+// 12 por página: se reparte entero en 1, 2, 3 o 4 columnas (con 9, a 2 columnas quedaba
+// una tarjeta sola en la última fila y un hueco a su derecha)
+const POR_PAGINA = 12;
+const { pagina, totalPaginas, itemsPagina: proyectosPagina } = usePaginacion(proyectosOrdenados, POR_PAGINA);
+watch([proyectosFiltrados, orden, ambito], () => { pagina.value = 0; });
+const paginasVisibles = computed(() => {
+  const n = totalPaginas.value, a = pagina.value;
+  const ini = Math.max(0, Math.min(a - 2, n - 5)), fin = Math.min(n, ini + 5);
+  return Array.from({ length: fin - ini }, (_, i) => ini + i);
+});
+function irAPagina(i) {
+  pagina.value = i;
+  document.getElementById('resultados-proyectos')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
 // ── Modal eliminar ──────────────────────────────────────────────────────────
 const modalEliminarVisible = ref(false);
@@ -211,12 +425,10 @@ function abrirModalEliminar(proyecto) {
   proyectoAEliminar.value   = proyecto;
   modalEliminarVisible.value = true;
 }
-
 function cerrarModalEliminar() {
   modalEliminarVisible.value = false;
   proyectoAEliminar.value    = null;
 }
-
 function onProyectoEliminado({ uuid, titulo }) {
   proyectos.value = proyectos.value.filter(p => p.uuid !== uuid);
   cerrarModalEliminar();
@@ -236,7 +448,9 @@ function mostrarSnack(mensaje, accion = null) {
 </script>
 
 <template>
-  <div class="min-h-screen p-4 md:p-10 font-sans text-[#1F2937] pt-12 md:pt-12">
+  <!-- Explorador de proyectos (mismo esquema que biblioteca_retos.png): cabecera + pestañas
+       En proceso | Completados + filtros + «Filtros rápidos» + tarjetas con paginación. -->
+  <div class="relative min-h-screen pt-16 font-sans text-azul-noche">
 
     <!-- Modal bienvenida -->
     <BienvenidaStartupDayModal :show="guiaBienvenida" @seleccionar="seleccionarOpcionBienvenida" />
@@ -258,24 +472,24 @@ function mostrarSnack(mensaje, accion = null) {
           <!-- Bocadillo -->
           <div class="bg-[#1a2332] border border-white/10 rounded-2xl p-4 shadow-2xl">
             <div class="flex items-center justify-between mb-2">
-              <span class="text-[9px] font-black uppercase tracking-widest text-amber-400">Startup Day · Guía</span>
+              <span class="text-[9px] font-black uppercase tracking-widest text-amber-400">Mis retos ajustados · Guía</span>
               <span class="text-[9px] font-bold text-white/40">{{ pasoGuia }} / {{ guiaPasosData.length }}</span>
             </div>
             <p class="text-xs text-white/80 leading-relaxed mb-3">{{ pasoActual?.texto }}</p>
             <div class="flex items-center justify-between gap-2">
               <button @click="cerrarGuia"
-                      class="text-[10px] font-bold text-white/30 hover:text-white/60 transition-colors">
+                      class="-ml-3 inline-flex h-9 items-center rounded-full px-3 text-[10px] font-bold text-white/30 hover:text-white/60 transition-colors">
                 Cerrar
               </button>
               <div class="flex gap-2">
                 <button v-if="pasoGuia > 1" @click="retrocederPaso"
-                        class="px-3 py-1.5 rounded-xl bg-white/10 text-white text-[11px] font-black
+                        class="inline-flex h-9 items-center px-3 py-1.5 rounded-full bg-white/10 text-white text-[11px] font-black
                                hover:bg-white/20 transition-all">
                   ← Ant.
                 </button>
                 <button @click="avanzarPaso"
-                        class="px-3 py-1.5 rounded-xl bg-[#00A859] text-white text-[11px] font-black
-                               hover:bg-[#00A859]/80 transition-all">
+                        class="inline-flex h-9 items-center px-3 py-1.5 rounded-full text-white text-[11px] font-black
+                               transition-all" :class="[theme.bg, theme.bgHover]">
                   {{ pasoGuia < guiaPasosData.length ? 'Siguiente →' : 'Finalizar' }}
                 </button>
               </div>
@@ -290,303 +504,330 @@ function mostrarSnack(mensaje, accion = null) {
       </div>
     </Transition>
 
-    <!-- Fondo decorativo -->
-    <div class="fixed top-0 left-1/2 -translate-x-1/2 w-[700px] h-[400px]
-                bg-[#99CC33] opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
+    <div class="relative z-10 mx-auto max-w-[90rem] space-y-5 px-4 pb-10 pt-5 sm:px-6 lg:px-8">
 
-    <div class="relative z-10 max-w-6xl mx-auto"
-         :class="isLoaded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3'"
-         style="transition: opacity 0.4s ease, transform 0.4s ease">
-
-      <!-- Cabecera -->
-      <header class="mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div>
-          <div class="inline-flex items-center gap-2 mb-3 px-3 py-1 rounded-full
-                      bg-amber-400/10 border border-amber-400/20">
-            <span class="w-2 h-2 rounded-full bg-amber-400" />
-            <span class="text-[10px] font-black uppercase tracking-widest text-amber-500">Startup Day · Fase 2</span>
-          </div>
-          <h1 class="text-3xl md:text-4xl font-black tracking-tight text-[#121212]">
-            <span class="text-transparent bg-clip-text bg-gradient-to-r from-[#00A859] to-[#99CC33]">Propuestas-Proyecto</span>
-          </h1>
-          <p class="text-gray-500 text-sm mt-1">
-            Aquí se trabajan los retos para convertirlos en propuestas y, tras su validación, en proyectos de empresa.
-          </p>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <!-- Botón Guía -->
-            <button ref="refBtnGuia"
-                    @click="modoGuia = true; pasoGuia = 1"
-                    :class="{ 'tour-active': pasoRefActivo === 'refBtnGuia' }"
-                    class="inline-flex items-center gap-2 px-4 py-2 rounded-full
-                           bg-blue-500/10 border border-blue-500/20 text-blue-500
-                           text-[10px] font-black uppercase tracking-widest
-                           hover:bg-blue-500/20 transition-all">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-              </svg>
-              Guía
-            </button>
-            <!-- Botón Papelera — la papelera de "Base de datos" es solo superadmin -->
-            <button
-              v-if="authStore.isSuperAdmin"
-              @click="router.push({ name: 'papelera' })"
-              class="inline-flex items-center gap-2 px-4 py-2 rounded-full
-                     bg-amber-400/10 border border-amber-400/20 text-amber-600
-                     text-[10px] font-black uppercase tracking-widest
-                     hover:bg-amber-400/20 transition-all"
-              title="Ver proyectos eliminados">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-              </svg>
-              Papelera
-            </button>
-          </div>
+      <CabeceraSeccion data-tour="sdp-cabecera" titulo="Mis retos" destacado="ajustados" color="text-centros"
+                       :volver="authStore.isEmpresa ? null : '/seccion/retos-proyectos'"
+                       subtitulo="Aquí adaptas los retos a tu alumnado y, cuando los validas, los llevas al aula.">
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- Ayuda: mismo botón y sitio en todas las vistas. Abre "¿Qué necesitas?", que
+               incluye la opción de la guía (paso del tour: refBtnGuia) -->
+          <button ref="refBtnGuia" data-tour="sdp-ayuda" type="button" @click="guiaBienvenida = true"
+                  :class="{ 'tour-active': pasoRefActivo === 'refBtnGuia' }"
+                  class="accion-secundaria" title="¿Qué necesitas? Opciones y guía de esta pantalla">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            Ayuda
+          </button>
+          <!-- Papelera — la papelera de "Base de datos" es solo superadmin -->
+          <button v-if="authStore.isSuperAdmin" data-tour="sdp-papelera" type="button"
+                  @click="router.push({ name: 'papelera' })"
+                  class="accion-icono"
+                  title="Ver retos ajustados eliminados en la papelera"
+                  aria-label="Ver retos ajustados eliminados en la papelera">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+            </svg>
+          </button>
+          <!-- Crear proyecto (acción principal; paso del tour: refBtnNuevo) -->
+          <button v-if="!authStore.isEmpresa" ref="refBtnNuevo" data-tour="sdp-trabajar" type="button"
+                  @click="router.push({ name: 'startup-day-crear' })"
+                  :class="{
+                    'tour-active': pasoRefActivo === 'refBtnNuevo',
+                    'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'btn-nuevo'
+                  }"
+                  class="accion-principal">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" d="M12 5v14M5 12h14"/>
+            </svg>
+            Trabajar un reto
+          </button>
         </div>
+      </CabeceraSeccion>
 
-        <!-- Nuevo microproyecto -->
-        <button
-          v-if="!authStore.isEmpresa"
-          ref="refBtnNuevo"
-          @click="router.push({ name: 'startup-day-crear' })"
-          :class="{
-            'tour-active': pasoRefActivo === 'refBtnNuevo',
-            'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'btn-nuevo'
-          }"
-          class="inline-flex items-center gap-2 px-5 py-2.5
-                 bg-[#00A859] text-white rounded-full
-                 text-xs font-black uppercase tracking-widest shadow-sm
-                 hover:bg-[#00A859]/90 hover:shadow-[0_0_0_3px_rgba(0,168,89,0.2)]
-                 transition-all active:scale-95 shrink-0"
-        >
-          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
-          </svg>
-          Nueva propuesta
-        </button>
-      </header>
-
-      <!-- Filtros -->
-      <div class="flex flex-col lg:flex-row lg:items-center gap-3 mb-6">
-
-        <!-- Búsqueda -->
-        <div ref="refBusqueda"
-             :class="{
-               'tour-active': pasoRefActivo === 'refBusqueda',
-               'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'busqueda'
-             }"
-             class="relative w-full lg:flex-1 lg:min-w-[240px]">
-          <svg class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"
-               fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/>
-          </svg>
-          <input
-            v-model="busqueda" type="text"
-            placeholder="Buscar por título, empresa o centro..."
-            class="w-full bg-white border border-gray-200 rounded-2xl pl-10 pr-4 py-3
-                   text-sm text-[#1F2937] placeholder-gray-400 shadow-sm
-                   focus:outline-none focus:border-[#00A859] transition-colors"
-          />
-        </div>
-
-        <!-- Filtros estado -->
-        <div ref="refFiltros"
+      <!-- Pestañas + recordatorio propuesta ≠ proyecto en la misma fila (el recordatorio a la
+           derecha; en móvil, debajo). empty:hidden quita su hueco al cerrarlo. -->
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <!-- ═══ Pestañas: Completados | En proceso (paso del tour: refFiltros) ═══
+             Es la primera decisión, por eso va fuera de la barra de filtros. El número
+             cuenta lo que se vería en cada pestaña con los filtros actuales. -->
+        <div ref="refFiltros" data-tour="sdp-pestanas"
              :class="{
                'tour-active': pasoRefActivo === 'refFiltros',
                'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'filtros'
              }"
-             class="flex flex-wrap gap-2 lg:justify-end lg:min-w-0">
-          <button v-for="op in filtroOpciones" :key="op"
-                  @click="filtroEstado = op"
-                  :class="[
-                    'inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-black uppercase tracking-widest border transition-all',
-                    filtroEstado === op
-                      ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-md'
-                      : 'bg-white text-gray-500 border-gray-200 hover:border-[#00A859] hover:text-[#00A859]'
-                  ]">
-            {{ filtroLabels[op] }}
-            <span :class="[
-              'inline-flex items-center justify-center min-w-[1.125rem] h-[1.125rem] rounded-full text-[9px] font-black transition-all',
-              filtroEstado === op
-                ? 'bg-white/20 text-white'
-                : 'bg-gray-100 text-gray-500 group-hover:bg-[#00A859]/10'
-            ]">{{ conteosPorEstado[op] }}</span>
-          </button>
+             class="flex max-w-full shrink-0 rounded-full sm:w-fit">
+          <div class="flex w-full gap-1 rounded-full border border-borde bg-white p-1 shadow-sm" role="group" aria-label="Qué retos ajustados ver">
+            <button v-for="t in [
+                      { v: 'completados', label: 'Completados', n: listaCompletados.length, icono: 'M8 21h8M12 17v4M7 4h10v5a5 5 0 01-10 0V4zM17 5h3v2a3 3 0 01-3 3M7 5H4v2a3 3 0 003 3' },
+                      { v: 'proceso', label: 'En proceso', n: listaEnProceso.length, icono: 'M12 8v4l3 3M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+                    ]" :key="t.v" type="button" @click="elegirAmbito(t.v)" :aria-pressed="ambito === t.v"
+                    class="inline-flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full px-2 text-sm font-semibold transition-colors sm:flex-none sm:gap-2 sm:px-5"
+                    :class="ambito === t.v ? 'bg-rol-fuerte text-white shadow-sm' : 'text-texto-secundario hover:bg-gray-50 hover:text-azul-noche'">
+              <svg class="hidden h-4 w-4 shrink-0 min-[400px]:block" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path :d="t.icono" /></svg>
+              <span class="truncate">{{ t.label }}</span>
+              <span class="rounded-full px-2 py-0.5 text-xs font-bold"
+                    :class="ambito === t.v ? 'bg-white/20 text-white' : 'bg-gray-100 text-azul-noche'">{{ cargando ? '…' : t.n }}</span>
+            </button>
+          </div>
         </div>
-
+        <div data-tour="sdp-recordatorio" class="min-w-0 empty:hidden lg:flex lg:justify-end">
+          <RecordatorioPropuestaFlotante />
+        </div>
       </div>
 
-      <!-- Grid wrapper (ref para el tour) -->
-      <div ref="refGrid"
+      <!-- Filtros principales (FiltrosPanel común; paso del tour: refBusqueda) -->
+      <div ref="refBusqueda" data-tour="sdp-filtros"
            :class="{
-             'tour-active': pasoRefActivo === 'refGrid',
-             'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'grid'
-           }">
-
-        <!-- Cargando -->
-        <div v-if="cargando" class="flex flex-col items-center justify-center py-32">
-          <svg class="animate-spin w-12 h-12 text-[#00A859] mb-4" viewBox="0 0 24 24">
-            <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
-          </svg>
-          <p class="text-[#00A859] font-black tracking-widest uppercase text-sm animate-pulse">Cargando...</p>
-        </div>
-
-        <!-- Vacío -->
-        <div v-else-if="proyectosFiltrados.length === 0"
-             class="text-center py-24 bg-white rounded-[2rem] border border-dashed border-gray-200 shadow-sm">
-          <div class="w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-5
-                      border border-gray-100 shadow-inner">
-            <svg class="w-10 h-10 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                    d="M12 2L2 7l10 5 10-5-10-5zm0 10l-10-5m10 5l10-5m-10 5v10"/>
-            </svg>
-          </div>
-          <h3 class="text-[#1F2937] font-black text-xl mb-2">
-            {{ busqueda || filtroEstado !== 'todos' ? 'Sin resultados' : 'Todavía no hay propuestas ni proyectos' }}
-          </h3>
-          <p class="text-gray-400 text-sm mb-6">
-            {{ busqueda || filtroEstado !== 'todos' ? 'Prueba con otros filtros' : 'Crea tu primera propuesta StartUp Day' }}
-          </p>
-          <button v-if="!busqueda && filtroEstado === 'todos' && !authStore.isEmpresa"
-                  @click="router.push({ name: 'startup-day-crear' })"
-                  class="inline-flex items-center gap-2 px-6 py-3 bg-[#00A859] text-white rounded-full
-                         text-xs font-black uppercase tracking-widest shadow-sm hover:bg-[#00A859]/90
-                         transition-all active:scale-95">
-            Crear el primero
-          </button>
-        </div>
-
-        <!-- Grid de tarjetas -->
-        <div v-else class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <div
-            v-for="p in proyectosFiltrados" :key="p.uuid"
-            class="group bg-white border border-gray-100 rounded-[1.5rem] shadow-sm
-                   hover:shadow-lg hover:-translate-y-0.5 hover:border-gray-200
-                   transition-all duration-300 cursor-pointer flex flex-col"
-            @click="router.push({ name: 'startup-day-detalle', params: { uuid: p.uuid } })"
-          >
-            <img v-if="p.imagen_portada_url" :src="p.imagen_portada_url" :alt="p.titulo"
-                 class="w-full h-32 object-cover rounded-t-[1.5rem]" />
-            <div class="p-5 flex-1 flex flex-col gap-3">
-              <!-- Estado + paso -->
-              <div class="flex items-center justify-between">
-                <span :class="['text-[9px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full border', getColor(p)]">
-                  {{ getEtiqueta(p) }}
-                </span>
-                <span class="text-[10px] text-gray-400 font-bold">Paso {{ p.paso_actual }}/8</span>
-              </div>
-
-              <!-- Título -->
-              <h3 class="font-black text-[#1F2937] text-sm leading-snug line-clamp-2
-                         group-hover:text-[#00A859] transition-colors">
-                {{ p.titulo }}
-              </h3>
-
-              <!-- Meta -->
-              <div class="space-y-1.5 text-xs text-gray-500 mt-auto">
-                <div v-if="p.empresa_nombre" class="flex items-center gap-1.5">
-                  <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5"/>
-                  </svg>
-                  {{ p.empresa_nombre }}
-                </div>
-                <div v-if="p.centro_nombre" class="flex items-center gap-1.5">
-                  <svg class="w-3.5 h-3.5 shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/>
-                  </svg>
-                  {{ p.centro_nombre }}
-                </div>
-                <div v-if="p.empresa_validado"
-                     class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl
-                            bg-[#00A859]/10 border border-[#00A859]/30 text-[#00A859]">
-                  <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
-                  </svg>
-                  <span class="text-[9px] font-black uppercase tracking-wider leading-tight">
-                    Validado por empresa
-                  </span>
-                </div>
-              </div>
-
-              <!-- ── Etiquetas de sub-estado en miniatura ───────────────── -->
-              <div v-if="p.estado === 'propuesta' && !p.empresa_validado"
-                   class="flex flex-col gap-1.5 mt-1">
-
-                <!-- Propuesta NO enviada por mail aún -->
-                <div v-if="!p.enviado_a_empresa_mail && !p.empresa_no_valida_aun"
-                     class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl
-                            bg-violet-50 border border-violet-300 text-violet-700">
-                  <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                  </svg>
-                  <span class="text-[9px] font-black uppercase tracking-wider leading-tight">
-                    Pendiente de enviar a empresa
-                  </span>
-                </div>
-
-                <!-- Enviada por mail, esperando respuesta -->
-                <div v-if="p.enviado_a_empresa_mail && !p.empresa_no_valida_aun"
-                     class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl
-                            bg-blue-50 border border-blue-200 text-blue-600">
-                  <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-                  </svg>
-                  <span class="text-[9px] font-black uppercase tracking-wider leading-tight">
-                    Enviado a empresa · Sin respuesta
-                  </span>
-                </div>
-
-                <!-- Empresa contestó "No validar aún" — requiere atención -->
-                <div v-if="p.empresa_no_valida_aun"
-                     class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl
-                            bg-red-50 border border-red-300 text-red-700">
-                  <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                  </svg>
-                  <span class="text-[9px] font-black uppercase tracking-wider leading-tight">
-                    Empresa: "No validar aún" · Revisar
-                  </span>
-                </div>
-
-              </div>
-              <!-- ── Fin etiquetas de sub-estado ────────────────────────── -->
+             'tour-active': pasoRefActivo === 'refBusqueda',
+             'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'busqueda'
+           }"
+           class="rounded-2xl">
+        <FiltrosPanel separadores v-model:busqueda="busqueda" placeholder="Buscar por título, empresa o centro…">
+          <template #curso>
+            <div class="flex flex-wrap items-center gap-2">
+              <SelectorCurso permitir-todos :cursos-con-datos="cursosConDatos" />
+              <!-- «Más filtros» en la fila del buscador (en la de filtros, con 4 o más, bajaba solo a otra fila) -->
+              <button type="button" data-tour="sdp-mas-filtros" @click="panelFiltrosAbierto = !panelFiltrosAbierto" :aria-expanded="panelFiltrosAbierto"
+                      aria-controls="filtros-rapidos" :title="panelFiltrosAbierto ? 'Ocultar los filtros rápidos' : 'Mostrar los filtros rápidos'"
+                      aria-label="Más filtros"
+                      class="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full border px-5 text-sm font-semibold transition-colors"
+                      :class="panelFiltrosAbierto ? 'border-rol-fuerte/30 bg-rol/10 text-rol-fuerte' : 'border-rol-fuerte/30 bg-white text-rol-fuerte hover:bg-rol-fuerte/5'">
+                      <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
+                      <span>Más filtros</span>
+                      <span v-if="!panelFiltrosAbierto && (filtroFamilias.length || filtroPropioActivo)"
+                      class="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-rol-fuerte px-1 text-[11px] font-bold text-white">
+                      {{ filtroFamilias.length + (ambito === 'completados' ? filtroValidador.length : filtroEstados.length) }}
+                      </span>
+                      </button>
             </div>
+          </template>
 
-            <!-- Acciones -->
-            <div v-if="!authStore.isEmpresa" class="px-5 pb-4 flex gap-2 border-t border-gray-50 pt-3" @click.stop>
-              <button
-                @click="router.push({ name: 'startup-day-editar', params: { uuid: p.uuid } })"
-                class="flex-1 py-2 rounded-xl bg-gray-50 border border-gray-200 text-xs font-black
-                       uppercase tracking-widest text-gray-500
-                       hover:border-[#00A859] hover:text-[#00A859] hover:bg-[#00A859]/5
-                       transition-all"
-              >
-                Editar
-              </button>
-              <button
-                @click="abrirModalEliminar(p)"
-                class="py-2 px-3 rounded-xl bg-gray-50 border border-gray-200 text-red-400
-                       hover:bg-red-50 hover:border-red-200 transition-all"
-                title="Mover a papelera"
-              >
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                </svg>
+          <FiltroSegmentado v-if="mostrarFiltroQuien" label="De quién" v-model="filtroQuien" :opciones="opcionesQuien"
+            title="Míos: los que has creado tú. Los demás son los que otros docentes comparten contigo o, si administras el centro, los de tu centro." />
+          <FiltroSelect label="Ciclo formativo" v-model="filtroCiclo" :opciones="ciclosDisponibles" todos="Todos los ciclos"
+            title="Filtra por el ciclo formativo al que va dirigido el reto ajustado." />
+          <FiltroSelect v-if="modulosDisponibles.length" label="Módulo" v-model="filtroModulo" :opciones="modulosDisponibles" todos="Todos los módulos"
+            title="Filtra por módulo profesional. Los retos ajustados de varios módulos aparecen en cada uno." />
+          <FiltroSegmentado v-if="cursosDisponibles.length" label="Nivel" v-model="filtroCurso" :opciones="opcionesNivel"
+            title="Nivel del ciclo: 1º (primer año) o 2º (segundo año). Ambos: retos ajustados que valen para 1º y 2º." />
+          <template v-if="mostrarFiltroEmpresa">
+            <FiltroSelect label="Empresa" v-model="filtroEmpresa" :opciones="empresasDisponibles" todos="Todas las empresas"
+              title="Filtra por la empresa del reto ajustado." />
+            <FiltroSelect label="Sector de la empresa" v-model="filtroSector" :opciones="sectoresDisponibles" todos="Todos los sectores"
+              title="Filtra por el sector de la empresa. Puede no coincidir con la familia del reto ajustado." />
+          </template>
+        </FiltrosPanel>
+      </div>
+
+      <!-- Error de carga -->
+      <div v-if="errorCarga && !cargando" class="flex flex-col items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 sm:flex-row sm:items-center" role="alert">
+        <p class="min-w-0 flex-1 text-sm font-medium text-red-700">{{ errorCarga }}</p>
+        <button type="button" @click="cargarProyectos" class="inline-flex h-10 items-center rounded-full bg-white px-4 text-sm font-semibold text-red-700 ring-1 ring-red-200 hover:bg-red-100">Reintentar</button>
+      </div>
+
+      <div class="flex flex-col gap-5 lg:flex-row lg:items-start">
+
+        <!-- ═══ Filtros rápidos (panel lateral; en < lg se abre con «Más filtros») ═══
+             Familia en las dos pestañas + un solo grupo propio de cada una. -->
+        <aside id="filtros-rapidos" data-tour="sdp-filtros-rapidos" aria-label="Filtros rápidos"
+               class="w-full shrink-0 rounded-2xl border border-borde bg-white p-4 shadow-sm lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:w-64 xl:w-72"
+               :class="panelFiltrosAbierto ? 'block' : 'hidden'">
+          <div class="mb-3 flex items-center justify-between gap-2">
+            <h2 class="text-base font-bold text-azul-noche">Filtros rápidos</h2>
+            <button v-if="hayFiltrosActivos" type="button" @click="limpiarFiltros"
+                    class="inline-flex h-9 items-center rounded-full px-3 text-sm font-semibold text-rol-fuerte hover:bg-rol/10">Limpiar</button>
+          </div>
+
+          <!-- En proceso: Estado (sin marcar = todo lo vivo; los archivados, solo si se marcan) -->
+          <div v-if="ambito === 'proceso'" class="border-t border-borde pt-3" role="group" aria-labelledby="titulo-filtro-estado">
+            <p id="titulo-filtro-estado" class="mb-1.5 text-sm font-semibold text-azul-noche">Estado</p>
+            <label v-for="e in ESTADOS_PROCESO" :key="e.key"
+                   class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="checkbox" :checked="filtroEstados.includes(e.key)" @change="alternarEstado(e.key)"
+                     class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="h-2.5 w-2.5 shrink-0 rounded-full" :class="e.punto" aria-hidden="true" />
+              <span class="min-w-0 flex-1 truncate text-sm text-azul-noche">{{ e.label }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ conteoEstados[e.key] }}</span>
+            </label>
+            <p v-if="!filtroEstados.includes('archivado') && conteoEstados.archivado" class="px-1 pt-1 text-xs leading-snug text-texto-secundario">
+              Los archivados no se muestran salvo que marques «Archivados».
+            </p>
+          </div>
+
+          <!-- Completados: quién lo validó -->
+          <div v-else class="border-t border-borde pt-3" role="group" aria-labelledby="titulo-filtro-validador">
+            <p id="titulo-filtro-validador" class="mb-1.5 text-sm font-semibold text-azul-noche">Validado por</p>
+            <label v-for="v in VALIDADORES" :key="v.key"
+                   class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="checkbox" :checked="filtroValidador.includes(v.key)" @change="alternarValidador(v.key)"
+                     class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" :class="v.icono" aria-hidden="true">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+              </span>
+              <span class="min-w-0 flex-1 text-sm text-azul-noche">{{ v.label }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ conteoValidadores[v.key] }}</span>
+            </label>
+          </div>
+
+          <div class="mt-3 border-t border-borde pt-3" role="group" aria-labelledby="titulo-filtro-familia">
+            <p id="titulo-filtro-familia" class="mb-1.5 text-sm font-semibold text-azul-noche">Familia profesional</p>
+            <label v-for="f in familiasPanelVisibles" :key="f.nombre"
+                   class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="checkbox" :checked="filtroFamilias.includes(f.nombre)" @change="alternarFamilia(f.nombre)"
+                     class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="min-w-0 flex-1 truncate text-sm text-azul-noche" :title="f.label">{{ f.label }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ f.n }}</span>
+            </label>
+            <p v-if="!familiasPanel.length && !cargando" class="px-1 py-1 text-sm text-texto-secundario">Sin retos ajustados en este curso.</p>
+            <button v-if="familiasPanel.length > 6" type="button" @click="familiasExpandidas = !familiasExpandidas"
+                    class="mt-1 inline-flex h-9 items-center rounded-full px-1 text-sm font-semibold text-rol-fuerte hover:underline">
+              {{ familiasExpandidas ? 'Ver menos' : `Ver todas (${familiasPanel.length})` }}
+            </button>
+          </div>
+        </aside>
+
+        <!-- ═══ Resultados (paso del tour: refGrid) ═══ -->
+        <section id="resultados-proyectos" ref="refGrid" class="min-w-0 flex-1 scroll-mt-24 rounded-2xl" aria-label="Mis retos ajustados"
+                 :class="{
+                   'tour-active': pasoRefActivo === 'refGrid',
+                   'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'grid'
+                 }">
+          <div data-tour="sdp-resultados" class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <TituloResultados :niveles="nivelesTitulo" :cargando="cargando">
+              <template v-if="cargando">Cargando retos ajustados…</template>
+              <template v-else>
+                {{ proyectosFiltrados.length }}
+                {{ ambito === 'completados'
+                     ? (proyectosFiltrados.length === 1 ? 'reto ajustado completado' : 'retos ajustados completados')
+                     : (proyectosFiltrados.length === 1 ? 'reto ajustado en proceso' : 'retos ajustados en proceso') }}
+              </template>
+            </TituloResultados>
+            <!-- Chips de filtros activos del lateral -->
+            <div v-if="(filtroFamilias.length && !familiaEnTitulo) || filtroPropioActivo" class="flex w-full flex-wrap gap-1.5 sm:order-last">
+              <template v-if="ambito === 'proceso'">
+                <button v-for="e in filtroEstados" :key="'e-' + e" type="button" @click="alternarEstado(e)"
+                        class="inline-flex h-9 items-center gap-1.5 rounded-full bg-gray-100 px-3 text-xs font-semibold text-azul-noche hover:bg-gray-200"
+                        :aria-label="`Quitar filtro ${ETIQUETA_ESTADO[e] || e}`">
+                  <span class="h-2 w-2 rounded-full" :class="ESTADOS_PROCESO.find(x => x.key === e)?.punto || 'bg-gray-400'" aria-hidden="true" />
+                  {{ ETIQUETA_ESTADO[e] || e }}<span aria-hidden="true">✕</span>
+                </button>
+              </template>
+              <template v-else>
+                <button v-for="v in filtroValidador" :key="'v-' + v" type="button" @click="alternarValidador(v)"
+                        class="inline-flex h-9 items-center gap-1.5 rounded-full bg-gray-100 px-3 text-xs font-semibold text-azul-noche hover:bg-gray-200"
+                        :aria-label="`Quitar filtro validado por ${v}`">
+                  Validado por {{ v === 'empresa' ? 'empresa' : 'docente' }}<span aria-hidden="true">✕</span>
+                </button>
+              </template>
+              <button v-for="f in (familiaEnTitulo ? [] : filtroFamilias)" :key="'f-' + f" type="button" @click="alternarFamilia(f)"
+                      class="inline-flex h-9 max-w-full items-center gap-1.5 rounded-full bg-rol/10 px-3 text-xs font-semibold text-rol-fuerte hover:bg-rol/15"
+                      :aria-label="`Quitar filtro ${etiquetaFamilia(f)}`">
+                <span class="truncate">{{ etiquetaFamilia(f) }}</span><span aria-hidden="true">✕</span>
               </button>
             </div>
+            <label class="flex items-center gap-2 text-sm text-texto-secundario">
+              <span class="hidden sm:inline">Ordenar por</span>
+              <select v-model="orden" class="h-9 rounded-xl px-3 text-sm text-azul-noche" aria-label="Ordenar retos ajustados">
+                <option value="recientes">Actividad más reciente</option>
+                <option value="antiguos">Actividad más antigua</option>
+                <option value="titulo">Título (A-Z)</option>
+                <option value="nivel">Nivel</option>
+              </select>
+            </label>
           </div>
-        </div>
 
-      </div><!-- /refGrid -->
+          <!-- Con estos filtros también hay proyectos en otros cursos: el curso se elige arriba y no se ve aquí -->
+          <div v-if="!cargando && enOtrosCursos.length" data-tour="sdp-otros-cursos" role="status"
+               class="mb-3 flex flex-col gap-2 rounded-2xl border border-borde bg-gray-50 px-4 py-3 text-sm text-azul-noche sm:flex-row sm:flex-wrap sm:items-center">
+            <span class="min-w-0 flex-1">
+              También hay
+              <template v-for="(c, i) in enOtrosCursos" :key="c.curso">{{ i ? ' y ' : '' }}<strong>{{ c.n }} {{ c.n === 1 ? 'reto ajustado' : 'retos ajustados' }} en {{ etiquetaCurso(c.curso) }}</strong></template>
+              con estos filtros.
+            </span>
+            <div class="flex flex-wrap gap-2">
+              <button v-for="c in enOtrosCursos" :key="c.curso" type="button" @click="cursoStore.curso = c.curso"
+                      class="inline-flex h-9 items-center rounded-full bg-white px-3 text-sm font-semibold text-rol-fuerte ring-1 ring-rol-fuerte/30 hover:bg-rol/10">
+                Ver {{ etiquetaCurso(c.curso) }}
+              </button>
+              <button type="button" @click="cursoStore.curso = null"
+                      class="inline-flex h-9 items-center rounded-full px-3 text-sm font-semibold text-rol-fuerte hover:bg-rol/10">
+                Todos los cursos
+              </button>
+            </div>
+          </div>
 
+          <!-- Carga: skeleton con la forma de las tarjetas -->
+          <div v-if="cargando" class="grid grid-cols-1 gap-4" :class="columnasProyectos" aria-busy="true">
+            <div v-for="n in 6" :key="n" class="animate-pulse space-y-3 rounded-[1.5rem] border border-borde bg-white p-5">
+              <div class="h-4 w-1/3 rounded-full bg-gray-200" /><div class="h-4 w-4/5 rounded-full bg-gray-200" />
+              <div class="h-16 rounded-xl bg-gray-100" /><div class="h-3 w-2/3 rounded-full bg-gray-200" />
+            </div>
+            <span class="sr-only">Cargando retos ajustados…</span>
+          </div>
+
+          <!-- Vacío -->
+          <div v-else-if="!proyectosFiltrados.length && !errorCarga" data-tour="sdp-vacio"
+               class="rounded-2xl border border-dashed border-borde bg-white px-4 py-16 text-center shadow-sm">
+            <span class="mx-auto mb-4 inline-flex h-16 w-16 items-center justify-center rounded-full bg-rol/10 text-rol-fuerte" aria-hidden="true">
+              <svg class="h-8 w-8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                <path :d="ambito === 'completados' ? 'M8 21h8M12 17v4M7 4h10v5a5 5 0 01-10 0V4zM17 5h3v2a3 3 0 01-3 3M7 5H4v2a3 3 0 003 3' : 'M12 2L2 7l10 5 10-5-10-5zm0 10l-10-5m10 5l10-5m-10 5v10'" />
+              </svg>
+            </span>
+            <h3 class="mb-1 text-lg font-bold text-azul-noche">
+              <template v-if="hayFiltrosActivos">Sin resultados con estos filtros</template>
+              <template v-else-if="ambito === 'completados'">Todavía no hay retos ajustados completados</template>
+              <template v-else>Todavía no hay retos ajustados en proceso</template>
+            </h3>
+            <p class="mx-auto max-w-md text-sm text-texto-secundario">
+              <template v-if="hayFiltrosActivos">Prueba a quitar algún filtro.</template>
+              <template v-else-if="ambito === 'completados'">Aparecerán aquí cuando los grupos terminen los retos ajustados validados.</template>
+              <template v-else>Elige un reto y trabájalo para adaptarlo a tu alumnado.</template>
+            </p>
+            <div class="mt-5 flex flex-wrap justify-center gap-2">
+              <button v-if="hayFiltrosActivos" type="button" @click="limpiarFiltros" class="accion-secundaria">Quitar filtros</button>
+              <button v-else-if="ambito === 'proceso' && !authStore.isEmpresa" type="button"
+                      @click="router.push({ name: 'startup-day-crear' })" class="accion-principal">Trabajar un reto</button>
+            </div>
+          </div>
+
+          <!-- Tarjetas -->
+          <div v-else class="grid grid-cols-1 items-start gap-4" :class="columnasProyectos">
+            <ProyectoCard
+              v-for="(p, i) in proyectosPagina" :key="p.uuid"
+              :data-tour="i === 0 ? 'sdp-tarjeta' : undefined"
+              :proyecto="p"
+              :resaltar-editar="filtroEstados.length === 1 && filtroEstados[0] === 'en_edicion'"
+              :modulo-activo="filtroModulo"
+              @eliminar="abrirModalEliminar"
+            />
+          </div>
+
+          <!-- Paginación -->
+          <div v-if="!cargando && totalPaginas > 1" data-tour="sdp-paginacion" class="mt-5 flex flex-col flex-wrap items-center justify-between gap-3 sm:flex-row">
+            <p class="text-sm text-texto-secundario">
+              Mostrando {{ proyectosPagina.length }} de {{ proyectosFiltrados.length }} retos ajustados
+            </p>
+            <nav class="flex flex-wrap items-center justify-center gap-1" aria-label="Paginación de retos ajustados">
+              <button type="button" @click="irAPagina(0)" :disabled="pagina === 0" aria-label="Primera página"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">«</button>
+              <button type="button" @click="irAPagina(pagina - 1)" :disabled="pagina === 0" aria-label="Página anterior"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">‹</button>
+              <button v-for="i in paginasVisibles" :key="i" type="button" @click="irAPagina(i)"
+                      :aria-current="i === pagina ? 'page' : undefined" :aria-label="`Página ${i + 1}`"
+                      class="inline-flex h-9 min-w-9 items-center justify-center rounded-full px-2 text-sm font-semibold"
+                      :class="i === pagina ? 'bg-rol-fuerte text-white' : 'text-azul-noche hover:bg-gray-100'">{{ i + 1 }}</button>
+              <button type="button" @click="irAPagina(pagina + 1)" :disabled="pagina >= totalPaginas - 1" aria-label="Página siguiente"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">›</button>
+              <button type="button" @click="irAPagina(totalPaginas - 1)" :disabled="pagina >= totalPaginas - 1" aria-label="Última página"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">»</button>
+            </nav>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -602,19 +843,19 @@ function mostrarSnack(mensaje, accion = null) {
   <Transition name="sp-snack">
     <div
       v-if="snackbar.visible"
-      class="fixed bottom-6 right-6 z-[60] flex items-center gap-3
+      class="fixed bottom-6 left-4 right-4 sm:left-auto sm:right-6 z-[60] flex items-center gap-3
              px-5 py-3.5 rounded-2xl shadow-xl text-sm font-bold
-             max-w-sm bg-[#1a2332] text-white border border-white/10"
+             max-w-[calc(100vw-2rem)] sm:max-w-sm bg-[#1a2332] text-white border border-white/10"
     >
       <svg class="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
           d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
       </svg>
-      <span class="flex-1">{{ snackbar.mensaje }}</span>
+      <span class="flex-1 min-w-0 break-words">{{ snackbar.mensaje }}</span>
       <button
         v-if="snackbar.accion"
         @click="snackbar.accion.fn(); snackbar.visible = false"
-        class="ml-1 shrink-0 px-3 py-1.5 rounded-xl bg-amber-400 text-[#1a2332] text-[10px] font-black uppercase tracking-widest hover:bg-amber-300 transition-all"
+        class="ml-1 shrink-0 inline-flex h-9 items-center px-3 py-1.5 rounded-full bg-amber-400 text-[#1a2332] text-[10px] font-black uppercase tracking-widest hover:bg-amber-300 transition-all"
       >
         {{ snackbar.accion.label }}
       </button>
@@ -632,9 +873,14 @@ function mostrarSnack(mensaje, accion = null) {
 .sp-snack-leave-to     { opacity: 0; transform: translateY(8px); }
 
 .tour-active {
-  box-shadow: 0 0 0 3px #00A859, 0 0 0 8px rgba(0,168,89,0.15);
+  box-shadow: 0 0 0 3px v-bind('theme.hex'), 0 0 0 8px v-bind('theme.hexSoft');
   border-radius: 1rem;
   transition: box-shadow 0.3s ease;
+}
+/* Los botones resaltados por el tour conservan su forma de píldora */
+.accion-principal.tour-active,
+.accion-secundaria.tour-active {
+  border-radius: 9999px;
 }
 
 .tour-seccion-blur {

@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Str;
 
 class StoreMicroretoRequest extends FormRequest
 {
@@ -15,7 +16,7 @@ class StoreMicroretoRequest extends FormRequest
     {
         $textFields = [
             'empresa_nombre', 'titulo', 'subtitulo', 'quien_es', 'dia_a_dia',
-            'pregunta_reto', 'ciclo', 'modulo', 'duracion', 'nivel_grupo',
+            'pregunta_reto', 'ciclo', 'modulo', 'nivel_grupo',
         ];
 
         $sanitized = [];
@@ -24,6 +25,8 @@ class StoreMicroretoRequest extends FormRequest
                 $sanitized[$field] = strip_tags($this->input($field));
             }
         }
+        // `modulo` es solo el texto que se muestra («A y B y C…»): con varios módulos pasa de los 255 de la columna
+        if (isset($sanitized['modulo'])) $sanitized['modulo'] = Str::limit($sanitized['modulo'], 254, '…');
 
         foreach (['dificultades', 'que_necesitan', 'limitaciones', 'prototipos',
                   'ods_sugeridos', 'soft_skills', 'evaluacion_oficial', 'tips_profesorado', 'variantes'] as $field) {
@@ -91,12 +94,21 @@ class StoreMicroretoRequest extends FormRequest
             'variantes'            => 'nullable|array',
             'variantes.*'          => 'nullable|string|max:2000',
             'nivel_grupo'          => 'nullable|string|max:100',
-            'curso'                => 'nullable|integer',
+            'curso'                => 'nullable|in:1,2,ambos_cursos', // columna varchar: 1, 2 o 'ambos_cursos'
             'ciclo_id'             => 'nullable|integer|exists:ciclos_formativos,id',
             'ciclo'                => 'nullable|string|max:255',
             'modulo'               => 'nullable|string|max:255',
             'multimodulo'          => 'nullable|boolean',
-            'duracion'             => 'nullable|string|max:100',
+            'ra_ce_origen'         => 'nullable|in:ia,docente,mixto',
+            'ra_ce_firma'          => 'nullable|string|size:64',
+            // Diagnóstico con el que se generó (si difería del guardado) + su firma de generar()
+            'diagnostico_usado'   => 'nullable|array',
+            'diagnostico_usado.*' => 'nullable|string|max:2000',
+            'diagnostico_firma'   => 'nullable|string|size:64',
+            // Interés con el que se generó (firmado en generar(), ver MicroretoFichaService)
+            'interes_familia'     => 'nullable|string|max:255',
+            'interes_usado'       => 'nullable|string|max:500',
+            'interes_firma'       => 'nullable|string|size:64',
             'es_simulado'          => 'nullable|boolean',
         ];
     }

@@ -1,4 +1,5 @@
 <script setup>
+import { useVolver } from '../composables/useVolver.js'
 import { ref, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import QRCode from 'qrcode'
@@ -6,11 +7,13 @@ import api from '../api.js'
 
 const route  = useRoute()
 const router = useRouter()
+const volver = useVolver()
 
 const cargando = ref(true)
 const error     = ref('')
 const proyectoTitulo = ref('')
 const equipos   = ref([])
+const clases    = ref([])
 const canvases  = ref({})
 
 const baseUrl = import.meta.env.VITE_APP_BASE_URL || window.location.origin
@@ -43,7 +46,12 @@ async function cargar() {
   try {
     const res = await api.get(`/startup/proyectos/${route.params.uuid}/pantalla-acceso`)
     proyectoTitulo.value = res.data.proyecto_titulo
-    equipos.value = res.data.equipos
+    // ?encuentro=ID (desde la tarjeta de un encuentro): solo ese encuentro, para que el código
+    // de la clase y los grupos proyectados sean los mismos que enseña la tarjeta
+    const encuentroId = Number(route.query.encuentro) || null
+    const delEncuentro = (x) => !encuentroId || x.encuentro_id === encuentroId
+    clases.value  = (res.data.clases || []).filter(delEncuentro)
+    equipos.value = res.data.equipos.filter(delEncuentro)
   } catch (e) {
     error.value = e.response?.status === 404
       ? 'Proyecto no encontrado o sin equipos creados todavía.'
@@ -61,19 +69,19 @@ onMounted(cargar)
   <div class="min-h-screen bg-[#0C1220] text-white px-6 py-8">
     <div class="max-w-6xl mx-auto">
 
-      <div class="flex items-center justify-between mb-8">
-        <div>
-          <p class="text-[10px] font-black uppercase tracking-[0.2em] text-[#00A859] mb-1">Pantalla de acceso — alumnado</p>
-          <h1 class="text-2xl font-black">{{ proyectoTitulo || 'Cargando...' }}</h1>
+      <div data-tour="pqr-cabecera" class="flex items-center justify-between gap-3 mb-8">
+        <div class="min-w-0">
+          <p class="text-[10px] font-black uppercase tracking-[0.2em] text-centros mb-1">Pantalla de acceso — alumnado</p>
+          <h1 class="text-2xl font-black break-words">{{ proyectoTitulo || 'Cargando...' }}</h1>
         </div>
-        <button @click="router.back()"
-                class="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 transition-all text-xs font-black uppercase tracking-wider">
+        <button data-tour="pqr-volver" @click="volver({ name: 'pantalla-acceso-lista' })"
+                class="shrink-0 inline-flex h-10 items-center px-4 rounded-full bg-white/10 hover:bg-white/20 transition-all text-xs font-black uppercase tracking-wider">
           ← Volver
         </button>
       </div>
 
       <div v-if="cargando" class="flex items-center justify-center py-24">
-        <div class="w-8 h-8 border-2 border-[#00A859] border-t-transparent rounded-full animate-spin"></div>
+        <div class="w-8 h-8 border-2 border-centros border-t-transparent rounded-full animate-spin"></div>
       </div>
 
       <div v-else-if="error" class="rounded-3xl bg-red-950/40 border border-red-500/30 p-8 text-center text-red-300 text-sm font-semibold">
@@ -81,22 +89,34 @@ onMounted(cargar)
       </div>
 
       <template v-else>
-        <p class="text-sm text-gray-400 mb-6">
-          Cada alumno/a escanea el código QR de su equipo con el móvil, o entra en
+        <!-- Código de la clase: el mismo que enseñan las tarjetas de encuentro -->
+        <div v-if="clases.length" data-tour="pqr-codigo-clase" class="mb-6 flex flex-wrap gap-3">
+          <div v-for="c in clases" :key="c.encuentro_id"
+               class="min-w-0 rounded-2xl border border-white/10 bg-white/5 px-5 py-3">
+            <p class="text-[10px] font-black uppercase tracking-[0.2em] text-gray-400">
+              Código de la clase<template v-if="clases.length > 1 && c.grupo"> {{ c.grupo }}</template>
+            </p>
+            <p class="font-heading text-3xl font-black tracking-[0.2em] text-white sm:text-4xl">{{ c.codigo_clase }}</p>
+          </div>
+        </div>
+
+        <p data-tour="pqr-instrucciones" class="text-sm text-gray-400 mb-6">
+          La primera vez, entra en
           <strong class="text-white">{{ baseUrlSinProtocolo }}/unirse</strong>
-          y escribe el código de su equipo.
+          con el código de la clase y elige tu equipo. También puedes escanear el QR de tu equipo
+          o escribir su código, que sirve además para volver otro día.
         </p>
 
-        <div v-if="!equipos.length" class="rounded-3xl bg-white/5 border border-white/10 p-10 text-center text-gray-400">
+        <div v-if="!equipos.length" class="rounded-3xl bg-white/5 border border-white/10 p-6 sm:p-10 text-center text-gray-400">
           No hay equipos creados todavía para este proyecto.
         </div>
 
-        <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          <div v-for="equipo in equipos" :key="equipo.id"
+        <div v-else data-tour="pqr-grupos" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+          <div v-for="(equipo, i) in equipos" :key="equipo.id" :data-tour="i === 0 ? 'pqr-grupo' : undefined"
                class="bg-white rounded-3xl p-5 flex flex-col items-center text-center gap-3">
             <p class="text-sm font-black text-[#1F2937]">{{ equipo.nombre }}</p>
             <canvas :ref="el => setCanvasRef(el, equipo.id)" class="rounded-xl"></canvas>
-            <p class="text-2xl font-black tracking-[0.2em] text-[#00A859]">{{ equipo.codigo_acceso }}</p>
+            <p class="text-2xl font-black tracking-[0.2em] text-centros">{{ equipo.codigo_acceso }}</p>
           </div>
         </div>
       </template>

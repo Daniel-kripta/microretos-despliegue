@@ -52,14 +52,14 @@ const imagenFondo = computed(() => {
 
     <!-- Fondo decorativo -->
     <div class="fixed top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px]
-                bg-[#99CC33] opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
+                bg-alumnos opacity-5 blur-[120px] rounded-full pointer-events-none z-0" />
 
     <!-- ── CARGANDO ── -->
     <div v-if="cargando" class="flex flex-col items-center justify-center min-h-screen">
-      <svg class="animate-spin w-12 h-12 text-[#00A859] mb-4" viewBox="0 0 24 24">
+      <svg class="animate-spin w-12 h-12 text-alumnos mb-4" viewBox="0 0 24 24">
         <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
       </svg>
-      <p class="text-[#00A859] font-black tracking-widest uppercase text-sm animate-pulse">
+      <p class="text-alumnos-dark font-black tracking-widest uppercase text-sm animate-pulse">
         Cargando reto...
       </p>
     </div>
@@ -73,7 +73,7 @@ const imagenFondo = computed(() => {
                 d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
       </div>
-      <h1 class="text-2xl font-black text-[#1F2937] mb-3">Acceso no disponible</h1>
+      <h1 class="text-2xl font-black text-azul-noche mb-3">Acceso no disponible</h1>
       <p class="text-gray-500 text-sm max-w-sm leading-relaxed">
         Este enlace ha caducado o ha sido desactivado por tu profesora o profesor.
         Solicita el QR actualizado para continuar.
@@ -91,7 +91,7 @@ const imagenFondo = computed(() => {
                    L3.34 16c-.77 1.333.192 3 1.732 3z"/>
         </svg>
       </div>
-      <h1 class="text-2xl font-black text-[#1F2937] mb-3">Error de conexión</h1>
+      <h1 class="text-2xl font-black text-azul-noche mb-3">Error de conexión</h1>
       <p class="text-gray-500 text-sm max-w-sm">Comprueba tu conexión a internet e intenta de nuevo.</p>
     </div>
 
@@ -99,10 +99,10 @@ const imagenFondo = computed(() => {
     <div v-else-if="reto" class="relative z-10 max-w-3xl mx-auto px-4 py-8 md:px-6 md:py-12">
 
       <!-- Logo + badge de acceso temporal -->
-      <div class="flex items-center justify-between mb-8
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-8
                   transition-all duration-700 ease-out"
            :class="isLoaded ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0'">
-        <span class="text-[#00A859] font-black text-lg tracking-tight">DuaLab</span>
+        <span class="text-alumnos-dark font-black text-lg tracking-tight">DUALAB</span>
         <span v-if="expira"
               class="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200
                      text-amber-700 rounded-full text-[10px] font-bold uppercase tracking-wider">
@@ -130,44 +130,39 @@ const imagenFondo = computed(() => {
           </div>
 
           <div class="relative z-10 px-6 py-8 md:px-10 md:pt-10 md:pb-8">
-            <p class="text-[#00A859] font-bold text-[10px] tracking-[0.2em] uppercase mb-4 flex items-center gap-2">
+            <p class="text-alumnos-dark font-bold text-[10px] tracking-[0.2em] uppercase mb-4 flex items-center gap-2">
               <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                       d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586
                          a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
               </svg>
-              DuaLab · Ficha de Reto
+              DUALAB · Ficha de Reto
             </p>
 
-            <h1 class="text-2xl sm:text-3xl md:text-4xl font-black text-[#1F2937]
+            <h1 class="text-2xl sm:text-3xl md:text-4xl font-black text-azul-noche
                        tracking-tight leading-tight mb-3">
               {{ reto.titulo }}
             </h1>
 
             <div class="flex flex-wrap gap-2 mt-6">
               <span class="flex items-center gap-1.5 px-3 py-1.5 bg-[#1F2937] text-white
-                           rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm">
+                           rounded-full text-[10px] font-bold uppercase tracking-wider shadow-sm">
                 {{ reto.empresa_nombre || reto.empresa?.nombre_comercial }}
               </span>
               <span v-if="reto.familia"
                     class="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 border border-gray-200
-                           text-[#1F2937] rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                           text-[#1F2937] rounded-full text-[10px] font-bold uppercase tracking-wider">
                 {{ reto.familia }}
               </span>
               <span v-if="reto.ciclo"
-                    class="flex items-center gap-1.5 px-3 py-1.5 bg-[#00A859]/10 border border-[#00A859]/20
-                           text-[#00A859] rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                    class="flex items-center gap-1.5 px-3 py-1.5 bg-alumnos/10 border border-alumnos/20
+                           text-alumnos-dark rounded-full text-[10px] font-bold uppercase tracking-wider">
                 {{ reto.ciclo }}
               </span>
               <span v-if="reto.curso"
                     class="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 border border-indigo-200
-                           text-indigo-700 rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                           text-indigo-700 rounded-full text-[10px] font-bold uppercase tracking-wider">
                 {{ reto.curso === 'ambos_cursos' ? 'Ambos Cursos: 1º y 2º' : reto.curso + 'º Curso' }}
-              </span>
-              <span v-if="reto.duracion"
-                    class="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 border border-gray-200
-                           text-gray-600 rounded-lg text-[10px] font-bold uppercase tracking-wider">
-                {{ reto.duracion }}
               </span>
             </div>
           </div>
@@ -180,7 +175,7 @@ const imagenFondo = computed(() => {
           <div v-if="reto.quien_es || reto.dia_a_dia"
                class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div v-if="reto.quien_es">
-              <h3 class="flex items-center gap-2 text-[#00A859] font-black text-[11px]
+              <h3 class="flex items-center gap-2 text-alumnos-dark font-black text-[11px]
                          uppercase tracking-[0.15em] mb-3">
                 <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -192,7 +187,7 @@ const imagenFondo = computed(() => {
               <p class="text-gray-600 text-sm leading-relaxed">{{ reto.quien_es }}</p>
             </div>
             <div v-if="reto.dia_a_dia">
-              <h3 class="flex items-center gap-2 text-[#00A859] font-black text-[11px]
+              <h3 class="flex items-center gap-2 text-alumnos-dark font-black text-[11px]
                          uppercase tracking-[0.15em] mb-3">
                 <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -226,9 +221,9 @@ const imagenFondo = computed(() => {
           </div>
 
           <!-- Pregunta del reto -->
-          <div class="bg-gradient-to-r from-gray-50 to-white border-l-4 border-[#00A859]
+          <div class="bg-gradient-to-r from-gray-50 to-white border-l-4 border-alumnos
                       p-6 rounded-r-2xl shadow-sm border-y border-r border-gray-100">
-            <p class="text-[#00A859] font-black uppercase text-[10px] tracking-[0.2em] mb-3">
+            <p class="text-alumnos-dark font-black uppercase text-[10px] tracking-[0.2em] mb-3">
               Pregunta del Reto
             </p>
             <p class="text-xl md:text-2xl font-bold text-[#1F2937] leading-snug">
@@ -240,7 +235,7 @@ const imagenFondo = computed(() => {
           <div v-if="reto.que_necesitan?.length || reto.limitaciones?.length"
                class="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div v-if="reto.que_necesitan?.length">
-              <h3 class="flex items-center gap-2 text-[#00A859] font-black text-[11px]
+              <h3 class="flex items-center gap-2 text-alumnos-dark font-black text-[11px]
                          uppercase tracking-[0.15em] mb-3">
                 <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -253,7 +248,7 @@ const imagenFondo = computed(() => {
               <ul class="space-y-2 pl-1">
                 <li v-for="(item, i) in reto.que_necesitan" :key="i"
                     class="flex items-start gap-3 text-sm text-gray-700">
-                  <span class="text-[#00A859] font-black mt-0.5 shrink-0">•</span>
+                  <span class="text-alumnos-dark font-black mt-0.5 shrink-0">•</span>
                   <span>{{ item }}</span>
                 </li>
               </ul>
@@ -280,7 +275,7 @@ const imagenFondo = computed(() => {
 
           <!-- Prototipos -->
           <div v-if="reto.prototipos?.length">
-            <h3 class="flex items-center gap-2 text-[#00A859] font-black text-[11px]
+            <h3 class="flex items-center gap-2 text-alumnos-dark font-black text-[11px]
                        uppercase tracking-[0.15em] mb-3">
               <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -294,7 +289,7 @@ const imagenFondo = computed(() => {
             <ul class="space-y-2 pl-1">
               <li v-for="(item, i) in reto.prototipos" :key="i"
                   class="flex items-start gap-3 text-sm text-gray-700">
-                <span class="text-[#00A859] font-black mt-0.5 shrink-0">→</span>
+                <span class="text-alumnos-dark font-black mt-0.5 shrink-0">→</span>
                 <span>{{ item }}</span>
               </li>
             </ul>
@@ -348,7 +343,7 @@ const imagenFondo = computed(() => {
 
       <!-- Pie de página -->
       <p class="text-center text-[10px] text-gray-400 mt-8 tracking-wider uppercase">
-        DuaLab Studio · Acceso temporal para alumnado
+        DUALAB Studio · Acceso temporal para alumnado
       </p>
     </div>
 

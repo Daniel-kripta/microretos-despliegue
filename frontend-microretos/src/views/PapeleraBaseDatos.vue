@@ -1,13 +1,20 @@
 <script setup>
+import BotonVolver from '../components/BotonVolver.vue'
+import AvisoAccionCritica from '../components/AvisoAccionCritica.vue'
 import { ref, computed, onMounted } from 'vue'
 import api from '../api.js'
+import { getPapeleraCorreo, borrarCorreo, vaciarPapeleraCorreo, cambiarEstadoCorreo } from '../services/primerContactoService.js'
 
 // ─── Estado ───────────────────────────────────────────────────────────────────
 const cargando    = ref(true)
 const error       = ref('')
-const items       = ref({ empresas: [], microretos: [], ciclos: [], familias: [], centros: [], proyectos: [], sesiones: [] })
+const items       = ref({ empresas: [], microretos: [], ciclos: [], familias: [], centros: [], proyectos: [], sesiones: [], solicitudes: [], captaciones_empresa: [], captaciones_centro: [], retos_borrador: [], correos: [] })
+// Los correos de info@ están en la web (API firmada): si no responde, el resto de la papelera se ve igual
+const errorCorreos = ref('')
 const total       = ref(0)
 const filtroActivo = ref('todos')
+// Purga automática (papelera:purgar, cada noche): tras cuántos días y qué tipos; el resto no se borra solo
+const purga       = ref({ dias: 30, tipos: [] })
 
 // Modal borrado permanente
 const modalEliminar  = ref(false)
@@ -27,14 +34,19 @@ const restaurando    = ref(null) // id del item restaurándose
 // ─── Configuración de tipos ───────────────────────────────────────────────────
 const TIPOS = {
   empresas: {
+    grupo: 'datos',
     label: 'Empresa',
     labelPlural: 'Empresas',
-    color: '#00A859',
-    bgLight: 'bg-[#00A859]/10',
-    textColor: 'text-[#00A859]',
-    borderColor: 'border-[#00A859]/20',
+    // Nota: color meramente distintivo de esta leyenda de tipos, sin relación con
+    // los colores de marca por colectivo (centros/empresas/administraciones/alumnos)
+    // — "empresas" aquí es un tipo de registro eliminado, no el rol de usuario.
+    color: '#10b981',
+    bgLight: 'bg-emerald-50',
+    textColor: 'text-emerald-600',
+    borderColor: 'border-emerald-200',
   },
   microretos: {
+    grupo: 'datos',
     label: 'Reto',
     labelPlural: 'Retos',
     color: '#6366f1',
@@ -43,6 +55,7 @@ const TIPOS = {
     borderColor: 'border-indigo-200',
   },
   ciclos: {
+    grupo: 'datos',
     label: 'Ciclo formativo',
     labelPlural: 'Ciclos formativos',
     color: '#f59e0b',
@@ -51,14 +64,16 @@ const TIPOS = {
     borderColor: 'border-amber-200',
   },
   familias: {
+    grupo: 'datos',
     label: 'Familia profesional',
     labelPlural: 'Familias',
-    color: '#99CC33',
+    color: '#4d7c0f',
     bgLight: 'bg-lime-50',
     textColor: 'text-lime-700',
     borderColor: 'border-lime-200',
   },
   centros: {
+    grupo: 'datos',
     label: 'Centro educativo',
     labelPlural: 'Centros educativos',
     color: '#3b82f6',
@@ -67,6 +82,7 @@ const TIPOS = {
     borderColor: 'border-blue-200',
   },
   proyectos: {
+    grupo: 'datos',
     label: 'Proyecto',
     labelPlural: 'Proyectos',
     color: '#8b5cf6',
@@ -75,6 +91,7 @@ const TIPOS = {
     borderColor: 'border-violet-200',
   },
   sesiones: {
+    grupo: 'datos',
     label: 'Sesión',
     labelPlural: 'Sesiones',
     color: '#ec4899',
@@ -82,14 +99,67 @@ const TIPOS = {
     textColor: 'text-pink-600',
     borderColor: 'border-pink-200',
   },
+  solicitudes: {
+    grupo: 'red',
+    label: 'Solicitud de retos',
+    labelPlural: 'Solicitudes de retos',
+    color: '#0d9488',
+    bgLight: 'bg-teal-50',
+    textColor: 'text-teal-700',
+    borderColor: 'border-teal-200',
+  },
+  // Central → Captaciones (una empresa captada con firma no se puede borrar del todo: evidencia legal)
+  captaciones_empresa: {
+    grupo: 'red',
+    label: 'Empresa captada',
+    labelPlural: 'Empresas captadas',
+    color: '#d97706',
+    bgLight: 'bg-amber-50',
+    textColor: 'text-amber-700',
+    borderColor: 'border-amber-200',
+  },
+  captaciones_centro: {
+    grupo: 'red',
+    label: 'Centro captado',
+    labelPlural: 'Centros captados',
+    color: '#ea580c',
+    bgLight: 'bg-orange-50',
+    textColor: 'text-orange-700',
+    borderColor: 'border-orange-200',
+  },
+  retos_borrador: {
+    grupo: 'red',
+    label: 'Reto en borrador',
+    labelPlural: 'Retos en borrador',
+    color: '#ca8a04',
+    bgLight: 'bg-yellow-50',
+    textColor: 'text-yellow-700',
+    borderColor: 'border-yellow-200',
+  },
+  // Correo de info@ en la papelera: solo la copia de la web; el original sigue en el webmail
+  correos: {
+    grupo: 'red',
+    label: 'Correo de info@',
+    labelPlural: 'Correos de info@',
+    color: '#0369a1',
+    bgLight: 'bg-sky-50',
+    textColor: 'text-sky-700',
+    borderColor: 'border-sky-200',
+  },
 }
+
+// Filtros separados por origen: lo que se borra en Red DuaLab y lo de Base de datos
+const GRUPOS = [
+  { clave: 'red', titulo: 'Red DuaLab' },
+  { clave: 'datos', titulo: 'Base de datos' },
+].map(g => ({ ...g, tipos: Object.entries(TIPOS).filter(([, c]) => c.grupo === g.clave).map(([t]) => t) }))
 
 // ─── Computed ─────────────────────────────────────────────────────────────────
 const itemsFiltrados = computed(() => {
   if (filtroActivo.value === 'todos') {
     return Object.entries(items.value)
       .flatMap(([tipo, lista]) => lista)
-      .sort((a, b) => new Date(b.deleted_at) - new Date(a.deleted_at))
+      .sort((a, b) => new Date(b.deleted_at || 0) - new Date(a.deleted_at || 0))
   }
   return items.value[filtroActivo.value] ?? []
 })
@@ -100,14 +170,45 @@ const contadorPorTipo = computed(() =>
   )
 )
 
+// Días que le quedan antes de la purga (null si ese tipo no se borra solo)
+function diasParaPurga(item) {
+  if (!item.deleted_at || !purga.value.tipos.includes(item.tipo)) return null
+  const transcurridos = Math.floor((Date.now() - new Date(item.deleted_at)) / 86400000)
+  return Math.max(purga.value.dias - transcurridos, 0)
+}
+function textoPurga(item) {
+  const dias = diasParaPurga(item)
+  if (dias === null) return 'no se borra solo'
+  if (dias === 0) return 'se borra del todo esta noche'
+  return dias === 1 ? 'se borra del todo mañana' : `se borra del todo en ${dias} días`
+}
+
+// Aviso de cabecera: retos a medida y retos en borrador, cuántos hay y cuándo se borra el primero
+const TIPOS_AVISO = ['solicitudes', 'retos_borrador', 'microretos']
+const avisoPurga = computed(() => {
+  const partes = TIPOS_AVISO
+    .map(t => ({ t, n: items.value[t]?.length ?? 0 }))
+    .filter(x => x.n)
+    .map(x => `${x.n} ${(x.n === 1 ? TIPOS[x.t].label : TIPOS[x.t].labelPlural).toLowerCase()}`)
+  if (!partes.length) return null
+  const dias = TIPOS_AVISO.flatMap(t => items.value[t] ?? []).map(diasParaPurga).filter(d => d !== null)
+  const pronto = dias.filter(d => d <= 7).length
+  return {
+    texto: `${partes.join(' · ')}. Se borran del todo solos a los ${purga.value.dias} días en la papelera`,
+    primero: dias.length ? Math.min(...dias) : null,
+    pronto,
+  }
+})
+
 // ─── API ──────────────────────────────────────────────────────────────────────
 async function cargarPapelera() {
   cargando.value = true
   error.value = ''
   try {
-    const res = await api.get('/papelera')
-    items.value = { ...items.value, ...res.data.items }
-    total.value = res.data.total
+    const [res, correos] = await Promise.all([api.get('/papelera'), cargarCorreos()])
+    items.value = { ...items.value, ...res.data.items, correos }
+    total.value = res.data.total + correos.length
+    if (res.data.purga) purga.value = res.data.purga
   } catch (e) {
     error.value = 'No se pudo cargar la papelera. Comprueba la conexión.'
   } finally {
@@ -115,10 +216,25 @@ async function cargarPapelera() {
   }
 }
 
+async function cargarCorreos() {
+  errorCorreos.value = ''
+  try {
+    const { data } = await getPapeleraCorreo()
+    return data.data.map(c => ({
+      id: c.id, tipo: 'correos', deleted_at: null, fecha: c.fecha,
+      nombre: `${c.asunto || '(Sin asunto)'} · ${c.de || 'sin remitente'}`,
+    }))
+  } catch {
+    errorCorreos.value = 'No se han podido cargar los correos de info@ (la web no responde).'
+    return []
+  }
+}
+
 async function restaurar(item) {
   restaurando.value = item.id + item.tipo
   try {
-    await api.patch(`/papelera/${item.tipo}/${item.id}/restaurar`)
+    if (item.tipo === 'correos') await cambiarEstadoCorreo(item.id, 'leido')
+    else await api.patch(`/papelera/${item.tipo}/${item.id}/restaurar`)
     items.value[item.tipo] = items.value[item.tipo].filter(i => i.id !== item.id)
     total.value--
   } catch (e) {
@@ -146,7 +262,8 @@ async function confirmarEliminar() {
   errorEliminar.value = ''
   try {
     const { tipo, id } = itemAEliminar.value
-    await api.delete(`/papelera/${tipo}/${id}`)
+    if (tipo === 'correos') await borrarCorreo(id)
+    else await api.delete(`/papelera/${tipo}/${id}`)
     items.value[tipo] = items.value[tipo].filter(i => i.id !== id)
     total.value--
     cerrarModalEliminar()
@@ -174,8 +291,11 @@ async function confirmarVaciar() {
   vaciando.value = true
   errorVaciar.value = ''
   try {
-    const params = filtroActivo.value !== 'todos' ? `?tipo=${filtroActivo.value}` : ''
-    await api.delete(`/papelera${params}`)
+    const filtro = filtroActivo.value
+    if (filtro === 'todos' || filtro === 'correos') {
+      if (items.value.correos.length) await vaciarPapeleraCorreo()
+    }
+    if (filtro !== 'correos') await api.delete(`/papelera${filtro !== 'todos' ? `?tipo=${filtro}` : ''}`)
     await cargarPapelera()
     cerrarModalVaciar()
   } catch (e) {
@@ -207,14 +327,16 @@ onMounted(cargarPapelera)
 </script>
 
 <template>
-  <div class="min-h-screen pb-20 pt-12 md:pt-12">
+  <div class="min-h-screen pb-20 pt-16 md:pt-16">
 
     <!-- ═══ HEADER ═══════════════════════════════════════════════════════════ -->
     <div class="bg-white border-b border-gray-100 shadow-sm">
-      <div class="max-w-4xl mx-auto px-6 py-6 pl-20 lg:pl-6">
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 py-6">
+        <!-- Se llega desde varias bibliotecas: vuelve a la que se venía -->
+        <BotonVolver fallback="/base-datos" class="mb-3" />
         <div class="flex items-start justify-between gap-4 flex-wrap">
 
-          <div class="flex items-center gap-3">
+          <div data-tour="pap-cabecera" class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-2xl bg-red-50 border border-red-100 flex items-center justify-center shrink-0">
               <svg class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <polyline points="3 6 5 6 21 6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -224,7 +346,7 @@ onMounted(cargarPapelera)
               </svg>
             </div>
             <div>
-              <h1 class="text-xl font-black text-[#1F2937] tracking-tight">Papelera</h1>
+              <h1 class="text-xl font-black text-azul-noche tracking-tight">Papelera</h1>
               <p class="text-xs text-gray-400 mt-0.5">
                 Elementos eliminados de la base de datos — restáuralos o bórralos definitivamente
               </p>
@@ -234,8 +356,9 @@ onMounted(cargarPapelera)
           <!-- Vaciar papelera -->
           <button
             v-if="total > 0 && !cargando"
+            data-tour="pap-vaciar"
             @click="abrirModalVaciar"
-            class="flex items-center gap-2 px-4 py-2 rounded-2xl
+            class="flex items-center gap-2 px-4 py-2 rounded-full
                    bg-red-50 border border-red-200 text-red-600
                    hover:bg-red-100 hover:border-red-300
                    font-bold text-sm transition-all duration-150"
@@ -253,10 +376,10 @@ onMounted(cargarPapelera)
         </div>
 
         <!-- Tabs de filtro -->
-        <div class="flex flex-wrap gap-1.5 mt-5">
+        <div data-tour="pap-todos" class="flex flex-wrap gap-1.5 mt-5">
           <button
             @click="filtroActivo = 'todos'"
-            class="px-3 py-1.5 rounded-full text-xs font-bold transition-all duration-150"
+            class="min-h-9 px-3 py-1.5 rounded-full text-xs font-bold transition-all duration-150"
             :class="filtroActivo === 'todos'
               ? 'bg-[#1F2937] text-white'
               : 'bg-gray-100 text-gray-500 hover:bg-gray-200'"
@@ -265,25 +388,37 @@ onMounted(cargarPapelera)
             <span class="ml-1 opacity-70">{{ total }}</span>
           </button>
 
-          <button
-            v-for="(cfg, tipo) in TIPOS"
-            :key="tipo"
-            @click="filtroActivo = tipo"
-            class="px-3 py-1.5 rounded-full text-xs font-bold transition-all duration-150"
-            :class="filtroActivo === tipo
-              ? 'text-white'
-              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'"
-            :style="filtroActivo === tipo ? { backgroundColor: cfg.color } : {}"
-          >
-            {{ cfg.labelPlural }}
-            <span class="ml-1 opacity-70">{{ contadorPorTipo[tipo] }}</span>
-          </button>
         </div>
+        <!-- Un bloque por origen, separados por una línea -->
+        <div v-for="g in GRUPOS" :key="g.clave" :data-tour="`pap-grupo-${g.clave}`" class="mt-3 border-t border-gray-100 pt-3">
+          <p class="mb-1.5 text-[11px] font-bold uppercase tracking-[0.15em] text-gray-400">{{ g.titulo }}</p>
+          <div class="flex flex-wrap gap-1.5">
+            <button
+              v-for="tipo in g.tipos"
+              :key="tipo"
+              @click="filtroActivo = tipo"
+              class="min-h-9 px-3 py-1.5 rounded-full text-xs font-bold transition-all duration-150"
+              :class="filtroActivo === tipo
+                ? 'text-white'
+                : 'bg-gray-100 text-gray-500 hover:bg-gray-200'"
+              :style="filtroActivo === tipo ? { backgroundColor: TIPOS[tipo].color } : {}"
+            >
+              {{ TIPOS[tipo].labelPlural }}
+              <span class="ml-1 opacity-70">{{ contadorPorTipo[tipo] }}</span>
+            </button>
+          </div>
+        </div>
+        <p v-if="errorCorreos" class="mt-3 text-xs font-semibold text-amber-700" role="status">{{ errorCorreos }}</p>
+        <!-- Plan de purga: lo de Retos a medida y los retos en borrador, con cuándo se borra el primero -->
+        <p v-if="avisoPurga && !cargando" data-tour="pap-purga" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800" role="status">
+          {{ avisoPurga.texto }}{{ avisoPurga.primero !== null ? ` (el primero, ${avisoPurga.primero === 0 ? 'esta noche' : avisoPurga.primero === 1 ? 'mañana' : `en ${avisoPurga.primero} días`})` : '' }}.
+          <template v-if="avisoPurga.pronto"> {{ avisoPurga.pronto === 1 ? '1 se borra' : `${avisoPurga.pronto} se borran` }} en los próximos 7 días: restáuralo{{ avisoPurga.pronto === 1 ? '' : 's' }} antes si hace falta.</template>
+        </p>
       </div>
     </div>
 
     <!-- ═══ CONTENIDO ════════════════════════════════════════════════════════ -->
-    <div class="max-w-4xl mx-auto px-6 py-6 pl-20 lg:pl-6">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 py-6">
 
       <!-- Estado cargando -->
       <div v-if="cargando" class="flex flex-col items-center justify-center py-20 gap-3">
@@ -299,14 +434,14 @@ onMounted(cargarPapelera)
         <p class="text-sm font-bold text-red-600">{{ error }}</p>
         <button
           @click="cargarPapelera"
-          class="mt-3 px-4 py-2 rounded-xl bg-red-100 text-red-700 text-sm font-bold hover:bg-red-200 transition-colors"
+          class="mt-3 px-4 py-2 rounded-full bg-red-100 text-red-700 text-sm font-bold hover:bg-red-200 transition-colors"
         >
           Reintentar
         </button>
       </div>
 
       <!-- Estado vacío -->
-      <div v-else-if="itemsFiltrados.length === 0" class="flex flex-col items-center justify-center py-20 gap-4">
+      <div v-else-if="itemsFiltrados.length === 0" data-tour="pap-vacia" class="flex flex-col items-center justify-center py-20 gap-4">
         <div class="w-16 h-16 rounded-2xl bg-gray-100 border border-gray-200 flex items-center justify-center">
           <svg class="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <polyline points="3 6 5 6 21 6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -324,14 +459,15 @@ onMounted(cargarPapelera)
       </div>
 
       <!-- Lista de items -->
-      <div v-else class="space-y-2">
+      <div v-else data-tour="pap-lista" class="space-y-2">
 
         <!-- Item card -->
         <div
           v-for="item in itemsFiltrados"
           :key="item.tipo + item.id"
+          :data-tour="item === itemsFiltrados[0] ? 'pap-item' : undefined"
           class="bg-white rounded-2xl border border-gray-100 shadow-sm
-                 flex items-center gap-4 px-5 py-4
+                 flex items-center gap-3 sm:gap-4 px-4 sm:px-5 py-4
                  transition-all duration-150 hover:border-gray-200 hover:shadow"
         >
 
@@ -385,6 +521,25 @@ onMounted(cargarPapelera)
               <path stroke-linecap="round" stroke-linejoin="round"
                 d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"/>
             </svg>
+            <!-- Solicitud de retos -->
+            <svg v-else-if="item.tipo === 'solicitudes'"
+                 class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M9.66 17h4.68M12 3v1m6.36 1.64l-.7.7M21 12h-1M4 12H3m3.34-5.66l-.7-.7m2.83 9.9a5 5 0 117.07 0l-.55.54A3.37 3.37 0 0014 18.47V19a2 2 0 11-4 0v-.53c0-.9-.36-1.75-.99-2.38l-.54-.55z"/>
+            </svg>
+            <!-- Correo de info@ -->
+            <svg v-else-if="item.tipo === 'correos'"
+                 class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+            </svg>
+            <!-- Captaciones (empresa, centro o reto en borrador) -->
+            <svg v-else-if="item.tipo?.startsWith('captaciones_') || item.tipo === 'retos_borrador'"
+                 class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
+                 fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
             <!-- Sesión -->
             <svg v-else
                  class="w-4.5 h-4.5" :class="TIPOS[item.tipo]?.textColor"
@@ -405,8 +560,12 @@ onMounted(cargarPapelera)
                 {{ TIPOS[item.tipo]?.label }}
               </span>
             </div>
-            <p class="text-xs text-gray-400 mt-0.5">
-              Eliminado {{ formatearFecha(item.deleted_at) }}
+            <p v-if="item.tipo === 'correos'" class="text-xs text-gray-400 mt-0.5">
+              Correo del {{ formatearFecha(item.fecha) }} · borrarlo quita la copia de Central, no el original del webmail
+            </p>
+            <p v-else class="text-xs text-gray-400 mt-0.5">
+              Eliminado {{ formatearFecha(item.deleted_at) }} ·
+              <span :class="diasParaPurga(item) !== null && diasParaPurga(item) <= 7 ? 'font-bold text-amber-700' : ''">{{ textoPurga(item) }}</span>
             </p>
           </div>
 
@@ -416,10 +575,12 @@ onMounted(cargarPapelera)
             <!-- Restaurar -->
             <button
               @click="restaurar(item)"
+              :data-tour="item === itemsFiltrados[0] ? 'pap-restaurar' : undefined"
               :disabled="restaurando === item.id + item.tipo"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl
-                     bg-[#00A859]/10 border border-[#00A859]/20 text-[#00A859]
-                     hover:bg-[#00A859]/20 hover:border-[#00A859]/40
+              aria-label="Restaurar" title="Restaurar"
+              class="flex items-center justify-center gap-1.5 w-9 h-9 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 rounded-full
+                     bg-administraciones/10 border border-administraciones/20 text-administraciones
+                     hover:bg-administraciones/20 hover:border-administraciones/40
                      font-bold text-xs transition-all duration-150
                      disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -432,13 +593,15 @@ onMounted(cargarPapelera)
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
               </svg>
-              Restaurar
+              <span class="hidden sm:inline">Restaurar</span>
             </button>
 
             <!-- Eliminar permanentemente -->
             <button
               @click="abrirModalEliminar(item)"
-              class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl
+              :data-tour="item === itemsFiltrados[0] ? 'pap-eliminar' : undefined"
+              aria-label="Eliminar permanentemente" title="Eliminar permanentemente"
+              class="flex items-center justify-center gap-1.5 w-9 h-9 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 rounded-full
                      bg-red-50 border border-red-100 text-red-500
                      hover:bg-red-100 hover:border-red-200 hover:text-red-600
                      font-bold text-xs transition-all duration-150"
@@ -447,7 +610,7 @@ onMounted(cargarPapelera)
                 <polyline points="3 6 5 6 21 6" stroke-linecap="round" stroke-linejoin="round"/>
                 <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
-              Eliminar
+              <span class="hidden sm:inline">Eliminar</span>
             </button>
 
           </div>
@@ -463,7 +626,7 @@ onMounted(cargarPapelera)
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
         @click.self="cerrarModalEliminar"
       >
-        <div class="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+        <div class="bg-white rounded-[2rem] shadow-2xl w-full max-w-md p-7">
 
           <!-- Icono de advertencia -->
           <div class="flex items-center gap-3 mb-5">
@@ -473,7 +636,7 @@ onMounted(cargarPapelera)
               </svg>
             </div>
             <div>
-              <h2 class="text-base font-black text-[#1F2937]">Eliminar permanentemente</h2>
+              <h2 class="text-base font-black text-azul-noche">Eliminar permanentemente</h2>
               <p class="text-xs text-gray-400">Esta acción no se puede deshacer</p>
             </div>
           </div>
@@ -482,7 +645,7 @@ onMounted(cargarPapelera)
             Vas a eliminar definitivamente:
           </p>
           <div class="px-4 py-3 rounded-xl bg-gray-50 border border-gray-100 mb-5">
-            <p class="font-black text-[#1F2937] text-sm">{{ itemAEliminar?.nombre }}</p>
+            <p class="font-black text-[#1F2937] text-sm break-words">{{ itemAEliminar?.nombre }}</p>
             <p class="text-xs text-gray-400 mt-0.5">
               {{ TIPOS[itemAEliminar?.tipo]?.label }}
             </p>
@@ -496,11 +659,13 @@ onMounted(cargarPapelera)
             {{ errorEliminar }}
           </div>
 
+          <AvisoAccionCritica class="mb-4" texto="Se borra para siempre y no se puede deshacer. Queda en el Historial de Central con tu nombre y la fecha." />
+
           <div class="flex gap-2">
             <button
               @click="cerrarModalEliminar"
               :disabled="eliminando"
-              class="flex-1 px-4 py-2.5 rounded-2xl border border-gray-200 text-gray-600
+              class="flex-1 px-4 py-2.5 rounded-full border border-gray-200 text-gray-600
                      font-bold text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
             >
               Cancelar
@@ -508,7 +673,7 @@ onMounted(cargarPapelera)
             <button
               @click="confirmarEliminar"
               :disabled="eliminando"
-              class="flex-1 px-4 py-2.5 rounded-2xl bg-red-500 text-white
+              class="flex-1 px-4 py-2.5 rounded-full bg-red-500 text-white
                      font-black text-sm hover:bg-red-600 transition-colors
                      disabled:opacity-50 disabled:cursor-not-allowed
                      flex items-center justify-center gap-2"
@@ -532,7 +697,7 @@ onMounted(cargarPapelera)
         class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
         @click.self="cerrarModalVaciar"
       >
-        <div class="bg-white rounded-3xl shadow-2xl w-full max-w-md p-7">
+        <div class="bg-white rounded-[2rem] shadow-2xl w-full max-w-md p-7">
 
           <div class="flex items-center gap-3 mb-5">
             <div class="w-10 h-10 rounded-2xl bg-red-100 border border-red-200 flex items-center justify-center shrink-0">
@@ -544,7 +709,7 @@ onMounted(cargarPapelera)
               </svg>
             </div>
             <div>
-              <h2 class="text-base font-black text-[#1F2937]">Vaciar papelera</h2>
+              <h2 class="text-base font-black text-azul-noche">Vaciar papelera</h2>
               <p class="text-xs text-gray-400">
                 {{ filtroActivo === 'todos'
                    ? `${total} elementos serán eliminados permanentemente`
@@ -576,11 +741,13 @@ onMounted(cargarPapelera)
             {{ errorVaciar }}
           </div>
 
+          <AvisoAccionCritica class="mb-4" texto="Se borra para siempre y no se puede deshacer. Queda en el Historial de Central con tu nombre y la fecha." />
+
           <div class="flex gap-2">
             <button
               @click="cerrarModalVaciar"
               :disabled="vaciando"
-              class="flex-1 px-4 py-2.5 rounded-2xl border border-gray-200 text-gray-600
+              class="flex-1 px-4 py-2.5 rounded-full border border-gray-200 text-gray-600
                      font-bold text-sm hover:bg-gray-50 transition-colors disabled:opacity-50"
             >
               Cancelar
@@ -588,7 +755,7 @@ onMounted(cargarPapelera)
             <button
               @click="confirmarVaciar"
               :disabled="confirmVaciar !== 'VACIAR' || vaciando"
-              class="flex-1 px-4 py-2.5 rounded-2xl bg-red-600 text-white
+              class="flex-1 px-4 py-2.5 rounded-full bg-red-600 text-white
                      font-black text-sm hover:bg-red-700 transition-colors
                      disabled:opacity-30 disabled:cursor-not-allowed
                      flex items-center justify-center gap-2"

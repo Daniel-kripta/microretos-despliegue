@@ -2,13 +2,31 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../api.js'
+import { getWorkspaceDocente } from '../services/equipoService.js'
 import MicroretoModal from '../components/MicroretoModal.vue'
 import DesbloquearIaModal from '../components/DesbloquearIaModal.vue'
+import RegenerarAliasButton from '../components/RegenerarAliasButton.vue'
+import AvisoSinNombresReales from '../components/AvisoSinNombresReales.vue'
+import EtapaRecorrido from '../components/EtapaRecorrido.vue'
+import IconoFase from '../components/IconoFase.vue'
+import { generarAliasAleatorio, errorNombrePila } from '../utils/alias.js'
 import {
   MegaphoneIcon,
   ClockIcon,
   EyeIcon,
   DocumentTextIcon,
+  CheckIcon,
+  CheckCircleIcon,
+  XMarkIcon,
+  ExclamationTriangleIcon,
+  LockClosedIcon,
+  SparklesIcon,
+  PaperClipIcon,
+  LightBulbIcon,
+  UserIcon,
+  UserGroupIcon,
+  PhotoIcon,
+  FilmIcon,
 } from '@heroicons/vue/24/outline'
 
 const verFichaReto = ref(false)
@@ -30,8 +48,14 @@ const workspace = ref(null)
 const faseVista = ref(0)
 const guardando = ref(false)
 const msgOk     = ref('')
+const msgError  = ref('')
 
 const token = route.params.token
+
+// Vista del docente (/grupos/:equipoId/workspace): el mismo workspace en solo lectura, cargado
+// con su sesión y por id. No hay token, así que ninguna llamada de escritura puede funcionar;
+// además, los controles de edición se desactivan (fieldset) y no se guarda nada en el navegador.
+const soloLectura = route.name === 'equipo-workspace-docente'
 
 // ── Desbloqueo IA — código repartido por el docente, gatea "Sugerir con IA" ──
 const mostrarModalIa    = ref(false)
@@ -53,6 +77,8 @@ function onIaDesbloqueada() {
 // ── Helpers de acceso a datos ─────────────────────────────────────────────
 const equipo      = computed(() => workspace.value?.equipo)
 const proyecto    = computed(() => workspace.value?.proyecto)
+// Etapa del trabajo: encuentro creativo (Taller de ideas) o plan de proyecto en la empresa (P4)
+const etapa       = computed(() => workspace.value?.etapa ?? null)
 const diagnostico = computed(() => workspace.value?.diagnostico)
 const preguntasF0 = computed(() => workspace.value?.preguntas_f0 ?? [])
 const tareas      = computed(() => workspace.value?.tareas ?? [])
@@ -64,20 +90,23 @@ function getFase(n) {
   return workspace.value?.fases?.[n] ?? { numero_fase: n, datos: null, completada: false, validado_docente: false }
 }
 
-// Duración real (en clases) — nº de clases del calendario que cubren esta fase
+// Duración real (en sesiones) — nº de sesiones del encuentro que cubren esta fase
+// (encuentros antiguos sin planificación propia: el calendario de la propuesta)
 function duracionFase(n) {
-  const clases = proyecto.value?.diseno_microproyecto?.clases || []
+  const clases = workspace.value?.planificacion_sesiones?.length
+    ? workspace.value.planificacion_sesiones
+    : (proyecto.value?.diseno_microproyecto?.clases || [])
   const count = clases.filter(c => (c.fases || []).includes(n)).length
   return count || null
 }
 
 // ── Definición visual de fases ─────────────────────────────────────────────
 const fasesConfig = [
-  { num: 0, label: 'Inicio del equipo',  shortLabel: 'Inicio',     icono: '👥', color: 'slate',  desc: 'Constitución del equipo',    descLarga: 'Conóceos, estableced roles y acordad cómo vais a trabajar juntos durante el reto. Esta fase no se evalúa, pero es clave para que todo lo demás funcione.' },
-  { num: 1, label: 'Análisis del reto',  shortLabel: 'Análisis',   icono: '🔍', color: 'blue',   desc: 'Comprensión del reto',        descLarga: 'Analizad en profundidad el reto planteado por la empresa y definid vuestra propuesta de solución con datos concretos.' },
-  { num: 2, label: 'Diseño de solución y desarrollo', shortLabel: 'Diseño',   icono: '💡', color: 'amber',  desc: 'Prototipo, tareas y desarrollo', descLarga: 'Diseñad y construid vuestra solución: definid el prototipo, dividid el trabajo en tareas y avanzad en la construcción. Registrad el progreso de cada tarea.' },
-  { num: 3, label: 'Entrega de la solución',          shortLabel: 'Entrega', icono: '🔨', color: 'orange', desc: 'Entrega de la solución',         descLarga: 'Entregad la solución final que proponéis para cubrir la necesidad de la empresa, al docente y a la empresa validadora. Adjuntad el entregable (enlace y/o archivo).' },
-  { num: 4, label: 'Presentación',       shortLabel: 'Presenta.',  icono: '🎓', color: 'green',  desc: 'Entrega y reflexión',         descLarga: 'Reflexionad individualmente y en grupo sobre lo aprendido. Es vuestro cierre del proyecto.' },
+  { num: 0, label: 'Inicio del equipo',  shortLabel: 'Inicio',     color: 'slate',  desc: 'Constitución del equipo',    descLarga: 'Conóceos, estableced roles y acordad cómo vais a trabajar juntos durante el reto. Esta fase no se evalúa, pero es clave para que todo lo demás funcione.' },
+  { num: 1, label: 'Análisis del reto',  shortLabel: 'Análisis',   color: 'blue',   desc: 'Comprensión del reto',        descLarga: 'Analizad en profundidad el reto planteado por la empresa y definid vuestra propuesta de solución con datos concretos.' },
+  { num: 2, label: 'Diseño de solución y desarrollo', shortLabel: 'Diseño',   color: 'amber',  desc: 'Prototipo, tareas y desarrollo', descLarga: 'Diseñad y construid vuestra solución: definid el prototipo, dividid el trabajo en tareas y avanzad en la construcción. Registrad el progreso de cada tarea.' },
+  { num: 3, label: 'Entrega de la solución',          shortLabel: 'Entrega', color: 'orange', desc: 'Entrega de la solución',         descLarga: 'Entregad la solución final que proponéis para cubrir la necesidad de la empresa, al docente y a la empresa validadora. Adjuntad el entregable (enlace y/o archivo).' },
+  { num: 4, label: 'Presentación',       shortLabel: 'Presenta.',  color: 'green',  desc: 'Entrega y reflexión',         descLarga: 'Reflexionad individualmente y en grupo sobre lo aprendido. Es vuestro cierre del proyecto.' },
 ]
 
 const colorMap = {
@@ -85,7 +114,7 @@ const colorMap = {
   blue:   { activo: 'bg-blue-600   border-blue-400   text-white',  done: 'bg-blue-500/20  border-blue-400/40  text-blue-300',  lock: 'bg-white/5 border-white/10 text-white/20' },
   amber:  { activo: 'bg-amber-500  border-amber-400  text-white',  done: 'bg-amber-500/20 border-amber-400/40 text-amber-300', lock: 'bg-white/5 border-white/10 text-white/20' },
   orange: { activo: 'bg-orange-500 border-orange-400 text-white',  done: 'bg-orange-500/20 border-orange-400/40 text-orange-300', lock: 'bg-white/5 border-white/10 text-white/20' },
-  green:  { activo: 'bg-[#00A859] border-[#00A859]   text-white',  done: 'bg-[#00A859]/20 border-[#00A859]/40  text-[#00A859]', lock: 'bg-white/5 border-white/10 text-white/20' },
+  green:  { activo: 'bg-alumnos border-alumnos   text-white',  done: 'bg-alumnos/20 border-alumnos/40  text-alumnos', lock: 'bg-white/5 border-white/10 text-white/20' },
 }
 
 function estadoFaseBtn(n) {
@@ -126,12 +155,21 @@ function pctFase(n) {
 onMounted(async () => {
   setTimeout(() => { isLoaded.value = true }, 60)
   try {
-    const res = await api.get(`/equipo/${token}`)
+    const res = soloLectura ? await getWorkspaceDocente(route.params.equipoId) : await api.get(`/equipo/${token}`)
     workspace.value = res.data
-    faseVista.value = equipo.value.fase_actual
-    localStorage.setItem('dualab_equipo_token', token)
-    localStorage.setItem('dualab_equipo_nombre', equipo.value.nombre)
-    localStorage.setItem('dualab_proyecto_titulo', proyecto.value.titulo)
+    // Enlaces "Ver en workspace" desde la ficha de proyecto completado abren directamente
+    // en la fase indicada (?fase=1); si no es una fase visible para el equipo, se cae a
+    // la fase actual como siempre.
+    const faseSolicitada = Number(route.query.fase)
+    faseVista.value = Number.isInteger(faseSolicitada) && puedeVerFase(faseSolicitada)
+      ? faseSolicitada
+      : equipo.value.fase_actual
+    // Reentrada del alumnado (EntrarWorkspace): nunca desde la vista del docente
+    if (!soloLectura) {
+      localStorage.setItem('dualab_equipo_token', token)
+      localStorage.setItem('dualab_equipo_nombre', equipo.value.nombre)
+      localStorage.setItem('dualab_proyecto_titulo', proyecto.value.titulo)
+    }
   } catch {
     error.value = true
   } finally {
@@ -141,6 +179,7 @@ onMounted(async () => {
 
 // ── Guardar fase ──────────────────────────────────────────────────────────
 async function guardarFase(n, datos) {
+  if (soloLectura) return
   guardando.value = true
   try {
     await api.put(`/equipo/${token}/fase/${n}`, { datos })
@@ -174,9 +213,15 @@ function mostrarOk(msg) {
   setTimeout(() => { msgOk.value = '' }, 3000)
 }
 
+function mostrarError(msg) {
+  msgError.value = msg
+  setTimeout(() => { msgError.value = '' }, 3000)
+}
+
 // ── F0: Formularios de equipo ───────────────────────────────────────────────
 const f0 = ref({ contrato_firmado: false, miembros: [] })
 const nuevoMiembro = ref({ nombre: '', rol: '' })
+const errorNuevoMiembro = ref('')
 const rolesOpciones = ['portavoz', 'tiempos', 'documentacion', 'foco']
 const rolesInfo = {
   portavoz: {
@@ -248,45 +293,52 @@ function inicializarF0() {
     contrato_firmado: datos.contrato_firmado ?? false,
     miembros: (equipo.value?.miembros ?? []).map(m => ({
       id:               m.id,
-      nombre:           m.nombre ?? '',
       alias:            m.alias ?? '',
       rol:              m.rol ?? '',
       fortalezas:       Array.isArray(m.fortalezas) ? m.fortalezas : [],
       puntosMejora:     Array.isArray(m.puntos_mejora) ? m.puntos_mejora : [],
       nuevaFortaleza:   '',
       nuevoPuntoMejora: '',
-      editandoAlias:    false,
     })),
   }
 }
 
+// Protección de datos: un integrante nuevo escribe solo su nombre de pila (sin apellidos) y
+// recibe animal + color: "Adrián Águila Amarillo". El nombre no se guarda aparte, solo el
+// alias (el backend lo valida y, si chocara con otro de la clase, cambia animal y color).
+const aliasUsadosF0 = computed(() => f0.value.miembros.map(m => m.alias))
+
 function addMiembro() {
-  if (!nuevoMiembro.value.nombre.trim()) return
+  errorNuevoMiembro.value = errorNombrePila(nuevoMiembro.value.nombre)
+  if (errorNuevoMiembro.value) return
   f0.value.miembros.push({
-    ...nuevoMiembro.value,
-    alias: '',
+    rol: nuevoMiembro.value.rol,
+    alias: generarAliasAleatorio(nuevoMiembro.value.nombre, aliasUsadosF0.value),
     fortalezas: [],
     puntosMejora: [],
     nuevaFortaleza: '',
     nuevoPuntoMejora: '',
-    editandoAlias: false,
   })
   nuevoMiembro.value = { nombre: '', rol: '' }
 }
 function removeMiembro(i) { f0.value.miembros.splice(i, 1) }
 
-// Estilo Kahoot: "generar otro" elige un animal al azar en el momento, sin ir al
-// backend — el backend solo genera el alias inicial (determinista) al dar de alta.
-const ANIMALES_ALIAS = [
-  'Panda', 'Tigre', 'León', 'Delfín', 'Águila', 'Lobo', 'Zorro', 'Koala',
-  'Halcón', 'Pingüino', 'Jaguar', 'Puma', 'Búho', 'Colibrí', 'Nutria',
-  'Lince', 'Gacela', 'Cóndor', 'Orca', 'Mapache',
-]
-function regenerarAlias(m) {
-  const primerNombre = (m.nombre || 'Alumno').trim().split(' ')[0] || 'Alumno'
-  const animal = ANIMALES_ALIAS[Math.floor(Math.random() * ANIMALES_ALIAS.length)]
-  m.alias = `${primerNombre} ${animal}`
+// Escritura inmediata al backend, fuera del guardado de fase — así el alias queda
+// persistido al instante y no depende de que el equipo llegue a pulsar "Guardar"/"Siguiente"
+// en la F0. Si el docente lo cambia mientras tanto desde "Editar equipo", gana quien guarde
+// último (ver EncuentroController::actualizarAliasMiembro). Solo alias generados (dado).
+async function cambiarAliasMiembro(m, alias) {
+  const anterior = m.alias
+  m.alias = alias
+  if (!m.id) return // integrante aún no guardado: viaja con la F0
+  try {
+    await api.put(`/equipo/${token}/miembros/${m.id}/alias`, { alias })
+  } catch (e) {
+    m.alias = anterior
+    mostrarError(e.response?.data?.error || 'No se pudo actualizar el alias.')
+  }
 }
+
 
 function addFortaleza(m) {
   const v = m.nuevaFortaleza.trim()
@@ -309,7 +361,7 @@ const f0Valido = computed(() =>
 function serializarF0() {
   return {
     contrato_firmado: f0.value.contrato_firmado,
-    miembros: f0.value.miembros.map(({ nuevaFortaleza, nuevoPuntoMejora, puntosMejora, editandoAlias, ...m }) => ({
+    miembros: f0.value.miembros.map(({ nuevaFortaleza, nuevoPuntoMejora, puntosMejora, ...m }) => ({
       ...m,
       puntos_mejora: puntosMejora,
     })),
@@ -343,9 +395,9 @@ async function confirmarNombres() {
     await guardarF0()
     await api.post(`/equipo/${token}/fase/0/confirmar-nombres`)
     nombresConfirmados.value = true
-    mostrarOk('Nombres confirmados. Ya no se pueden editar.')
+    mostrarOk('Alias confirmados. Ya no se pueden cambiar.')
   } catch (e) {
-    errorConfirmarNombres.value = e.response?.data?.error || 'Error al confirmar los nombres.'
+    errorConfirmarNombres.value = e.response?.data?.error || 'Error al confirmar los alias.'
   } finally {
     confirmandoNombres.value = false
   }
@@ -533,10 +585,10 @@ function formatBytes(bytes) {
 }
 
 function iconoMime(mime) {
-  if (mime?.startsWith('image/'))  return '🖼️'
-  if (mime?.startsWith('video/'))  return '🎬'
-  if (mime === 'application/pdf')  return '📄'
-  return '📎'
+  if (mime?.startsWith('image/'))  return PhotoIcon
+  if (mime?.startsWith('video/'))  return FilmIcon
+  if (mime === 'application/pdf')  return DocumentTextIcon
+  return PaperClipIcon
 }
 
 async function subirArchivoConContexto(event, contexto, subiendoRef, errorRef) {
@@ -639,6 +691,9 @@ function esTareaQA(tarea) {
   return tarea.descripcion.includes('QA')
 }
 
+// Explicación de «🔒 Obligatoria» visible al pulsar (en táctil no hay title)
+const obligatoriaAbierta = ref(null)
+
 function tooltipObligatoria(tarea) {
   if (esTareaQA(tarea)) {
     return 'No se puede eliminar. QA = control de calidad: repasad entre todo el equipo que el trabajo esté bien hecho antes de darlo por terminado.'
@@ -655,6 +710,8 @@ async function addTareaGenerica() {
     const res = await api.post(`/equipo/${token}/tareas`, { ...nuevaTareaGenerica.value, tipo: 'proceso' })
     workspace.value.tareas.push(res.data)
     nuevaTareaGenerica.value = { descripcion: '', responsable: '', estado: 'pendiente' }
+  } catch (e) {
+    mostrarError(e.response?.data?.errors?.responsable?.[0] || 'No se pudo añadir la tarea.')
   } finally { cargandoTareaGenerica.value = false }
 }
 
@@ -717,10 +774,17 @@ async function cambiarEstadoTarea(tarea, estado) {
   tarea.estado = estado
 }
 
-async function actualizarResponsableTarea(tarea, responsable) {
+// Recibe el <select> para devolverlo al valor guardado si el backend rechaza el cambio
+async function actualizarResponsableTarea(tarea, select) {
+  const responsable = select.value
   if ((tarea.responsable ?? '') === responsable) return
-  await api.put(`/equipo/${token}/tareas/${tarea.id}`, { responsable })
-  tarea.responsable = responsable
+  try {
+    await api.put(`/equipo/${token}/tareas/${tarea.id}`, { responsable })
+    tarea.responsable = responsable
+  } catch (e) {
+    select.value = tarea.responsable ?? ''
+    mostrarError(e.response?.data?.errors?.responsable?.[0] || 'No se pudo cambiar el responsable.')
+  }
 }
 
 async function eliminarTarea(tarea) {
@@ -880,6 +944,8 @@ async function enviarReflexion(tipo) {
     reflexionEnviada.value = true
     modoReflexion.value = ''
     mostrarOk('Reflexión guardada correctamente.')
+  } catch (e) {
+    mostrarError(e.response?.data?.errors?.autor_nombre?.[0] || 'No se pudo guardar la reflexión.')
   } finally {
     guardandoReflexion.value = false
   }
@@ -942,7 +1008,7 @@ const NIVEL_LABELS = {
 const NIVEL_COLORS = {
   no_alcanzado: 'bg-red-100 text-red-700',
   en_proceso:   'bg-amber-100 text-amber-700',
-  alcanzado:    'bg-[#00A859]/10 text-[#00A859]',
+  alcanzado:    'bg-alumnos/10 text-alumnos-dark',
   superado:     'bg-violet-100 text-violet-700',
 }
 const evaluacionRaCe = computed(() => getFase(4).datos?.evaluacion_docente?.ras ?? [])
@@ -977,10 +1043,10 @@ watch(workspace, (val) => {
 
     <!-- Cargando -->
     <div v-if="cargando" class="flex flex-col items-center justify-center min-h-screen">
-      <svg class="animate-spin w-10 h-10 text-[#00A859] mb-3" viewBox="0 0 24 24" fill="none">
+      <svg class="animate-spin w-10 h-10 text-alumnos mb-3" viewBox="0 0 24 24" fill="none">
         <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
       </svg>
-      <p class="text-[#00A859] font-black text-xs uppercase tracking-widest animate-pulse">Cargando proyecto...</p>
+      <p class="text-alumnos-dark font-black text-xs uppercase tracking-widest animate-pulse">Cargando proyecto...</p>
     </div>
 
     <!-- Error -->
@@ -990,45 +1056,81 @@ watch(workspace, (val) => {
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
         </svg>
       </div>
-      <h2 class="text-lg font-black text-[#1F2937] mb-2">Enlace no válido</h2>
-      <p class="text-sm text-gray-500 mb-6">Este enlace no existe o ha caducado. Comprueba el código con tu docente.</p>
-      <button @click="router.push({ name: 'unirse-equipo' })"
-              class="px-6 py-3 rounded-2xl bg-[#00A859] text-white text-sm font-black uppercase tracking-widest">
+      <h2 class="text-lg font-black text-azul-noche mb-2">{{ soloLectura ? 'No se puede abrir este workspace' : 'Enlace no válido' }}</h2>
+      <p class="text-sm text-gray-500 mb-6">{{ soloLectura ? 'El grupo no existe o no tienes acceso a su encuentro.' : 'Este enlace no existe o ha caducado. Comprueba el código con tu docente.' }}</p>
+      <button @click="soloLectura ? router.push({ name: 'encuentros-registrados', query: { ver: 'seguimiento' } }) : router.push({ name: 'unirse-equipo' })"
+              class="px-6 py-3 rounded-full bg-alumnos text-white text-sm font-black uppercase tracking-widest">
         Volver
       </button>
     </div>
 
     <template v-else-if="workspace">
 
+      <!-- ══ AVISO: VISTA DEL DOCENTE EN SOLO LECTURA ══ -->
+      <div v-if="soloLectura" class="border-b border-amber-200 bg-amber-50" role="status">
+        <div class="max-w-[1380px] mx-auto flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-4 sm:px-8">
+          <p class="flex min-w-0 flex-1 items-start gap-2 text-sm text-amber-900">
+            <svg class="mt-0.5 h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+            <span><strong class="font-bold">Vista del docente · solo lectura.</strong> Ves el trabajo del grupo tal y como lo tiene; desde aquí no se puede cambiar nada.</span>
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button v-if="workspace.microreto_id" type="button" @click="verFichaReto = true"
+                    class="inline-flex h-9 items-center rounded-full border border-amber-300 bg-white px-4 text-sm font-semibold text-amber-900 hover:bg-amber-100">
+              Ficha del reto
+            </button>
+            <button type="button" @click="router.push({ name: 'mis-grupos-detalle', params: { id: workspace.encuentro_id }, query: { equipo: equipo.id } })"
+                    class="inline-flex h-9 items-center rounded-full bg-amber-500 px-4 text-sm font-semibold text-white hover:bg-amber-600">
+              Detalle del grupo
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- ══ CABECERA OSCURA ══ -->
-      <div class="bg-[#0C1220] text-white">
+      <div class="border-t-4 bg-[#0C1220] text-white" :class="etapa?.es_plan ? 'border-centros-light' : 'border-alumnos'">
         <div class="max-w-[1380px] mx-auto px-4 sm:px-8 py-4 sm:py-5
                     flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-6">
           <!-- Izquierda: info del microreto -->
           <div class="min-w-0 flex-1">
-            <p class="text-[10px] font-black uppercase tracking-[0.18em] text-[#00A859] mb-1">
-              Microreto activo
-            </p>
+            <!-- Etapa del recorrido: Taller de ideas (aula) o Plan de proyecto (empresa) -->
+            <div class="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+              <EtapaRecorrido :etapa="etapa?.es_plan ? 'plan' : 'taller'" :detalle="etapa?.es_plan ? (etapa.empresa || '') : ''" />
+              <span class="text-[11px] font-semibold text-white/60">
+                <template v-if="etapa?.es_plan">Prácticas en la empresa<template v-if="etapa.hitos"> · {{ etapa.hitos }} hitos</template></template>
+                <template v-else>Encuentro creativo en el aula</template>
+              </span>
+            </div>
             <h1 class="text-lg sm:text-xl font-black text-white leading-tight mb-2 sm:mb-3">
               {{ proyecto.titulo }}
             </h1>
             <div class="flex gap-1.5 sm:gap-2 flex-wrap">
               <span v-if="proyecto.empresa_nombre"
-                    class="text-[10px] sm:text-[11px] font-bold bg-white/10 text-white px-2.5 py-1 rounded-full">
+                    class="max-w-full break-words text-[10px] sm:text-[11px] font-bold bg-white/10 text-white px-2.5 py-1 rounded-full">
                 {{ proyecto.empresa_nombre }}
+              </span>
+              <!-- Perfil desde el que trabaja el equipo: la empresa puede ser de otro sector -->
+              <span v-if="proyecto.ciclo || proyecto.familia"
+                    class="max-w-full whitespace-normal break-words text-[10px] sm:text-[11px] font-bold bg-alumnos/20 text-white px-2.5 py-1 rounded-full"
+                    :title="[proyecto.ciclo, proyecto.familia].filter(Boolean).join(' · ')">
+                {{ proyecto.ciclo || proyecto.familia }}
               </span>
               <span v-if="proyecto.curso"
                     class="text-[10px] sm:text-[11px] font-bold bg-white/10 text-white px-2.5 py-1 rounded-full">
                 {{ proyecto.curso }}
               </span>
             </div>
+            <!-- Plan de proyecto: lo que espera la empresa del alumnado durante las prácticas -->
+            <p v-if="etapa?.es_plan && etapa.expectativas_empresa"
+               class="mt-2 max-w-3xl whitespace-pre-line break-words text-xs text-white/80 sm:text-sm">
+              <span class="font-bold text-white">Qué espera la empresa de vosotros:</span> {{ etapa.expectativas_empresa }}
+            </p>
           </div>
           <!-- Derecha: nombre de equipo + miembros -->
           <div class="sm:text-right min-w-0 sm:max-w-[40%]">
-            <p class="text-sm sm:text-base font-black text-[#00A859] truncate">{{ equipo.nombre }}</p>
+            <p class="text-sm sm:text-base font-black text-alumnos truncate">{{ equipo.nombre }}</p>
             <p v-if="equipo.miembros?.length"
                class="text-[11px] text-gray-400 mt-0.5 leading-relaxed sm:leading-normal truncate sm:whitespace-normal">
-              {{ equipo.miembros.slice(0, 4).map(m => m.nombre.split(' ')[0]).join(' · ') }}
+              {{ equipo.miembros.slice(0, 4).map(m => m.alias).join(' · ') }}
             </p>
             <p v-if="proyecto.centro_nombre" class="text-[11px] text-gray-500 mt-0.5 truncate">
               {{ proyecto.centro_nombre }}<span v-if="proyecto.curso"> · {{ proyecto.curso }}</span>
@@ -1039,38 +1141,31 @@ watch(workspace, (val) => {
 
       <!-- ══ BARRA DE FASES ══ -->
       <div class="bg-white border-b border-gray-200 sticky top-0 z-20 shadow-sm">
-        <div class="max-w-[1380px] mx-auto">
-          <div class="flex overflow-x-auto scrollbar-none">
+        <!-- Pestañas en píldora dentro de un carril en píldora (mismo patrón que GestionUsuarios);
+             en móvil el carril se desliza si las cinco fases no caben -->
+        <div class="max-w-[1380px] mx-auto px-3 sm:px-6 py-2">
+          <div class="flex gap-1 overflow-x-auto scrollbar-none rounded-full border border-borde bg-white p-1"
+               role="group" aria-label="Fases del reto">
             <button
-              v-for="f in fasesConfig" :key="f.num"
+              v-for="f in fasesConfig" :key="f.num" type="button"
               @click="puedeVerFase(f.num) && alCambiarFase(f.num)"
-              class="flex-1 min-w-[72px] sm:min-w-[110px] flex flex-col items-center gap-0.5
-                     py-3 sm:py-3.5 px-1.5 sm:px-3 border-b-2 transition-all duration-200"
+              :aria-pressed="faseVista === f.num" :aria-disabled="!puedeVerFase(f.num)" :title="f.label"
+              class="inline-flex h-10 flex-1 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap
+                     rounded-full px-3 sm:px-4 text-xs sm:text-sm font-semibold transition-colors"
               :class="[
                 faseVista === f.num
-                  ? 'border-[#00A859]'
+                  ? 'bg-alumnos text-white shadow-sm'
                   : puedeVerFase(f.num)
-                    ? 'border-transparent hover:border-gray-200 cursor-pointer'
-                    : 'border-transparent cursor-default',
+                    ? 'text-texto-secundario hover:bg-gray-50 hover:text-azul-noche cursor-pointer'
+                    : 'text-gray-300 cursor-default',
               ]">
-              <span class="text-[9px] font-black uppercase tracking-wider"
-                    :class="faseVista === f.num ? 'text-[#00A859]' : 'text-gray-400'">
-                <template v-if="getFase(f.num).completada">✓ </template>
-                F{{ f.num }}
+              <span class="inline-flex items-center gap-0.5 text-[10px] font-black uppercase tracking-wider"
+                    :class="faseVista === f.num ? 'text-white/80' : puedeVerFase(f.num) ? 'text-gray-400' : 'text-gray-300'">
+                <CheckIcon v-if="getFase(f.num).completada" class="h-3 w-3 shrink-0 stroke-[3]" aria-hidden="true" />F{{ f.num }}
               </span>
-              <!-- Label completo en sm+, abreviado en móvil -->
-              <span class="hidden sm:block text-[11px] font-bold leading-tight text-center"
-                    :class="faseVista === f.num
-                      ? 'text-[#00A859]'
-                      : puedeVerFase(f.num) ? 'text-gray-600' : 'text-gray-300'">
-                {{ f.label }}
-              </span>
-              <span class="sm:hidden text-[10px] font-bold leading-tight text-center"
-                    :class="faseVista === f.num
-                      ? 'text-[#00A859]'
-                      : puedeVerFase(f.num) ? 'text-gray-600' : 'text-gray-300'">
-                {{ f.shortLabel }}
-              </span>
+              <!-- Label completo en xl+ (en una línea no cabe antes), abreviado por debajo -->
+              <span class="hidden xl:inline">{{ f.label }}</span>
+              <span class="xl:hidden">{{ f.shortLabel }}</span>
             </button>
           </div>
         </div>
@@ -1080,15 +1175,27 @@ watch(workspace, (val) => {
       <Transition enter-active-class="transition-all duration-300" enter-from-class="opacity-0 -translate-y-2"
                   leave-active-class="transition-all duration-200" leave-to-class="opacity-0 -translate-y-2">
         <div v-if="msgOk"
-             class="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-[#00A859] text-white
-                    px-5 py-2.5 rounded-full shadow-lg text-sm font-bold whitespace-nowrap">
-          ✓ {{ msgOk }}
+             class="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-alumnos text-white
+                    w-max max-w-[calc(100vw-2rem)] px-5 py-2.5 rounded-2xl shadow-lg text-sm font-bold text-center break-words">
+          <CheckIcon class="inline-block h-4 w-4 align-[-3px] mr-1 stroke-[2.5]" aria-hidden="true" />{{ msgOk }}
+        </div>
+      </Transition>
+
+      <!-- Toast error -->
+      <Transition enter-active-class="transition-all duration-300" enter-from-class="opacity-0 -translate-y-2"
+                  leave-active-class="transition-all duration-200" leave-to-class="opacity-0 -translate-y-2">
+        <div v-if="msgError"
+             class="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-red-500 text-white
+                    w-max max-w-[calc(100vw-2rem)] px-5 py-2.5 rounded-2xl shadow-lg text-sm font-bold text-center break-words">
+          <XMarkIcon class="inline-block h-4 w-4 align-[-3px] mr-1 stroke-[2.5]" aria-hidden="true" />{{ msgError }}
         </div>
       </Transition>
 
       <!-- ══ LAYOUT DOS COLUMNAS ══ -->
       <div class="max-w-[1380px] mx-auto px-3 sm:px-6 py-4 sm:py-6">
-        <div class="flex flex-col lg:flex-row gap-4 sm:gap-6 items-start">
+        <!-- fieldset: en la vista del docente desactiva de una vez todos los campos y botones de
+             edición de las fases y del lateral (la barra de fases, fuera, sigue funcionando) -->
+        <fieldset :disabled="soloLectura" class="m-0 flex min-w-0 flex-col gap-4 border-0 p-0 sm:gap-6 lg:flex-row items-start">
 
           <!-- ─────────────────────────────────────────────── -->
           <!--  CONTENIDO PRINCIPAL (fases)                    -->
@@ -1101,9 +1208,9 @@ watch(workspace, (val) => {
           <div class="flex-1 min-w-0 w-full space-y-4 sm:space-y-5">
 
             <!-- Tarjeta intro de la fase activa -->
-            <div class="bg-[#F0FDF4] border border-[#00A859]/20 rounded-2xl px-5 py-4 flex gap-3 items-start">
-              <span class="text-2xl mt-0.5 shrink-0">{{ fasesConfig[faseVista].icono }}</span>
-              <div>
+            <div class="bg-[#F0FDF4] border border-alumnos/20 rounded-2xl px-5 py-4 flex gap-3 items-start">
+              <IconoFase :num="faseVista" class="h-7 w-7 mt-0.5 shrink-0 text-[#047857]" />
+              <div class="min-w-0">
                 <p class="text-sm font-black text-[#065F46] mb-0.5">
                   {{ fasesConfig[faseVista].label }}
                   <span v-if="duracionFase(faseVista)" class="font-normal text-[#047857]/80"> · {{ duracionFase(faseVista) }} clase(s)</span>
@@ -1120,10 +1227,10 @@ watch(workspace, (val) => {
               <!-- Validado -->
               <div v-if="getFase(0).validado_docente"
                    class="bg-green-50 border border-green-200 rounded-2xl px-4 py-3 flex items-center gap-3">
-                <span class="text-green-600 text-lg">✓</span>
-                <div>
+                <CheckCircleIcon class="h-6 w-6 shrink-0 text-green-600" aria-hidden="true" />
+                <div class="min-w-0">
                   <p class="text-sm font-bold text-green-700">Fase validada por el docente</p>
-                  <p v-if="getFase(0).nota_docente" class="text-xs text-green-600">
+                  <p v-if="getFase(0).nota_docente" class="text-xs text-green-600 break-words">
                     Nota: {{ getFase(0).nota_docente }}/10 · {{ getFase(0).observaciones_docente }}
                   </p>
                 </div>
@@ -1150,44 +1257,22 @@ watch(workspace, (val) => {
                   </div>
                 </div>
 
-                <div class="px-3 py-2 mb-3 bg-emerald-50 rounded-xl border border-emerald-100
-                            text-[11px] text-emerald-700 flex items-start gap-1.5">
-                  <span class="shrink-0">🔒</span>
-                  <span>Creamos un alias para tu protección de datos — es lo que verán fuera del
-                  equipo. Puedes cambiarlo cuando quieras.</span>
+                <div class="mb-3">
+                  <AvisoSinNombresReales para="alumnado" />
                 </div>
 
                 <div class="space-y-2 mb-4">
                   <div v-for="(m, i) in f0.miembros" :key="i"
                        class="bg-slate-50 rounded-xl px-3 py-2.5 space-y-2">
                     <div class="flex items-center gap-2">
-                      <span class="flex-1 text-sm font-bold text-[#1F2937]">{{ m.nombre }}</span>
+                      <span class="flex-1 min-w-0 truncate text-sm font-bold text-[#1F2937]">{{ m.alias }}</span>
+                      <RegenerarAliasButton v-if="!nombresConfirmados" :alias="m.alias" :usados="aliasUsadosF0"
+                                             @generado="alias => cambiarAliasMiembro(m, alias)" />
                       <span class="text-[10px] text-slate-500 capitalize bg-white border border-slate-200 px-2 py-0.5 rounded-full">
                         {{ m.rol || 'sin rol' }}
                       </span>
-                      <button v-if="!nombresConfirmados" @click="removeMiembro(i)"
-                              class="text-gray-300 hover:text-red-400 transition-colors text-xs font-black">✕</button>
-                    </div>
-
-                    <!-- Alias: lo que se mostrará fuera del equipo (informes, empresas...) en vez
-                         del nombre real. Se genera solo; el alumnado puede cambiarlo si quiere. -->
-                    <div class="flex items-center gap-2 pl-0.5">
-                      <span class="text-[10px] font-black uppercase tracking-wider text-[#00A859]">Alias</span>
-                      <template v-if="m.editandoAlias">
-                        <input v-model="m.alias" type="text" maxlength="60" placeholder="Alias visible fuera del equipo"
-                               class="flex-1 min-w-0 text-xs border border-emerald-300 rounded-lg px-2 py-1 bg-white
-                                      focus:outline-none focus:border-emerald-500"
-                               @keydown.enter.prevent="m.editandoAlias = false" />
-                        <button @click="regenerarAlias(m)" type="button" title="Generar otro al azar"
-                                class="shrink-0 text-sm hover:scale-110 transition-transform">🎲</button>
-                        <button @click="m.editandoAlias = false" type="button"
-                                class="text-[10px] font-black text-emerald-600 uppercase">Listo</button>
-                      </template>
-                      <template v-else>
-                        <span class="flex-1 text-xs text-gray-600">{{ m.alias || 'se genera al guardar' }}</span>
-                        <button @click="m.editandoAlias = true" type="button"
-                                class="text-[10px] font-black text-gray-400 hover:text-emerald-600 uppercase">Editar</button>
-                      </template>
+                      <button v-if="!nombresConfirmados" @click="removeMiembro(i)" :aria-label="`Quitar a ${m.alias}`"
+                              class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-black text-gray-300 transition-colors hover:bg-red-50 hover:text-red-400"><XMarkIcon class="h-4 w-4 stroke-2" aria-hidden="true" /></button>
                     </div>
 
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
@@ -1196,11 +1281,11 @@ watch(workspace, (val) => {
                         <p class="text-[10px] font-black uppercase tracking-wider text-emerald-600 mb-1.5">Puntos fuertes</p>
                         <div class="flex gap-1.5 mb-2">
                           <input v-model="m.nuevaFortaleza" type="text" placeholder="Escribe tus puntos fuertes…" maxlength="40"
-                                 class="flex-1 min-w-0 text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white
+                                 class="flex-1 min-w-0 text-xs border border-gray-200 rounded-xl min-h-9 px-2.5 py-1.5 bg-white
                                         focus:outline-none focus:border-emerald-400"
                                  @keydown.enter.prevent="addFortaleza(m)" />
                           <button @click="addFortaleza(m)" type="button"
-                                  class="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-700
+                                  class="shrink-0 inline-flex min-h-9 items-center justify-center px-2.5 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700
                                          text-[10px] font-black uppercase tracking-wider hover:bg-emerald-100">
                             + Añadir
                           </button>
@@ -1211,7 +1296,8 @@ watch(workspace, (val) => {
                                        text-xs font-semibold px-2.5 py-1 rounded-full">
                             {{ pf }}
                             <button @click="m.fortalezas.splice(pi, 1)" type="button"
-                                    class="text-emerald-400 hover:text-emerald-700 font-black">✕</button>
+                                    aria-label="Quitar punto fuerte"
+                                    class="-mr-1 relative inline-flex h-6 w-6 items-center justify-center rounded-full before:absolute before:-inset-1.5 before:rounded-full font-black text-emerald-400 hover:bg-emerald-100 hover:text-emerald-700"><XMarkIcon class="h-3.5 w-3.5 stroke-[2.5]" aria-hidden="true" /></button>
                           </span>
                         </div>
                       </div>
@@ -1221,11 +1307,11 @@ watch(workspace, (val) => {
                         <p class="text-[10px] font-black uppercase tracking-wider text-amber-600 mb-1.5">Puntos a mejorar</p>
                         <div class="flex gap-1.5 mb-2">
                           <input v-model="m.nuevoPuntoMejora" type="text" placeholder="Escribe tus puntos a mejorar…" maxlength="40"
-                                 class="flex-1 min-w-0 text-xs border border-gray-200 rounded-lg px-2.5 py-1.5 bg-white
+                                 class="flex-1 min-w-0 text-xs border border-gray-200 rounded-xl min-h-9 px-2.5 py-1.5 bg-white
                                         focus:outline-none focus:border-amber-400"
                                  @keydown.enter.prevent="addPuntoMejora(m)" />
                           <button @click="addPuntoMejora(m)" type="button"
-                                  class="shrink-0 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-700
+                                  class="shrink-0 inline-flex min-h-9 items-center justify-center px-2.5 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700
                                          text-[10px] font-black uppercase tracking-wider hover:bg-amber-100">
                             + Añadir
                           </button>
@@ -1236,7 +1322,8 @@ watch(workspace, (val) => {
                                        text-xs font-semibold px-2.5 py-1 rounded-full">
                             {{ pm }}
                             <button @click="m.puntosMejora.splice(pmi, 1)" type="button"
-                                    class="text-amber-400 hover:text-amber-700 font-black">✕</button>
+                                    aria-label="Quitar punto a mejorar"
+                                    class="-mr-1 relative inline-flex h-6 w-6 items-center justify-center rounded-full before:absolute before:-inset-1.5 before:rounded-full font-black text-amber-400 hover:bg-amber-100 hover:text-amber-700"><XMarkIcon class="h-3.5 w-3.5 stroke-[2.5]" aria-hidden="true" /></button>
                           </span>
                         </div>
                       </div>
@@ -1248,9 +1335,11 @@ watch(workspace, (val) => {
                 </div>
 
                 <div v-if="!nombresConfirmados" class="flex gap-2 flex-wrap">
-                  <input v-model="nuevoMiembro.nombre" type="text" placeholder="Nombre del alumno/a"
-                         class="flex-1 min-w-32 text-sm border border-gray-200 rounded-xl px-3 py-2
+                  <input v-model="nuevoMiembro.nombre" type="text" maxlength="30"
+                         placeholder="Nombre de pila (sin apellidos)" aria-label="Nombre de pila del integrante"
+                         class="flex-1 min-w-0 basis-40 text-sm border border-gray-200 rounded-xl px-3 py-2
                                 focus:outline-none focus:border-slate-400 bg-gray-50"
+                         @input="errorNuevoMiembro = ''"
                          @keydown.enter="addMiembro" />
                   <select v-model="nuevoMiembro.rol"
                           class="text-sm border border-gray-200 rounded-xl px-3 py-2 bg-gray-50
@@ -1259,29 +1348,32 @@ watch(workspace, (val) => {
                     <option v-for="r in rolesOpciones" :key="r" :value="r" class="capitalize">{{ r }}</option>
                   </select>
                   <button @click="addMiembro"
-                          class="px-4 py-2 rounded-xl bg-slate-600 text-white text-xs font-black uppercase tracking-wider">
-                    + Añadir
+                          class="inline-flex min-h-9 items-center justify-center px-4 py-2 rounded-full bg-slate-600 text-white text-xs font-black uppercase tracking-wider">
+                    + Añadir integrante
                   </button>
                 </div>
+                <p v-if="errorNuevoMiembro" class="mt-1.5 text-[11px] font-semibold text-red-500">{{ errorNuevoMiembro }}</p>
 
-                <!-- Confirmar nombres: paso explícito, distinto de guardar/completar la fase.
-                     A partir de aquí el nombre real queda bloqueado (el alias sigue editable). -->
+                <!-- Confirmar alias: paso explícito, distinto de guardar/completar la fase.
+                     A partir de aquí los alias quedan fijos (el docente los usa para saber
+                     quién es quién). La ruta y la variable conservan el nombre antiguo. -->
                 <div v-if="nombresConfirmados"
                      class="mt-3 px-3 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200
                             text-xs font-bold text-emerald-700 flex items-center gap-2">
-                  <span>✅</span>
-                  <span>Nombres confirmados — ya no se pueden añadir, quitar ni cambiar (el docente tampoco puede).</span>
+                  <CheckCircleIcon class="h-5 w-5 shrink-0" aria-hidden="true" />
+                  <span>Alias confirmados — ya no se pueden añadir, quitar ni cambiar (el docente tampoco puede).</span>
                 </div>
-                <div v-else class="mt-3">
+                <div v-else class="mt-3 text-center">
                   <button @click="confirmarNombres" type="button"
                           :disabled="confirmandoNombres || !f0.miembros.length"
-                          class="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl
+                          class="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full
                                  bg-emerald-600 text-white text-xs font-black uppercase tracking-wider
                                  hover:bg-emerald-700 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
-                    {{ confirmandoNombres ? 'Confirmando...' : '🔒 Confirmar nombres del equipo' }}
+                    <LockClosedIcon v-if="!confirmandoNombres" class="h-4 w-4 shrink-0" aria-hidden="true" />
+                    {{ confirmandoNombres ? 'Confirmando...' : 'Confirmar alias del equipo' }}
                   </button>
                   <p class="text-[10px] text-gray-400 mt-1.5 text-center">
-                    Comprobad que todos los nombres están bien escritos: después no se podrán cambiar.
+                    Comprobad que cada persona sabe cuál es su alias: después no se podrá cambiar.
                   </p>
                   <p v-if="errorConfirmarNombres" class="text-xs text-red-500 font-medium mt-1.5 text-center">
                     {{ errorConfirmarNombres }}
@@ -1297,24 +1389,25 @@ watch(workspace, (val) => {
                 </label>
               </div>
 
-              <!-- Acciones F0 -->
-              <div class="flex gap-3 flex-wrap">
-                <button @click="guardarF0" :disabled="guardando"
-                        class="flex-1 py-3 rounded-2xl bg-slate-100 border border-slate-200
-                               text-slate-700 text-sm font-black uppercase tracking-wider
-                               hover:bg-slate-200 transition-all disabled:opacity-50">
+              <!-- Acciones F0. Guardar va fuera de .fila-pasos (ahí solo Anterior | avanzar);
+                   F0 es la primera fase: sin Anterior, el botón de avanzar queda a la derecha -->
+              <div class="flex justify-end">
+                <button type="button" @click="guardarF0" :disabled="guardando"
+                        class="inline-flex h-10 items-center justify-center rounded-full border border-slate-200 bg-slate-100 px-5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50">
                   Guardar borrador
                 </button>
+              </div>
+              <div class="fila-pasos">
                 <button @click="onCompletarF0" :disabled="guardando"
-                        :class="['flex-1 py-3 rounded-2xl text-sm font-black uppercase tracking-wider transition-all',
-                                 f0Valido ? 'bg-slate-600 text-white hover:bg-slate-700' : 'bg-gray-100 text-gray-400 hover:bg-gray-200']">
-                  Completar fase ✓
+                        :class="['btn-paso',
+                                 f0Valido ? 'bg-slate-600 text-white hover:bg-slate-700 shadow-slate-600/25' : 'bg-gray-100 text-gray-400 hover:bg-gray-200 shadow-none']">
+                  Completar fase <CheckIcon class="h-4 w-4 shrink-0 stroke-[2.5]" aria-hidden="true" />
                 </button>
               </div>
               <div v-if="intentoF0 && !f0Valido" class="bg-red-50 border border-red-200 rounded-xl px-4 py-3 space-y-1">
                 <p class="text-[10px] font-black text-red-500 uppercase tracking-wider mb-1">Falta esto para continuar:</p>
                 <p v-for="(it, idx) in f0Faltantes.filter(x => !x.ok)" :key="idx" class="text-xs text-red-600 flex items-center gap-1.5">
-                  <span>⚠</span> {{ it.label }}
+                  <ExclamationTriangleIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" /> {{ it.label }}
                 </p>
               </div>
             </div>
@@ -1326,10 +1419,10 @@ watch(workspace, (val) => {
 
               <div v-if="getFase(1).validado_docente"
                    class="bg-green-50 border border-green-200 rounded-2xl px-4 py-3 flex items-center gap-3">
-                <span class="text-green-600 text-lg">✓</span>
-                <div>
+                <CheckCircleIcon class="h-6 w-6 shrink-0 text-green-600" aria-hidden="true" />
+                <div class="min-w-0">
                   <p class="text-sm font-bold text-green-700">Fase validada por el docente</p>
-                  <p v-if="getFase(1).observaciones_docente" class="text-xs text-green-600">{{ getFase(1).observaciones_docente }}</p>
+                  <p v-if="getFase(1).observaciones_docente" class="text-xs text-green-600 break-words">{{ getFase(1).observaciones_docente }}</p>
                 </div>
               </div>
               <div v-else-if="getFase(1).datos && !getFase(1).validado_docente && getFase(1).completada"
@@ -1342,9 +1435,9 @@ watch(workspace, (val) => {
                 <div class="flex items-center justify-between gap-3 mb-4">
                   <p class="text-[9px] font-black uppercase tracking-widest text-blue-500">B · Diagnóstico de la empresa</p>
                   <button @click="verFichaReto = true" type="button"
-                          class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200
+                          class="shrink-0 inline-flex min-h-9 items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200
                                  text-blue-700 text-[10px] font-black uppercase tracking-wider hover:bg-blue-100 transition-all">
-                    👁 Ver reto
+                    <EyeIcon class="h-4 w-4 shrink-0" aria-hidden="true" /> Ver reto
                   </button>
                 </div>
                 <p class="text-[11px] text-gray-400 mb-4">
@@ -1352,22 +1445,29 @@ watch(workspace, (val) => {
                 </p>
 
                 <div class="space-y-3">
+                  <!-- Primero lo que la empresa busca de vuestra familia: puede no ser la de su sector -->
+                  <div v-if="diagnostico.interes_familia" class="bg-orange-50 border border-orange-100 rounded-xl px-4 py-3">
+                    <p class="text-[9px] font-black uppercase tracking-widest text-orange-600 mb-1">
+                      Qué necesita de vosotros{{ proyecto.familia ? ` (${proyecto.familia})` : '' }}
+                    </p>
+                    <p class="text-sm text-[#1F2937] leading-relaxed break-words">{{ diagnostico.interes_familia }}</p>
+                  </div>
                   <div v-if="diagnostico.quien_es" class="bg-blue-50 rounded-xl px-4 py-3">
                     <p class="text-[9px] font-black uppercase tracking-widest text-blue-400 mb-1">¿Quiénes son?</p>
-                    <p class="text-sm text-[#1F2937] leading-relaxed">{{ diagnostico.quien_es }}</p>
+                    <p class="text-sm text-[#1F2937] leading-relaxed break-words">{{ diagnostico.quien_es }}</p>
                   </div>
                   <div v-if="diagnostico.dia_a_dia" class="bg-blue-50 rounded-xl px-4 py-3">
                     <p class="text-[9px] font-black uppercase tracking-widest text-blue-400 mb-1">Su día a día</p>
-                    <p class="text-sm text-[#1F2937] leading-relaxed">{{ diagnostico.dia_a_dia }}</p>
+                    <p class="text-sm text-[#1F2937] leading-relaxed break-words">{{ diagnostico.dia_a_dia }}</p>
                   </div>
                   <div v-if="diagnostico.pregunta_reto" class="bg-slate-800 rounded-xl px-4 py-3">
-                    <p class="text-[9px] font-black uppercase tracking-widest text-[#99CC33] mb-1">El reto que os proponen</p>
-                    <p class="text-sm font-bold text-white leading-relaxed">{{ diagnostico.pregunta_reto }}</p>
+                    <p class="text-[9px] font-black uppercase tracking-widest text-alumnos mb-1">El reto que os proponen</p>
+                    <p class="text-sm font-bold text-white leading-relaxed break-words">{{ diagnostico.pregunta_reto }}</p>
                   </div>
                   <div v-if="diagnostico.que_necesitan?.length" class="bg-blue-50 rounded-xl px-4 py-3">
                     <p class="text-[9px] font-black uppercase tracking-widest text-blue-400 mb-1">Qué necesitan</p>
                     <ul class="space-y-1">
-                      <li v-for="(n, i) in diagnostico.que_necesitan" :key="i" class="text-sm text-[#1F2937] flex gap-2">
+                      <li v-for="(n, i) in diagnostico.que_necesitan" :key="i" class="text-sm text-[#1F2937] flex gap-2 min-w-0 break-words">
                         <span class="text-blue-400 shrink-0">·</span>{{ n }}
                       </li>
                     </ul>
@@ -1375,7 +1475,7 @@ watch(workspace, (val) => {
                   <div v-if="diagnostico.dificultades?.length" class="bg-orange-50 rounded-xl px-4 py-3">
                     <p class="text-[9px] font-black uppercase tracking-widest text-orange-400 mb-1">Dificultades</p>
                     <ul class="space-y-1">
-                      <li v-for="(d, i) in diagnostico.dificultades" :key="i" class="text-sm text-[#1F2937] flex gap-2">
+                      <li v-for="(d, i) in diagnostico.dificultades" :key="i" class="text-sm text-[#1F2937] flex gap-2 min-w-0 break-words">
                         <span class="text-orange-400 shrink-0">·</span>{{ d }}
                       </li>
                     </ul>
@@ -1417,17 +1517,21 @@ watch(workspace, (val) => {
                       </span>
                     </div>
                     <button @click="sugerirHallazgo" :disabled="sugiriendoHallazgo"
-                            class="shrink-0 px-3 py-1.5 rounded-full bg-violet-50 border border-violet-200 text-violet-700
+                            class="shrink-0 inline-flex min-h-9 items-center justify-center gap-1.5 px-3 py-1.5 rounded-full bg-violet-50 border border-violet-200 text-violet-700
                                    text-[10px] font-black uppercase tracking-wider hover:bg-violet-100 transition-all disabled:opacity-50">
-                      {{ sugiriendoHallazgo ? 'Generando…' : (equipo?.ia_desbloqueada ? '✨ Sugerir con IA' : '🔒 Sugerir con IA') }}
+                      <template v-if="!sugiriendoHallazgo">
+                        <SparklesIcon v-if="equipo?.ia_desbloqueada" class="h-4 w-4 shrink-0" aria-hidden="true" />
+                        <LockClosedIcon v-else class="h-4 w-4 shrink-0" aria-hidden="true" />
+                      </template>
+                      {{ sugiriendoHallazgo ? 'Generando…' : 'Sugerir con IA' }}
                     </button>
                   </div>
                   <p class="text-[11px] text-gray-500 mb-2">
                     Generad un ejemplo con IA a partir del reto y añadid al menos 3 hallazgos propios más
                     <span class="font-black text-red-500">(mínimo 4 en total, obligatorio para continuar)</span>.
                   </p>
-                  <p class="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mb-2 flex items-start gap-1.5">
-                    <span class="shrink-0">⚠️</span>
+                  <p class="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-1.5 mb-2 flex items-start gap-1.5">
+                    <ExclamationTriangleIcon class="h-3.5 w-3.5 shrink-0 mt-px" aria-hidden="true" />
                     <span><strong>Revisa las sugerencias de la IA. Ten criterio propio.</strong></span>
                   </p>
                   <p v-if="errorSugerencia" class="text-xs text-red-500 font-semibold mb-2">{{ errorSugerencia }}</p>
@@ -1442,14 +1546,14 @@ watch(workspace, (val) => {
                             {{ h.trim() || `Hallazgo ${i + 1} (vacío)` }}
                           </span>
                           <svg class="w-4 h-4 text-gray-400 shrink-0 transition-transform"
-                               :class="{ 'rotate-180': hallazgoAbierto === i }"
+                               :class="{ 'rotate-180': hallazgoAbierto === i || soloLectura }"
                                fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
                           </svg>
                         </button>
-                        <button @click="removeHallazgo(i)" class="text-gray-300 hover:text-red-400 font-black text-xs shrink-0">✕</button>
+                        <button @click="removeHallazgo(i)" aria-label="Quitar hallazgo" class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-black text-gray-300 hover:bg-red-50 hover:text-red-400"><XMarkIcon class="h-4 w-4 stroke-2" aria-hidden="true" /></button>
                       </div>
-                      <div v-if="hallazgoAbierto === i" class="px-3 pb-3">
+                      <div v-if="hallazgoAbierto === i || soloLectura" class="px-3 pb-3">
                         <textarea v-model="f1.hallazgos[i]" rows="3" :maxlength="HALLAZGO_MAXLEN"
                                   :placeholder="`Hallazgo ${i + 1}`"
                                   class="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 bg-white resize-none
@@ -1460,11 +1564,11 @@ watch(workspace, (val) => {
                   </div>
                   <div class="flex gap-2">
                     <input v-model="nuevoHallazgo" type="text" placeholder="Añadir hallazgo..." :maxlength="HALLAZGO_MAXLEN"
-                           class="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2
+                           class="flex-1 min-w-0 text-sm border border-gray-200 rounded-xl px-3 py-2
                                   focus:outline-none focus:border-blue-400 bg-gray-50"
                            @keydown.enter="addHallazgo"/>
                     <button @click="addHallazgo"
-                            class="px-4 py-2 rounded-xl bg-blue-500 text-white text-xs font-black">+ Añadir</button>
+                            class="inline-flex min-h-9 items-center justify-center px-4 py-2 rounded-full bg-blue-500 text-white text-xs font-black">+ Añadir</button>
                   </div>
                   <div class="flex items-center gap-2 mt-1.5">
                     <div class="flex gap-1">
@@ -1484,7 +1588,7 @@ watch(workspace, (val) => {
                   </label>
                   <div v-if="diagnostico?.pregunta_reto" class="bg-blue-50 border border-blue-100 rounded-xl px-3.5 py-2.5 mb-2">
                     <p class="text-[9px] font-black uppercase tracking-widest text-blue-400 mb-1">Pregunta del reto</p>
-                    <p class="text-sm font-bold text-blue-900 leading-snug">"{{ diagnostico.pregunta_reto }}"</p>
+                    <p class="text-sm font-bold text-blue-900 leading-snug break-words">"{{ diagnostico.pregunta_reto }}"</p>
                   </div>
                   <p v-if="diagnostico?.pregunta_reto" class="text-[11px] text-gray-400 mb-2">
                     Lo que escribáis aquí es vuestra respuesta inicial a esa pregunta.
@@ -1497,22 +1601,26 @@ watch(workspace, (val) => {
                 </div>
               </div>
 
-              <div class="flex gap-3">
-                <button @click="guardarF1" :disabled="guardando"
-                        class="flex-1 py-3 rounded-2xl bg-blue-50 border border-blue-200 text-blue-700
-                               text-sm font-black uppercase tracking-wider hover:bg-blue-100 transition-all disabled:opacity-50">
-                  Guardar
+              <div class="flex justify-end">
+                <button type="button" @click="guardarF1" :disabled="guardando"
+                        class="inline-flex h-10 items-center justify-center rounded-full border border-blue-200 bg-blue-50 px-5 text-sm font-semibold text-blue-700 transition-colors hover:bg-blue-100 disabled:opacity-50">
+                  Guardar borrador
+                </button>
+              </div>
+              <div class="fila-pasos">
+                <button type="button" @click="alCambiarFase(0)" class="btn-paso-atras">
+                  <span class="hidden sm:inline" aria-hidden="true">←</span> Anterior
                 </button>
                 <button @click="onCompletarF1" :disabled="guardando"
-                        :class="['flex-1 py-3 rounded-2xl text-sm font-black uppercase tracking-wider transition-all',
-                                 f1Valido ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-gray-100 text-gray-400 hover:bg-gray-200']">
-                  Enviar para validación →
+                        :class="['btn-paso',
+                                 f1Valido ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-600/25' : 'bg-gray-100 text-gray-400 hover:bg-gray-200 shadow-none']">
+                  <span class="sm:hidden">Enviar →</span><span class="hidden sm:inline">Enviar para validación →</span>
                 </button>
               </div>
               <div v-if="intentoF1 && !f1Valido" class="bg-red-50 border border-red-200 rounded-xl px-4 py-3 space-y-1">
                 <p class="text-[10px] font-black text-red-500 uppercase tracking-wider mb-1">Falta esto para continuar:</p>
                 <p v-for="(it, idx) in f1Faltantes.filter(x => !x.ok)" :key="idx" class="text-xs text-red-600 flex items-center gap-1.5">
-                  <span>⚠</span> {{ it.label }}
+                  <ExclamationTriangleIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" /> {{ it.label }}
                 </p>
               </div>
             </div>
@@ -1526,7 +1634,7 @@ watch(workspace, (val) => {
               <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5 space-y-4">
                 <div v-if="diagnostico?.pregunta_reto" class="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3">
                   <p class="text-[9px] font-black uppercase tracking-widest text-amber-500 mb-1">Pregunta del reto</p>
-                  <p class="text-sm font-bold text-amber-900 leading-snug">"{{ diagnostico.pregunta_reto }}"</p>
+                  <p class="text-sm font-bold text-amber-900 leading-snug break-words">"{{ diagnostico.pregunta_reto }}"</p>
                 </div>
 
                 <div ref="f2PropuestaRef" class="rounded-xl transition-all"
@@ -1561,7 +1669,7 @@ watch(workspace, (val) => {
                     <p class="text-[9px] font-black uppercase tracking-widest text-amber-500">Tareas</p>
                     <button @click="restablecerTareasGenericas" :disabled="restableciendoGenericas"
                             title="Vuelve a añadir las tareas precargadas que hayáis borrado"
-                            class="shrink-0 px-3 py-1.5 rounded-full bg-gray-50 border border-gray-200 text-gray-500
+                            class="shrink-0 inline-flex min-h-9 items-center justify-center px-3 py-1.5 rounded-full bg-gray-50 border border-gray-200 text-gray-500
                                    text-[10px] font-black uppercase tracking-wider hover:bg-gray-100 transition-all disabled:opacity-50">
                       {{ restableciendoGenericas ? 'Restableciendo…' : '↺ Restablecer precargadas' }}
                     </button>
@@ -1572,42 +1680,48 @@ watch(workspace, (val) => {
 
                   <div class="space-y-2 mb-4">
                     <template v-for="t in tareasGenericas" :key="t.id">
-                      <div class="flex items-center gap-3 p-3 rounded-xl border transition-all"
+                      <!-- En móvil el estado va en su propia línea: la descripción no se queda en ~130px -->
+                      <div class="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 p-3 rounded-xl border transition-all"
                            :class="{
                              'border-green-200 bg-green-50': t.estado === 'realizado',
                              'border-amber-200 bg-amber-50': t.estado === 'en_progreso',
                              'border-gray-100 bg-gray-50':   t.estado === 'pendiente',
                            }">
                         <select :value="t.estado" @change="cambiarEstadoTarea(t, $event.target.value)"
-                                class="text-[10px] font-black uppercase tracking-wider border-0 bg-transparent
+                                class="basis-full sm:basis-auto min-h-9 text-[10px] font-black uppercase tracking-wider border-0 bg-transparent
                                        focus:outline-none cursor-pointer"
                                 :class="{
                                   'text-green-600': t.estado === 'realizado',
                                   'text-amber-600': t.estado === 'en_progreso',
                                   'text-gray-400':  t.estado === 'pendiente',
                                 }">
-                          <option value="pendiente">⬜ Pendiente</option>
-                          <option value="en_progreso">🔄 En progreso</option>
-                          <option value="realizado">✅ Realizado</option>
+                          <option value="pendiente">Pendiente</option>
+                          <option value="en_progreso">En progreso</option>
+                          <option value="realizado">Realizado</option>
                         </select>
                         <div class="flex-1 min-w-0">
-                          <p class="text-sm font-semibold text-[#1F2937] leading-snug flex items-center gap-1.5 flex-wrap"
+                          <p class="text-sm font-semibold text-[#1F2937] leading-snug flex items-center gap-1.5 flex-wrap min-w-0 break-words"
                              :class="{ 'line-through text-gray-400': t.estado === 'realizado' }">
-                            {{ t.descripcion }}
-                            <span v-if="t.obligatoria"
+                            <span class="min-w-0 break-words">{{ t.descripcion }}</span>
+                            <button v-if="t.obligatoria" type="button"
                                   :title="tooltipObligatoria(t)"
-                                  class="shrink-0 px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[9px] font-black uppercase tracking-wider cursor-help">
-                              🔒 Obligatoria
-                            </span>
+                                  :aria-expanded="obligatoriaAbierta === t.id"
+                                  @click="obligatoriaAbierta = obligatoriaAbierta === t.id ? null : t.id"
+                                  class="relative shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[9px] font-black uppercase tracking-wider cursor-help before:absolute before:-inset-2.5 before:content-['']">
+                              <LockClosedIcon class="h-3 w-3 shrink-0" aria-hidden="true" /> Obligatoria
+                            </button>
                           </p>
-                          <select :value="t.responsable ?? ''" @change="actualizarResponsableTarea(t, $event.target.value)"
-                                 class="mt-0.5 text-[10px] text-gray-500 bg-transparent border-0 border-b border-dashed
+                          <p v-if="t.obligatoria && obligatoriaAbierta === t.id" class="mt-0.5 text-[10px] text-slate-500 leading-snug break-words">
+                            {{ tooltipObligatoria(t) }}
+                          </p>
+                          <select :value="t.responsable ?? ''" @change="actualizarResponsableTarea(t, $event.target)"
+                                 class="mt-0.5 min-h-9 text-[10px] text-gray-500 bg-transparent border-0 border-b border-dashed
                                         border-gray-200 focus:outline-none focus:border-amber-400 px-0 py-0.5 cursor-pointer">
                             <option value="">+ responsable</option>
-                            <option v-for="m in miembrosEquipo" :key="m.id" :value="m.nombre">{{ m.nombre }}</option>
+                            <option v-for="m in miembrosEquipo" :key="m.id" :value="m.alias">{{ m.alias }}</option>
                           </select>
                         </div>
-                        <button v-if="!t.obligatoria" @click="eliminarTarea(t)" class="text-gray-200 hover:text-red-400 transition-colors font-black text-xs shrink-0">✕</button>
+                        <button v-if="!t.obligatoria" @click="eliminarTarea(t)" aria-label="Eliminar tarea" class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-black text-gray-300 transition-colors hover:bg-red-50 hover:text-red-400"><XMarkIcon class="h-4 w-4 stroke-2" aria-hidden="true" /></button>
                       </div>
 
                       <!-- Explicación de QA: por qué importa, para que el alumnado lo entienda de verdad -->
@@ -1632,19 +1746,19 @@ watch(workspace, (val) => {
                     <div class="flex gap-2">
                       <input v-model="nuevaTareaGenerica.descripcion" type="text"
                              placeholder="Añadir tarea (ej. Buscar más referencias)…"
-                             class="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2
+                             class="flex-1 min-w-0 text-sm border border-gray-200 rounded-xl px-3 py-2
                                     focus:outline-none focus:border-amber-400 bg-gray-50"
                              @keydown.enter="addTareaGenerica"/>
                     </div>
                     <div class="flex gap-2">
                       <select v-model="nuevaTareaGenerica.responsable"
-                             class="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2
+                             class="flex-1 min-w-0 text-sm border border-gray-200 rounded-xl px-3 py-2
                                     focus:outline-none focus:border-amber-400 bg-gray-50 cursor-pointer">
                         <option value="">Responsable…</option>
-                        <option v-for="m in miembrosEquipo" :key="m.id" :value="m.nombre">{{ m.nombre }}</option>
+                        <option v-for="m in miembrosEquipo" :key="m.id" :value="m.alias">{{ m.alias }}</option>
                       </select>
                       <button @click="addTareaGenerica" :disabled="!nuevaTareaGenerica.descripcion.trim() || cargandoTareaGenerica"
-                              class="px-4 py-2 rounded-xl bg-amber-500 text-white text-xs font-black
+                              class="inline-flex min-h-9 items-center justify-center px-4 py-2 rounded-full bg-amber-500 text-white text-xs font-black
                                      uppercase tracking-wider disabled:opacity-50 hover:bg-amber-600 transition-all">
                         + Tarea
                       </button>
@@ -1657,15 +1771,19 @@ watch(workspace, (val) => {
                    Son de solo lectura (sin estado ni responsable) — ideas a valorar, no tareas a marcar. -->
               <div v-if="!f2PropuestaValida" class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
                 <p class="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-1">Sugerencias de soluciones</p>
-                <p class="text-sm text-gray-400">🔒 Completad primero la propuesta inicial de solución de arriba para desbloquear esta sección.</p>
+                <p class="text-sm text-gray-400 flex items-start gap-1.5"><LockClosedIcon class="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" /> <span>Completad primero la propuesta inicial de solución de arriba para desbloquear esta sección.</span></p>
               </div>
               <div v-else class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
-                <div class="flex items-center justify-between mb-1">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-1">
                   <p class="text-[9px] font-black uppercase tracking-widest text-violet-500">Sugerencias de soluciones</p>
                   <button @click="sugerirTareas" :disabled="sugiriendoTareas"
-                          class="shrink-0 px-3 py-1.5 rounded-full bg-violet-50 border border-violet-200 text-violet-700
+                          class="shrink-0 inline-flex min-h-9 items-center justify-center gap-1.5 px-3 py-1.5 rounded-full bg-violet-50 border border-violet-200 text-violet-700
                                  text-[10px] font-black uppercase tracking-wider hover:bg-violet-100 transition-all disabled:opacity-50">
-                    {{ sugiriendoTareas ? 'Generando…' : (equipo?.ia_desbloqueada ? '✨ Sugerir con IA' : '🔒 Sugerir con IA') }}
+                    <template v-if="!sugiriendoTareas">
+                        <SparklesIcon v-if="equipo?.ia_desbloqueada" class="h-4 w-4 shrink-0" aria-hidden="true" />
+                        <LockClosedIcon v-else class="h-4 w-4 shrink-0" aria-hidden="true" />
+                      </template>
+                      {{ sugiriendoTareas ? 'Generando…' : 'Sugerir con IA' }}
                   </button>
                 </div>
                 <div class="bg-violet-50 border border-violet-200 rounded-xl px-3.5 py-2.5 mb-3">
@@ -1677,17 +1795,17 @@ watch(workspace, (val) => {
                 <p class="text-[11px] text-gray-400 mb-2">
                   No son tareas a marcar como hechas — son ideas a valorar en equipo. Generadlas con IA o añadid las vuestras.
                 </p>
-                <p class="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mb-4 flex items-start gap-1.5">
-                  <span class="shrink-0">⚠️</span>
+                <p class="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-1.5 mb-4 flex items-start gap-1.5">
+                  <ExclamationTriangleIcon class="h-3.5 w-3.5 shrink-0 mt-px" aria-hidden="true" />
                   <span><strong>Revisa las sugerencias de la IA. Ten criterio propio.</strong></span>
                 </p>
 
                 <div class="space-y-2 mb-4">
                   <div v-for="t in tareasComplejas" :key="t.id"
                        class="flex items-start gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50">
-                    <span class="text-lg shrink-0">💡</span>
-                    <p class="flex-1 text-sm font-semibold text-[#1F2937] leading-snug">{{ t.descripcion }}</p>
-                    <button @click="eliminarTarea(t)" class="text-gray-200 hover:text-red-400 transition-colors font-black text-xs shrink-0">✕</button>
+                    <LightBulbIcon class="h-5 w-5 shrink-0 text-violet-500" aria-hidden="true" />
+                    <p class="flex-1 min-w-0 break-words text-sm font-semibold text-[#1F2937] leading-snug">{{ t.descripcion }}</p>
+                    <button @click="eliminarTarea(t)" aria-label="Eliminar tarea" class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-black text-gray-300 transition-colors hover:bg-red-50 hover:text-red-400"><XMarkIcon class="h-4 w-4 stroke-2" aria-hidden="true" /></button>
                   </div>
                   <p v-if="!tareasComplejas.length" class="text-sm text-gray-400 text-center py-6">
                     Generad sugerencias con IA o añadid las vuestras
@@ -1698,11 +1816,11 @@ watch(workspace, (val) => {
                   <div class="flex gap-2">
                     <input v-model="nuevaTareaCompleja.descripcion" type="text"
                            placeholder="Añadir vuestra propia sugerencia de solución…"
-                           class="flex-1 text-sm border border-gray-200 rounded-xl px-3 py-2
+                           class="flex-1 min-w-0 text-sm border border-gray-200 rounded-xl px-3 py-2
                                   focus:outline-none focus:border-violet-400 bg-gray-50"
                            @keydown.enter="addTareaCompleja"/>
                     <button @click="addTareaCompleja" :disabled="!nuevaTareaCompleja.descripcion.trim() || cargandoTareaCompleja"
-                            class="px-4 py-2 rounded-xl bg-violet-500 text-white text-xs font-black
+                            class="inline-flex min-h-9 items-center justify-center px-4 py-2 rounded-full bg-violet-500 text-white text-xs font-black
                                    uppercase tracking-wider disabled:opacity-50 hover:bg-violet-600 transition-all">
                       + Añadir
                     </button>
@@ -1784,13 +1902,13 @@ watch(workspace, (val) => {
 
                   <!-- Subir archivo -->
                   <div>
-                    <label class="inline-flex items-center gap-2 cursor-pointer px-4 py-2 rounded-xl
+                    <label class="inline-flex min-h-9 items-center gap-2 cursor-pointer px-4 py-2 rounded-full
                                   border border-dashed border-amber-300 bg-amber-50 text-amber-700
                                   text-xs font-black uppercase tracking-wider hover:bg-amber-100 transition-all
                                   select-none"
                            :class="subiendoArchivo ? 'opacity-50 pointer-events-none' : ''">
                       <span v-if="subiendoArchivo">Subiendo…</span>
-                      <span v-else>📎 Subir archivo</span>
+                      <span v-else class="inline-flex items-center gap-1.5"><PaperClipIcon class="h-4 w-4 shrink-0" aria-hidden="true" /> Subir archivo</span>
                       <input type="file" class="hidden"
                              accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.avi,.mkv,.webm,.zip"
                              :disabled="subiendoArchivo"
@@ -1806,7 +1924,7 @@ watch(workspace, (val) => {
                   <ul v-if="archivosPrototipo.length" class="space-y-2">
                     <li v-for="p in archivosPrototipo" :key="p.id"
                         class="flex items-center gap-3 p-3 bg-white rounded-xl border border-gray-100 shadow-sm">
-                      <span class="text-xl shrink-0">{{ iconoMime(p.mime) }}</span>
+                      <component :is="iconoMime(p.mime)" class="h-6 w-6 shrink-0 text-gray-400" aria-hidden="true" />
                       <div class="flex-1 min-w-0">
                         <a :href="p.url" target="_blank" rel="noopener"
                            class="text-sm font-semibold text-amber-700 hover:underline truncate block">
@@ -1815,29 +1933,30 @@ watch(workspace, (val) => {
                         <p class="text-[10px] text-gray-400">{{ formatBytes(p.size) }}</p>
                       </div>
                       <button @click="eliminarPrototipo(p)"
-                              class="shrink-0 text-gray-300 hover:text-red-400 transition-colors text-lg leading-none"
-                              title="Eliminar archivo">×</button>
+                              class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-lg leading-none text-gray-300 transition-colors hover:bg-red-50 hover:text-red-400"
+                              title="Eliminar archivo" aria-label="Eliminar archivo">×</button>
                     </li>
                   </ul>
                 </div>
 
-                <div class="flex items-center gap-4">
+                <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
                   <label class="text-xs font-black text-[#1F2937] uppercase tracking-wider">Iteración</label>
                   <div class="flex items-center gap-2">
                     <button @click="f2.iteracion = Math.max(1, f2.iteracion - 1)"
-                            class="w-8 h-8 rounded-lg bg-gray-100 border border-gray-200 font-black text-gray-500 hover:bg-gray-200 transition-all">−</button>
+                            class="w-9 h-9 rounded-full bg-gray-100 border border-gray-200 font-black text-gray-500 hover:bg-gray-200 transition-all">−</button>
                     <span class="text-lg font-black text-[#1F2937] w-8 text-center">{{ f2.iteracion }}</span>
                     <button @click="f2.iteracion++"
-                            class="w-8 h-8 rounded-lg bg-gray-100 border border-gray-200 font-black text-gray-500 hover:bg-gray-200 transition-all">+</button>
+                            class="w-9 h-9 rounded-full bg-gray-100 border border-gray-200 font-black text-gray-500 hover:bg-gray-200 transition-all">+</button>
                   </div>
-                  <p class="text-xs text-gray-400">¿Es la primera versión o habéis mejorado el prototipo?</p>
+                  <p class="basis-full sm:basis-auto text-xs text-gray-400">¿Es la primera versión o habéis mejorado el prototipo?</p>
                 </div>
 
-                <button @click="guardarF2" :disabled="guardando"
-                        class="w-full py-2.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-700
-                               text-xs font-black uppercase tracking-wider hover:bg-amber-100 transition-all disabled:opacity-50">
-                  Guardar prototipo
-                </button>
+                <div class="flex justify-end">
+                  <button type="button" @click="guardarF2" :disabled="guardando"
+                          class="inline-flex h-10 items-center justify-center rounded-full border border-amber-200 bg-amber-50 px-5 text-sm font-semibold text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50">
+                    Guardar prototipo
+                  </button>
+                </div>
               </div>
 
               <!-- Progreso: última sección antes de poder pasar a la siguiente fase -->
@@ -1855,15 +1974,22 @@ watch(workspace, (val) => {
                 </p>
               </div>
 
-              <button @click="onCompletarF2" :disabled="guardando"
-                      :class="['w-full py-3.5 rounded-2xl text-sm font-black uppercase tracking-wider transition-all',
-                               f2Valido ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-gray-100 text-gray-400 hover:bg-gray-200']">
-                {{ f2Valido ? 'Todo listo — Ir a Entrega →' : 'Elegid el tipo de prototipo y completad todas las tareas para continuar' }}
-              </button>
+              <div class="fila-pasos">
+                <button type="button" @click="alCambiarFase(1)" class="btn-paso-atras">
+                  <span class="hidden sm:inline" aria-hidden="true">←</span> Anterior
+                </button>
+                <button @click="onCompletarF2" :disabled="guardando"
+                        :class="['btn-paso',
+                                 f2Valido ? 'bg-amber-500 text-white hover:bg-amber-600 shadow-amber-500/25' : 'bg-gray-100 text-gray-400 hover:bg-gray-200 shadow-none']">
+                  <!-- El texto largo (~600px) solo cabe junto a Anterior desde xl -->
+                  <span class="xl:hidden">{{ f2Valido ? 'Ir a Entrega →' : 'Continuar →' }}</span>
+                  <span class="hidden xl:inline">{{ f2Valido ? 'Todo listo — Ir a Entrega →' : 'Elegid el tipo de prototipo y completad todas las tareas para continuar' }}</span>
+                </button>
+              </div>
               <div v-if="intentoF2 && !f2Valido" class="bg-red-50 border border-red-200 rounded-xl px-4 py-3 space-y-1">
                 <p class="text-[10px] font-black text-red-500 uppercase tracking-wider mb-1">Falta esto para continuar:</p>
                 <p v-for="(it, idx) in f2Faltantes.filter(x => !x.ok)" :key="idx" class="text-xs text-red-600 flex items-center gap-1.5">
-                  <span>⚠</span> {{ it.label }}
+                  <ExclamationTriangleIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" /> {{ it.label }}
                 </p>
               </div>
             </div>
@@ -1875,7 +2001,7 @@ watch(workspace, (val) => {
 
               <div v-if="getFase(3).validado_docente"
                    class="bg-green-50 border border-green-200 rounded-2xl p-4">
-                <p class="text-sm font-bold text-green-700">✓ Entrega validada por el docente</p>
+                <p class="text-sm font-bold text-green-700 flex items-center gap-1.5"><CheckCircleIcon class="h-5 w-5 shrink-0" aria-hidden="true" /> Entrega validada por el docente</p>
                 <p v-if="getFase(3).nota_docente" class="text-xs text-green-600 mt-1">
                   Nota: <strong>{{ getFase(3).nota_docente }}/10</strong>
                   <span v-if="getFase(3).observaciones_docente"> · {{ getFase(3).observaciones_docente }}</span>
@@ -1892,13 +2018,13 @@ watch(workspace, (val) => {
                     <p class="text-[9px] font-black uppercase tracking-widest text-orange-600 mb-1.5">Requisitos mínimos del entregable</p>
                     <ul class="space-y-1">
                       <li class="text-xs text-orange-900 flex items-start gap-1.5">
-                        <span class="font-black shrink-0">✓</span> Solución clara y bien explicada
+                        <CheckIcon class="h-3.5 w-3.5 shrink-0 mt-px stroke-[2.5]" aria-hidden="true" /> Solución clara y bien explicada
                       </li>
                       <li class="text-xs text-orange-900 flex items-start gap-1.5">
-                        <span class="font-black shrink-0">✓</span> Justificación: por qué responde a la necesidad de la empresa
+                        <CheckIcon class="h-3.5 w-3.5 shrink-0 mt-px stroke-[2.5]" aria-hidden="true" /> Justificación: por qué responde a la necesidad de la empresa
                       </li>
                       <li class="text-xs text-orange-900 flex items-start gap-1.5">
-                        <span class="font-black shrink-0">✓</span> Qué habéis hecho y cómo lo habéis hecho
+                        <CheckIcon class="h-3.5 w-3.5 shrink-0 mt-px stroke-[2.5]" aria-hidden="true" /> Qué habéis hecho y cómo lo habéis hecho
                       </li>
                     </ul>
                   </div>
@@ -1936,13 +2062,13 @@ watch(workspace, (val) => {
 
                   <!-- Subir archivo -->
                   <div>
-                    <label class="inline-flex items-center gap-2 cursor-pointer px-4 py-2 rounded-xl
+                    <label class="inline-flex min-h-9 items-center gap-2 cursor-pointer px-4 py-2 rounded-full
                                   border border-dashed border-orange-300 bg-orange-50 text-orange-700
                                   text-xs font-black uppercase tracking-wider hover:bg-orange-100 transition-all
                                   select-none"
                            :class="subiendoArchivoEntregable ? 'opacity-50 pointer-events-none' : ''">
                       <span v-if="subiendoArchivoEntregable">Subiendo…</span>
-                      <span v-else>📎 Subir archivo</span>
+                      <span v-else class="inline-flex items-center gap-1.5"><PaperClipIcon class="h-4 w-4 shrink-0" aria-hidden="true" /> Subir archivo</span>
                       <input type="file" class="hidden"
                              accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.avi,.mkv,.webm,.zip"
                              :disabled="subiendoArchivoEntregable"
@@ -1958,7 +2084,7 @@ watch(workspace, (val) => {
                   <ul v-if="archivosEntregable.length" class="space-y-2">
                     <li v-for="p in archivosEntregable" :key="p.id"
                         class="flex items-center gap-3 p-3 bg-white rounded-xl border border-gray-100 shadow-sm">
-                      <span class="text-xl shrink-0">{{ iconoMime(p.mime) }}</span>
+                      <component :is="iconoMime(p.mime)" class="h-6 w-6 shrink-0 text-gray-400" aria-hidden="true" />
                       <div class="flex-1 min-w-0">
                         <a :href="p.url" target="_blank" rel="noopener"
                            class="text-sm font-semibold text-orange-700 hover:underline truncate block">
@@ -1967,30 +2093,33 @@ watch(workspace, (val) => {
                         <p class="text-[10px] text-gray-400">{{ formatBytes(p.size) }}</p>
                       </div>
                       <button @click="eliminarArchivoEntregable(p)"
-                              class="shrink-0 text-gray-300 hover:text-red-400 transition-colors text-lg leading-none"
-                              title="Eliminar archivo">×</button>
+                              class="-my-1.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-lg leading-none text-gray-300 transition-colors hover:bg-red-50 hover:text-red-400"
+                              title="Eliminar archivo" aria-label="Eliminar archivo">×</button>
                     </li>
                   </ul>
                 </div>
               </div>
 
-              <div class="flex gap-3">
-                <button @click="guardarF3" :disabled="guardando"
-                        class="flex-1 py-3 rounded-2xl bg-orange-50 border border-orange-200
-                               text-orange-700 text-sm font-black uppercase tracking-wider
-                               hover:bg-orange-100 transition-all disabled:opacity-50">
-                  Guardar
+              <div class="flex justify-end">
+                <button type="button" @click="guardarF3" :disabled="guardando"
+                        class="inline-flex h-10 items-center justify-center rounded-full border border-orange-200 bg-orange-50 px-5 text-sm font-semibold text-orange-700 transition-colors hover:bg-orange-100 disabled:opacity-50">
+                  Guardar borrador
+                </button>
+              </div>
+              <div class="fila-pasos">
+                <button type="button" @click="alCambiarFase(2)" class="btn-paso-atras">
+                  <span class="hidden sm:inline" aria-hidden="true">←</span> Anterior
                 </button>
                 <button @click="onCompletarF3" :disabled="guardando"
-                        :class="['flex-1 py-3 rounded-2xl text-sm font-black uppercase tracking-wider transition-all',
-                                 f3Valido ? 'bg-orange-500 text-white hover:bg-orange-600' : 'bg-gray-100 text-gray-400 hover:bg-gray-200']">
+                        :class="['btn-paso',
+                                 f3Valido ? 'bg-orange-500 text-white hover:bg-orange-600 shadow-orange-500/25' : 'bg-gray-100 text-gray-400 hover:bg-gray-200 shadow-none']">
                   Enviar entrega →
                 </button>
               </div>
               <div v-if="intentoF3 && !f3Valido" class="bg-red-50 border border-red-200 rounded-xl px-4 py-3 space-y-1">
                 <p class="text-[10px] font-black text-red-500 uppercase tracking-wider mb-1">Falta esto para continuar:</p>
                 <p v-for="(it, idx) in f3Faltantes.filter(x => !x.ok)" :key="idx" class="text-xs text-red-600 flex items-center gap-1.5">
-                  <span>⚠</span> {{ it.label }}
+                  <ExclamationTriangleIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" /> {{ it.label }}
                 </p>
               </div>
             </div>
@@ -2008,33 +2137,33 @@ watch(workspace, (val) => {
                   </label>
                   <p class="text-[11px] text-gray-400 mb-2">Consultad al docente o dinamizador.</p>
                   <div class="flex gap-5">
-                    <label class="flex items-center gap-2 cursor-pointer">
+                    <label class="flex min-h-9 items-center gap-2 cursor-pointer">
                       <input type="radio" :value="true" v-model="f4.expone_clase" @change="guardarF4"
-                             class="w-4 h-4 accent-[#00A859] cursor-pointer"/>
+                             class="w-4 h-4 accent-alumnos cursor-pointer"/>
                       <span class="text-sm font-semibold text-[#1F2937]">Sí</span>
                     </label>
-                    <label class="flex items-center gap-2 cursor-pointer">
+                    <label class="flex min-h-9 items-center gap-2 cursor-pointer">
                       <input type="radio" :value="false" v-model="f4.expone_clase" @change="guardarF4"
-                             class="w-4 h-4 accent-[#00A859] cursor-pointer"/>
+                             class="w-4 h-4 accent-alumnos cursor-pointer"/>
                       <span class="text-sm font-semibold text-[#1F2937]">No</span>
                     </label>
                   </div>
                 </div>
 
                 <div v-if="f4.expone_clase === true" class="border-t border-gray-100 pt-4">
-                  <p class="text-[9px] font-black uppercase tracking-widest text-[#00A859] mb-3">Organización de la exposición</p>
+                  <p class="text-[9px] font-black uppercase tracking-widest text-alumnos-dark mb-3">Organización de la exposición</p>
 
                   <div class="mb-4">
                     <label class="block text-xs font-bold text-[#1F2937] mb-1.5">¿Quién expone?</label>
                     <div class="space-y-1.5">
-                      <label class="flex items-center gap-2 cursor-pointer">
+                      <label class="flex min-h-9 items-center gap-2 cursor-pointer">
                         <input type="radio" value="todos" v-model="f4.organizacion.modo_intervencion" @change="guardarF4"
-                               class="w-4 h-4 accent-[#00A859] cursor-pointer"/>
+                               class="w-4 h-4 accent-alumnos cursor-pointer"/>
                         <span class="text-sm text-[#1F2937]">Todo el alumnado expone una parte (tiempos repartidos)</span>
                       </label>
-                      <label class="flex items-center gap-2 cursor-pointer">
+                      <label class="flex min-h-9 items-center gap-2 cursor-pointer">
                         <input type="radio" value="portavoz" v-model="f4.organizacion.modo_intervencion" @change="guardarF4"
-                               class="w-4 h-4 accent-[#00A859] cursor-pointer"/>
+                               class="w-4 h-4 accent-alumnos cursor-pointer"/>
                         <span class="text-sm text-[#1F2937]">Solo el portavoz expone</span>
                       </label>
                     </div>
@@ -2044,10 +2173,10 @@ watch(workspace, (val) => {
                     <label class="block text-xs font-bold text-[#1F2937] mb-1.5">Tipo de exposición</label>
                     <div class="flex flex-wrap gap-2">
                       <label v-for="tipo in TIPOS_EXPOSICION" :key="tipo"
-                             class="flex items-center gap-1.5 px-3 py-1.5 rounded-full border cursor-pointer
+                             class="flex min-h-9 items-center gap-1.5 px-3 py-1.5 rounded-full border cursor-pointer
                                     text-xs font-semibold transition-all"
                              :class="f4.organizacion.tipo_exposicion.includes(tipo)
-                               ? 'bg-[#00A859]/10 border-[#00A859]/30 text-[#00A859]'
+                               ? 'bg-alumnos/10 border-alumnos/30 text-alumnos-dark'
                                : 'bg-gray-50 border-gray-200 text-gray-500'">
                         <input type="checkbox" :value="tipo" v-model="f4.organizacion.tipo_exposicion" @change="guardarF4"
                                class="hidden"/>
@@ -2061,18 +2190,28 @@ watch(workspace, (val) => {
               <!-- Formulario de reflexión activo -->
               <div v-if="modoReflexion" class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5 space-y-4">
                 <div class="flex items-center justify-between">
-                  <p class="text-sm font-black text-[#121212]">
-                    {{ modoReflexion === 'individual' ? '👤 Reflexión individual' : '👥 Reflexión grupal' }}
+                  <p class="text-sm font-black text-[#121212] flex items-center gap-1.5">
+                    <UserIcon v-if="modoReflexion === 'individual'" class="h-5 w-5 shrink-0" aria-hidden="true" />
+                    <UserGroupIcon v-else class="h-5 w-5 shrink-0" aria-hidden="true" />
+                    {{ modoReflexion === 'individual' ? 'Reflexión individual' : 'Reflexión grupal' }}
                   </p>
                   <button @click="modoReflexion = ''"
-                          class="text-gray-300 hover:text-gray-500 font-black text-sm">✕</button>
+                          aria-label="Cerrar reflexión"
+                          class="-my-1.5 inline-flex h-9 w-9 items-center justify-center rounded-full text-sm font-black text-gray-300 hover:bg-gray-100 hover:text-gray-500"><XMarkIcon class="h-5 w-5 stroke-2" aria-hidden="true" /></button>
                 </div>
 
+                <AvisoSinNombresReales para="alumnado" />
+
                 <div v-if="modoReflexion === 'individual'">
-                  <label class="block text-xs font-black text-[#1F2937] uppercase tracking-wider mb-1.5">Tu nombre <span class="text-red-400">*</span></label>
-                  <input v-model="nombreAlumno" type="text" placeholder="Escribe tu nombre"
-                         class="w-full text-sm border border-gray-200 rounded-xl px-3 py-2
-                                focus:outline-none focus:border-green-400 bg-gray-50"/>
+                  <label class="block text-xs font-black text-[#1F2937] uppercase tracking-wider mb-1.5">Tu alias <span class="text-red-400">*</span></label>
+                  <!-- Desplegable con los miembros del equipo (no texto libre): el backend
+                       solo acepta como autor a un miembro del propio equipo -->
+                  <select v-model="nombreAlumno"
+                          class="w-full text-sm border border-gray-200 rounded-xl px-3 py-2
+                                 focus:outline-none focus:border-green-400 bg-gray-50 cursor-pointer">
+                    <option value="">Elige tu alias…</option>
+                    <option v-for="m in miembrosEquipo" :key="m.id" :value="m.alias">{{ m.alias }}</option>
+                  </select>
                 </div>
 
                 <div class="space-y-4">
@@ -2089,8 +2228,8 @@ watch(workspace, (val) => {
 
                 <button @click="enviarReflexion(modoReflexion)"
                         :disabled="guardandoReflexion || (modoReflexion === 'individual' && !nombreAlumno.trim())"
-                        class="w-full py-3.5 rounded-2xl bg-[#00A859] text-white text-sm font-black
-                               uppercase tracking-widest hover:bg-[#00A859]/90 transition-all disabled:opacity-50">
+                        class="w-full py-3.5 rounded-full bg-alumnos text-white text-sm font-black
+                               uppercase tracking-widest hover:bg-alumnos/90 transition-all disabled:opacity-50">
                   Enviar reflexión →
                 </button>
               </div>
@@ -2099,57 +2238,57 @@ watch(workspace, (val) => {
                 <!-- Reflexión grupal -->
                 <div ref="f4ReflexionGrupalRef" class="bg-white rounded-2xl border shadow-sm p-4 sm:p-5 transition-all"
                      :class="intentoF4 && !reflexionGrupal ? 'border-red-300 ring-2 ring-red-200' : 'border-gray-100'">
-                  <p class="text-[9px] font-black uppercase tracking-widest text-[#00A859] mb-3">Reflexión grupal</p>
+                  <p class="text-[9px] font-black uppercase tracking-widest text-alumnos-dark mb-3">Reflexión grupal</p>
                   <div v-if="reflexionGrupal">
                     <div v-for="r in reflexionGrupal.respuestas" :key="r.pregunta" class="mb-3 last:mb-0">
                       <p class="text-[11px] font-bold text-gray-500 mb-0.5">{{ r.pregunta }}</p>
-                      <p class="text-sm text-[#1F2937]">{{ r.respuesta }}</p>
+                      <p class="text-sm text-[#1F2937] break-words">{{ r.respuesta }}</p>
                     </div>
                   </div>
                   <button v-else @click="abrirReflexion('grupal')"
-                          class="w-full py-3 rounded-2xl border-2 border-dashed border-green-200
-                                 text-sm font-black text-[#00A859] hover:bg-green-50 transition-all">
+                          class="w-full py-3 rounded-full border-2 border-dashed border-green-200
+                                 text-sm font-black text-alumnos-dark hover:bg-green-50 transition-all">
                     + Añadir reflexión grupal (portavoz)
                   </button>
                 </div>
 
                 <!-- Reflexiones individuales -->
                 <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
-                  <p class="text-[9px] font-black uppercase tracking-widest text-[#00A859] mb-3">
+                  <p class="text-[9px] font-black uppercase tracking-widest text-alumnos-dark mb-3">
                     Reflexiones individuales ({{ misReflexiones.length }})
                   </p>
                   <div v-if="misReflexiones.length" class="space-y-3 mb-3">
                     <div v-for="r in misReflexiones" :key="r.id"
                          class="bg-green-50 rounded-xl px-4 py-3">
-                      <p class="text-xs font-black text-[#00A859] mb-1.5">{{ r.autor_nombre }}</p>
+                      <p class="text-xs font-black text-alumnos-dark mb-1.5">{{ r.autor_nombre }}</p>
                       <div v-for="resp in r.respuestas.slice(0,2)" :key="resp.pregunta" class="mb-1.5 last:mb-0">
                         <p class="text-[10px] text-gray-400">{{ resp.pregunta }}</p>
-                        <p class="text-xs text-[#1F2937]">{{ resp.respuesta }}</p>
+                        <p class="text-xs text-[#1F2937] break-words">{{ resp.respuesta }}</p>
                       </div>
                     </div>
                   </div>
                   <button @click="abrirReflexion('individual')"
-                          class="w-full py-3 rounded-2xl border-2 border-dashed border-green-200
-                                 text-sm font-black text-[#00A859] hover:bg-green-50 transition-all">
+                          class="w-full py-3 rounded-full border-2 border-dashed border-green-200
+                                 text-sm font-black text-alumnos-dark hover:bg-green-50 transition-all">
                     + Añadir mi reflexión individual
                   </button>
                 </div>
 
                 <!-- Info evaluación docente -->
                 <div v-if="getFase(4).validado_docente" class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
-                  <p class="text-[9px] font-black uppercase tracking-widest text-[#00A859] mb-3">Evaluación curricular (RA/CE)</p>
+                  <p class="text-[9px] font-black uppercase tracking-widest text-alumnos-dark mb-3">Evaluación curricular (RA/CE)</p>
                   <p v-if="getFase(4).nota_docente" class="text-xs text-green-600 mb-2">
                     Nota del proyecto: <strong>{{ getFase(4).nota_docente }}/10</strong>
                   </p>
                   <div v-if="evaluacionRaCe.length" class="space-y-2">
                     <div v-for="(r, i) in evaluacionRaCe" :key="i" class="bg-green-50 rounded-xl px-4 py-3">
                       <div class="flex items-start justify-between gap-2">
-                        <p class="text-xs font-semibold text-[#1F2937] flex-1">{{ r.ra }}</p>
+                        <p class="text-xs font-semibold text-[#1F2937] flex-1 min-w-0 break-words">{{ r.ra }}</p>
                         <span :class="['shrink-0 px-2 py-0.5 rounded-full text-[10px] font-black', NIVEL_COLORS[r.nivel]]">
                           {{ NIVEL_LABELS[r.nivel] || r.nivel }}
                         </span>
                       </div>
-                      <p v-if="r.observaciones" class="text-[11px] text-gray-500 mt-1">{{ r.observaciones }}</p>
+                      <p v-if="r.observaciones" class="text-[11px] text-gray-500 mt-1 break-words">{{ r.observaciones }}</p>
                     </div>
                   </div>
                   <p v-if="getFase(4).observaciones_docente" class="text-xs text-green-600 mt-3">
@@ -2162,52 +2301,59 @@ watch(workspace, (val) => {
                   </p>
                 </div>
 
-                <button @click="onCompletarF4" :disabled="guardando"
-                        :class="['w-full py-3.5 rounded-2xl text-sm font-black uppercase tracking-wider transition-all',
-                                 f4ValidoParaCompletar ? 'bg-[#00A859] text-white hover:bg-[#00A859]/90' : 'bg-gray-100 text-gray-400 hover:bg-gray-200']">
-                  {{ f4ValidoParaCompletar ? '✓ Marcar proyecto como completado' : 'Añadid la reflexión grupal para cerrar' }}
-                </button>
+                <div class="fila-pasos">
+                  <button type="button" @click="alCambiarFase(3)" class="btn-paso-atras">
+                    <span class="hidden sm:inline" aria-hidden="true">←</span> Anterior
+                  </button>
+                  <button @click="onCompletarF4" :disabled="guardando"
+                          :class="['btn-paso',
+                                   f4ValidoParaCompletar ? 'bg-alumnos text-white hover:bg-alumnos/90 shadow-alumnos/25' : 'bg-gray-100 text-gray-400 hover:bg-gray-200 shadow-none']">
+                    <CheckIcon v-if="f4ValidoParaCompletar" class="h-4 w-4 shrink-0 stroke-[2.5]" aria-hidden="true" />
+                    <span class="sm:hidden">{{ f4ValidoParaCompletar ? 'Completar proyecto' : 'Cerrar proyecto' }}</span>
+                    <span class="hidden sm:inline">{{ f4ValidoParaCompletar ? 'Marcar proyecto como completado' : 'Añadid la reflexión grupal para cerrar' }}</span>
+                  </button>
+                </div>
                 <div v-if="intentoF4 && !f4ValidoParaCompletar" class="bg-red-50 border border-red-200 rounded-xl px-4 py-3 space-y-1">
                   <p class="text-[10px] font-black text-red-500 uppercase tracking-wider mb-1">Falta esto para continuar:</p>
                   <p v-for="(it, idx) in f4Faltantes.filter(x => !x.ok)" :key="idx" class="text-xs text-red-600 flex items-center gap-1.5">
-                    <span>⚠</span> {{ it.label }}
+                    <ExclamationTriangleIcon class="h-3.5 w-3.5 shrink-0" aria-hidden="true" /> {{ it.label }}
                   </p>
                 </div>
 
                 <!-- Informe de cierre compilado -->
                 <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
-                  <p class="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-4">Informe de cierre del microproyecto</p>
+                  <p class="text-[9px] font-black uppercase tracking-widest text-gray-400 mb-4">Informe de cierre del proyecto</p>
 
                   <div class="space-y-4">
                     <div v-if="informeCierre.retoFrase">
                       <p class="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">El reto</p>
-                      <p class="text-sm text-[#1F2937] font-semibold">{{ informeCierre.retoFrase }}</p>
+                      <p class="text-sm text-[#1F2937] font-semibold break-words">{{ informeCierre.retoFrase }}</p>
                     </div>
 
                     <div v-if="informeCierre.hallazgos.length">
                       <p class="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">Hallazgos clave</p>
                       <ul class="space-y-0.5">
-                        <li v-for="(h, i) in informeCierre.hallazgos.filter(x => x.trim())" :key="i" class="text-sm text-[#1F2937] flex gap-2">
-                          <span class="text-gray-300 shrink-0">·</span>{{ h }}
+                        <li v-for="(h, i) in informeCierre.hallazgos.filter(x => x.trim())" :key="i" class="text-sm text-[#1F2937] flex gap-2 min-w-0 break-words">
+                          <span class="text-gray-300 shrink-0">·</span><span class="min-w-0 break-words">{{ h }}</span>
                         </li>
                       </ul>
                     </div>
 
                     <div v-if="informeCierre.propuesta">
                       <p class="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">Propuesta inicial de solución</p>
-                      <p class="text-sm text-[#1F2937]">{{ informeCierre.propuesta }}</p>
-                      <p v-if="informeCierre.explicacionPropuesta" class="text-sm text-gray-500 mt-1">{{ informeCierre.explicacionPropuesta }}</p>
+                      <p class="text-sm text-[#1F2937] break-words">{{ informeCierre.propuesta }}</p>
+                      <p v-if="informeCierre.explicacionPropuesta" class="text-sm text-gray-500 mt-1 break-words">{{ informeCierre.explicacionPropuesta }}</p>
                     </div>
 
                     <div v-if="informeCierre.solucionFinal">
                       <p class="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">Solución final propuesta</p>
-                      <p class="text-sm text-[#1F2937]">{{ informeCierre.solucionFinal }}</p>
-                      <p v-if="informeCierre.justificacionSolucionFinal" class="text-sm text-gray-500 mt-1">{{ informeCierre.justificacionSolucionFinal }}</p>
+                      <p class="text-sm text-[#1F2937] break-words">{{ informeCierre.solucionFinal }}</p>
+                      <p v-if="informeCierre.justificacionSolucionFinal" class="text-sm text-gray-500 mt-1 break-words">{{ informeCierre.justificacionSolucionFinal }}</p>
                     </div>
 
                     <div v-if="informeCierre.tipoPrototipo">
                       <p class="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">Prototipo</p>
-                      <p class="text-sm text-[#1F2937]">
+                      <p class="text-sm text-[#1F2937] break-words">
                         {{ informeCierre.tipoPrototipo }}
                         <a v-if="informeCierre.prototipoUrl" :href="informeCierre.prototipoUrl" target="_blank" rel="noopener"
                            class="text-blue-600 hover:underline ml-1">(enlace)</a>
@@ -2222,9 +2368,9 @@ watch(workspace, (val) => {
 
                     <div v-if="informeCierre.entregableDesc">
                       <p class="text-[10px] font-black uppercase tracking-wider text-gray-400 mb-1">Entregable final</p>
-                      <p class="text-sm text-[#1F2937]">{{ informeCierre.entregableDesc }}</p>
+                      <p class="text-sm text-[#1F2937] break-words">{{ informeCierre.entregableDesc }}</p>
                       <a v-if="informeCierre.entregableUrl" :href="informeCierre.entregableUrl" target="_blank" rel="noopener"
-                         class="text-xs text-blue-600 hover:underline">{{ informeCierre.entregableUrl }}</a>
+                         class="text-xs text-blue-600 hover:underline break-all">{{ informeCierre.entregableUrl }}</a>
                       <p v-if="archivosEntregable.length" class="text-xs text-gray-400 mt-1">{{ archivosEntregable.length }} archivo(s) adjunto(s)</p>
                     </div>
                   </div>
@@ -2238,22 +2384,25 @@ watch(workspace, (val) => {
           <!--  SIDEBAR DERECHO                                -->
           <!-- ─────────────────────────────────────────────── -->
           <!-- Separador visual del sidebar solo en móvil -->
-          <aside class="w-full lg:w-72 xl:w-80 shrink-0 space-y-4 lg:sticky lg:top-[62px]
+          <!-- Columna lateral desde lg (como el resto de la app); en tablet, sus tarjetas
+               en dos columnas debajo del contenido para no dejar una tira larga -->
+          <aside class="w-full lg:w-72 xl:w-80 shrink-0 space-y-4 md:grid md:grid-cols-2 md:items-start md:gap-4 md:space-y-0
+                        lg:block lg:space-y-4 lg:sticky lg:top-[62px]
                          border-t border-gray-200 pt-4 lg:border-t-0 lg:pt-0">
 
             <!-- Tarjeta equipo + miembros -->
             <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
-              <h3 class="text-sm font-black text-[#121212] mb-4">{{ equipo.nombre }}</h3>
+              <h3 class="text-sm font-black text-azul-noche mb-4">{{ equipo.nombre }}</h3>
 
               <div v-if="equipo.miembros?.length" class="space-y-3">
                 <div v-for="(m, i) in equipo.miembros" :key="i" class="flex items-center gap-3">
                   <div :style="{ backgroundColor: avatarColor(i) }"
                        class="w-9 h-9 rounded-full flex items-center justify-center
                               text-white font-black text-sm shrink-0 select-none">
-                    {{ initials(m.nombre) }}
+                    {{ initials(m.alias) }}
                   </div>
                   <div class="min-w-0">
-                    <p class="text-sm font-semibold text-[#1F2937] truncate">{{ m.nombre }}</p>
+                    <p class="text-sm font-semibold text-[#1F2937] truncate">{{ m.alias }}</p>
                     <p class="text-[11px] text-gray-400 capitalize">{{ m.rol || 'Miembro' }}</p>
                   </div>
                 </div>
@@ -2288,17 +2437,49 @@ watch(workspace, (val) => {
                   <template v-if="pctFase(f.num) !== null">
                     <div class="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                       <div class="h-full rounded-full transition-all duration-700"
-                           :class="pctFase(f.num) === 100 ? 'bg-[#00A859]' : 'bg-amber-400'"
+                           :class="pctFase(f.num) === 100 ? 'bg-alumnos' : 'bg-amber-400'"
                            :style="{ width: pctFase(f.num) + '%' }"/>
                     </div>
                     <span class="text-[11px] font-black w-9 text-right shrink-0"
-                          :class="pctFase(f.num) === 100 ? 'text-[#00A859]' : 'text-amber-500'">
+                          :class="pctFase(f.num) === 100 ? 'text-alumnos-dark' : 'text-amber-500'">
                       {{ pctFase(f.num) }}%
                     </span>
                   </template>
                   <span v-else class="text-gray-300 text-sm flex-1">—</span>
                 </div>
               </div>
+            </div>
+
+            <!-- Horas de prácticas (plan de proyecto, A3): las anotan el docente y DuaLab con el tutor de
+                 empresa; aquí el alumnado solo las consulta -->
+            <div v-if="etapa?.es_plan" class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
+              <h3 class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1">Horas de prácticas</h3>
+              <p class="text-[11px] text-gray-400 mb-3">
+                Las anota tu docente con el tutor de la empresa<template v-if="etapa.horas_estimadas">. Previstas: {{ etapa.horas_estimadas }} h por persona</template>.
+              </p>
+              <p v-if="!(etapa.horas || []).length" class="text-sm text-gray-400">Aún no hay horas anotadas.</p>
+              <ul v-else class="space-y-3">
+                <li v-for="h in etapa.horas" :key="h.alias">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="min-w-0 truncate text-sm font-semibold text-azul-noche">{{ h.alias }}</span>
+                    <span class="shrink-0 text-sm font-black text-alumnos-dark">{{ h.total }} h</span>
+                  </div>
+                  <div v-if="etapa.horas_estimadas" class="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100" role="progressbar"
+                       :aria-valuenow="Math.min(100, Math.round(h.total / etapa.horas_estimadas * 100))" aria-valuemin="0" aria-valuemax="100"
+                       :aria-label="`Horas de ${h.alias}`">
+                    <div class="h-full rounded-full bg-alumnos" :style="{ width: Math.min(100, h.total / etapa.horas_estimadas * 100) + '%' }" />
+                  </div>
+                  <details v-if="h.registros.length" class="mt-1">
+                    <summary class="cursor-pointer text-[11px] font-semibold text-gray-500">Ver días ({{ h.registros.length }})</summary>
+                    <ul class="mt-1 space-y-1">
+                      <li v-for="(r, i) in h.registros" :key="i" class="text-[11px] text-gray-600">
+                        <span class="font-semibold">{{ new Date(r.fecha + 'T00:00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }) }}</span>
+                        · {{ r.horas }} h<template v-if="r.descripcion"> · <span class="break-words">{{ r.descripcion }}</span></template>
+                      </li>
+                    </ul>
+                  </details>
+                </li>
+              </ul>
             </div>
 
             <!-- Tarjeta banco de imágenes del proyecto -->
@@ -2313,23 +2494,23 @@ watch(workspace, (val) => {
               <div v-if="imagenes.length" class="grid grid-cols-3 gap-1.5 mb-3">
                 <div v-for="img in imagenes" :key="img.id"
                      class="relative group/img rounded-lg overflow-hidden border-2"
-                     :class="img.id === imagenPortadaId ? 'border-[#00A859]' : 'border-gray-100'">
+                     :class="img.id === imagenPortadaId ? 'border-alumnos' : 'border-gray-100'">
                   <img :src="img.url" :alt="img.label" class="w-full h-14 object-cover" />
                   <span v-if="img.id === imagenPortadaId"
-                        class="absolute top-0.5 left-0.5 bg-[#00A859] text-white text-[7px] font-black
+                        class="absolute top-0.5 left-0.5 bg-alumnos text-white text-[7px] font-black
                                uppercase tracking-wider px-1 py-0.5 rounded-full">Portada</span>
-                  <div class="absolute inset-0 bg-black/50 opacity-0 group-hover/img:opacity-100
+                  <div class="absolute inset-0 bg-black/50 opacity-100 lg:[@media(hover:hover)]:opacity-0 lg:group-hover/img:opacity-100 lg:group-focus-within/img:opacity-100
                               transition-opacity flex items-center justify-center gap-1">
                     <button v-if="img.id !== imagenPortadaId" @click="marcarPortadaImagen(img)" type="button"
-                            title="Marcar como portada"
-                            class="w-5 h-5 rounded bg-white/90 flex items-center justify-center text-[#00A859]">
+                            title="Marcar como portada" aria-label="Marcar como portada"
+                            class="relative w-8 h-8 rounded-full bg-white/90 flex items-center justify-center text-alumnos before:absolute before:-inset-0.5 before:rounded-full">
                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                               d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.196-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/>
                       </svg>
                     </button>
-                    <button @click.stop="eliminarImagen(img)" type="button"
-                            class="w-5 h-5 rounded bg-white/90 flex items-center justify-center text-red-400">
+                    <button @click.stop="eliminarImagen(img)" type="button" title="Eliminar imagen" aria-label="Eliminar imagen"
+                            class="relative w-8 h-8 rounded-full bg-white/90 flex items-center justify-center text-red-400 before:absolute before:-inset-0.5 before:rounded-full">
                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/>
                       </svg>
@@ -2338,9 +2519,9 @@ watch(workspace, (val) => {
                 </div>
               </div>
 
-              <label class="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl
+              <label class="flex min-h-9 items-center justify-center gap-1.5 px-3 py-2 rounded-full
                             border-2 border-dashed border-gray-200 bg-gray-50 text-center
-                            cursor-pointer hover:border-[#00A859]/40 hover:bg-[#00A859]/5 transition-all"
+                            cursor-pointer hover:border-alumnos/40 hover:bg-alumnos/5 transition-all"
                      :class="subiendoImagen ? 'opacity-50 pointer-events-none' : ''">
                 <span class="text-[11px] text-gray-400 font-medium">
                   {{ subiendoImagen ? 'Subiendo...' : '+ Añadir imagen' }}
@@ -2351,10 +2532,10 @@ watch(workspace, (val) => {
               <p v-if="errorImagen" class="text-[10px] text-red-500 font-medium mt-1.5">{{ errorImagen }}</p>
             </div>
 
-            <!-- Tarjeta empresa / startup day -->
+            <!-- Tarjeta empresa validadora -->
             <div v-if="proyecto.empresa_nombre" class="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
               <h3 class="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-3">
-                Startup Day
+                Empresa
               </h3>
               <p class="text-sm text-gray-500 leading-relaxed">
                 Empresa validadora:
@@ -2364,12 +2545,15 @@ watch(workspace, (val) => {
 
           </aside><!-- /sidebar -->
 
-        </div>
+        </fieldset>
       </div>
 
     </template>
 
-    <MicroretoModal :token="verFichaReto ? token : null" @close="verFichaReto = false" />
+    <!-- Alumnado: ficha por el token del grupo. Docente: por id, con su sesión -->
+    <MicroretoModal :token="verFichaReto && !soloLectura ? token : null"
+                    :microreto-id="verFichaReto && soloLectura ? workspace?.microreto_id : null"
+                    @close="verFichaReto = false" />
 
     <DesbloquearIaModal
       v-if="mostrarModalIa"
@@ -2384,9 +2568,9 @@ watch(workspace, (val) => {
                   leave-active-class="transition-all duration-200" leave-to-class="opacity-0">
         <div v-if="mostrarModalPasoF3" class="fixed inset-0 z-[70] flex items-center justify-center p-4">
           <div @click="mostrarModalPasoF3 = false" class="fixed inset-0 bg-black/50 backdrop-blur-sm" />
-          <div class="relative z-10 w-full max-w-lg bg-white rounded-[2rem] shadow-2xl border border-gray-200 p-6 sm:p-8">
+          <div class="relative z-10 w-full max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white rounded-[2rem] shadow-2xl border border-gray-200 p-6 sm:p-8">
             <p class="text-[10px] font-black uppercase tracking-[0.18em] text-orange-500 mb-3">Antes de continuar</p>
-            <h2 class="text-xl font-black text-[#1F2937] mb-3 leading-snug">
+            <h2 class="text-xl font-black text-azul-noche mb-3 leading-snug">
               Vais a pasar a la fase de Entrega de la solución
             </h2>
             <p class="text-sm text-gray-600 leading-relaxed mb-4">
@@ -2399,16 +2583,13 @@ watch(workspace, (val) => {
             <p class="text-sm text-gray-600 leading-relaxed mb-6">
               Antes de pasar a Fase 3, revisad que habéis completado las tareas.
             </p>
-            <div class="flex gap-3">
-              <button @click="mostrarModalPasoF3 = false"
-                      class="flex-1 py-3 rounded-2xl bg-gray-50 border border-gray-200 text-gray-600
-                             text-sm font-black uppercase tracking-wider hover:bg-gray-100 transition-all">
-                Revisar tareas
+            <div class="fila-pasos">
+              <button @click="mostrarModalPasoF3 = false" class="btn-paso-atras">
+                <span class="sm:hidden">Revisar</span><span class="hidden sm:inline">Revisar tareas</span>
               </button>
               <button @click="confirmarPasoF3" :disabled="guardando"
-                      class="flex-1 py-3 rounded-2xl bg-orange-500 text-white text-sm font-black uppercase
-                             tracking-wider hover:bg-orange-600 transition-all disabled:opacity-50">
-                Continuar a Fase 3 →
+                      class="btn-paso bg-orange-500 shadow-orange-500/25 hover:bg-orange-600">
+                <span class="sm:hidden">Continuar →</span><span class="hidden sm:inline">Continuar a Fase 3 →</span>
               </button>
             </div>
           </div>
@@ -2422,9 +2603,9 @@ watch(workspace, (val) => {
                   leave-active-class="transition-all duration-200" leave-to-class="opacity-0">
         <div v-if="mostrarModalPasoF4" class="fixed inset-0 z-[70] flex items-center justify-center p-4">
           <div @click="mostrarModalPasoF4 = false" class="fixed inset-0 bg-black/50 backdrop-blur-sm" />
-          <div class="relative z-10 w-full max-w-lg bg-white rounded-[2rem] shadow-2xl border border-gray-200 p-6 sm:p-8">
+          <div class="relative z-10 w-full max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto bg-white rounded-[2rem] shadow-2xl border border-gray-200 p-6 sm:p-8">
             <p class="text-[10px] font-black uppercase tracking-[0.18em] text-green-600 mb-3">Antes de continuar</p>
-            <h2 class="text-xl font-black text-[#1F2937] mb-3 leading-snug">
+            <h2 class="text-xl font-black text-azul-noche mb-3 leading-snug">
               Vais a pasar a la fase de Presentación
             </h2>
             <p class="text-sm text-gray-600 leading-relaxed mb-3">
@@ -2432,24 +2613,21 @@ watch(workspace, (val) => {
             </p>
             <div class="bg-green-50 border border-green-100 rounded-xl px-4 py-3 mb-4 space-y-1.5">
               <p class="text-sm text-[#1F2937] flex items-start gap-2">
-                <span class="text-[#00A859] font-black mt-0.5 shrink-0">•</span>
+                <span class="text-alumnos-dark font-black mt-0.5 shrink-0">•</span>
                 Podrá haber una exposición a vuestros compañeros — en forma de role playing, con un PowerPoint resumen, etc.
               </p>
               <p class="text-sm text-[#1F2937] flex items-start gap-2">
-                <span class="text-[#00A859] font-black mt-0.5 shrink-0">•</span>
+                <span class="text-alumnos-dark font-black mt-0.5 shrink-0">•</span>
                 Habrá una reflexión final, individual y de equipo.
               </p>
             </div>
-            <div class="flex gap-3">
-              <button @click="mostrarModalPasoF4 = false"
-                      class="flex-1 py-3 rounded-2xl bg-gray-50 border border-gray-200 text-gray-600
-                             text-sm font-black uppercase tracking-wider hover:bg-gray-100 transition-all">
-                Revisar entrega
+            <div class="fila-pasos">
+              <button @click="mostrarModalPasoF4 = false" class="btn-paso-atras">
+                <span class="sm:hidden">Revisar</span><span class="hidden sm:inline">Revisar entrega</span>
               </button>
               <button @click="confirmarPasoF4" :disabled="guardando"
-                      class="flex-1 py-3 rounded-2xl bg-[#00A859] text-white text-sm font-black uppercase
-                             tracking-wider hover:bg-[#00A859]/90 transition-all disabled:opacity-50">
-                Continuar a Fase 4 →
+                      class="btn-paso bg-alumnos shadow-alumnos/25 hover:bg-alumnos/90">
+                <span class="sm:hidden">Continuar →</span><span class="hidden sm:inline">Continuar a Fase 4 →</span>
               </button>
             </div>
           </div>

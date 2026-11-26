@@ -3,7 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Http\Requests\LoginRequest;
 use App\Http\Requests\UpdatePerfilRequest;
+use App\Http\Requests\VerifyPasswordRequest;
+use App\Services\ModulosDocenteService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
@@ -15,14 +18,10 @@ use Illuminate\Support\Str;
 
 class AdminAuthController extends Controller
 {
-    public function login(Request $request): JsonResponse
+    public function login(LoginRequest $request): JsonResponse
     {
-        $request->validate([
-            'email'    => 'required|email',
-            'password' => 'required|string|max:128',
-        ]);
-
-        $email = Str::lower($request->input('email'));
+        $data  = $request->validated();
+        $email = Str::lower($data['email']);
 
         // Bloqueo por intentos fallidos: clave = email + IP (resiste rotación de IPs y de emails)
         $throttleKey = 'login.' . $email . '.' . $request->ip();
@@ -36,14 +35,16 @@ class AdminAuthController extends Controller
             ], 429);
         }
 
-        if (!Auth::attempt($request->only('email', 'password'))) {
+        // Sin "Recordarme" aquí: la cookie se emite más abajo, solo si la cuenta
+        // está operativa y su rol lo permite
+        if (!Auth::attempt(['email' => $email, 'password' => $data['password']])) {
             RateLimiter::hit($throttleKey, 900); // ventana de 15 minutos
             // Nunca la contraseña en sí (PII/secreto) — solo su longitud, para poder distinguir
             // "se ha escrito otra contraseña" de "la cuenta cambió" sin loguear el valor real.
             Log::warning('Login fallido: credenciales incorrectas', [
                 'email'            => $this->maskEmail($email),
                 'ip'               => $request->ip(),
-                'password_length'  => strlen((string) $request->input('password')),
+                'password_length'  => strlen((string) $data['password']),
             ]);
             return response()->json([
                 'success' => false,
@@ -54,6 +55,8 @@ class AdminAuthController extends Controller
         RateLimiter::clear($throttleKey);
 
         $user = Auth::user();
+        // Auth::attempt() acaba de autenticarlo: siempre hay usuario
+        abort_unless($user instanceof User, 401);
 
         if ($user->is_blocked) {
             Auth::logout();
@@ -71,6 +74,11 @@ class AdminAuthController extends Controller
                 'success' => false,
                 'message' => 'Esta cuenta aún no ha sido activada. Contacta con el administrador.',
             ], 403);
+        }
+
+        $remember = (bool) ($data['remember'] ?? false) && $user->puedeRecordarSesion();
+        if ($remember) {
+            Auth::guard('web')->login($user, true);
         }
 
         $request->session()->regenerate();
@@ -95,12 +103,16 @@ class AdminAuthController extends Controller
 
         return response()->json([
             'success'             => true,
+            'id'                  => $user->id,
             'role'                => $user->role,
             'name'                => $user->name,
             'centro_educativo_id' => $user->centro_educativo_id,
             'centro_nombre'       => $user->centroEducativo?->nombre,
             'centro_img'          => $user->centroEducativo?->img,
             'minutos_restantes'   => $this->minutosRestantesSesion($request),
+            'recordado'           => $remember,
+            'tiene_modulos'       => $user->modulos()->exists(),
+            'imparte'             => app(ModulosDocenteService::class)->imparte($user),
             'message'             => 'Acceso concedido.',
         ]);
     }
@@ -117,11 +129,12 @@ class AdminAuthController extends Controller
         ]);
     }
 
-    public function verifyPassword(Request $request): JsonResponse
+    public function verifyPassword(VerifyPasswordRequest $request): JsonResponse
     {
-        $request->validate(['password' => 'required|string']);
+        $user = $request->user();
+        abort_unless($user instanceof User, 401); // ruta bajo auth:sanctum
 
-        if (!Hash::check($request->password, $request->user()->password)) {
+        if (!Hash::check($request->validated('password'), $user->password)) {
             return response()->json(['success' => false, 'message' => 'Contraseña incorrecta.'], 401);
         }
 
@@ -131,6 +144,7 @@ class AdminAuthController extends Controller
     public function getPerfil(Request $request): JsonResponse
     {
         $user = $request->user();
+        abort_unless($user instanceof User, 401); // ruta bajo auth:sanctum
 
         return response()->json([
             'success' => true,
@@ -143,8 +157,21 @@ class AdminAuthController extends Controller
                 'centro_nombre'       => $user->centroEducativo?->nombre,
                 'centro_img'          => $user->centroEducativo?->img,
                 'minutos_restantes'   => $this->minutosRestantesSesion($request),
+                'recordado'           => $this->sesionRecordada($request),
+                'tiene_modulos'       => $user->modulos()->exists(),
+                'imparte'             => app(ModulosDocenteService::class)->imparte($user),
             ],
         ]);
+    }
+
+    // "Recordarme": el navegador conserva la cookie recaller (HttpOnly, JS no puede
+    // verla) — el frontend lo necesita saber para no cerrar sesión por inactividad.
+    private function sesionRecordada(Request $request): bool
+    {
+        /** @var \Illuminate\Auth\SessionGuard $guard  el guard 'web' es de sesión */
+        $guard = Auth::guard('web');
+
+        return $request->cookies->has($guard->getRecallerName());
     }
 
     // Sesión de Laravel (driver 'database'): expira 'session.lifetime' minutos después
@@ -168,6 +195,7 @@ class AdminAuthController extends Controller
     public function updatePerfil(UpdatePerfilRequest $request): JsonResponse
     {
         $user = $request->user();
+        abort_unless($user instanceof User, 401); // ruta bajo auth:sanctum
         $data = $request->validated();
 
         $user->name = $data['name'];

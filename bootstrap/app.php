@@ -18,6 +18,14 @@ return Application::configure(basePath: dirname(__DIR__))
         // el sub-pipeline de sesión/CSRF ya declarado en config/sanctum.php.
         $middleware->statefulApi();
 
+        // Una cookie de sesión y una XSRF-TOKEN por herramienta (app, comercial, Central):
+        // entrar con otra cuenta en una no cambia la sesión de las demás. Global y al
+        // principio para que el nombre esté decidido antes de StartSession.
+        $middleware->prepend(\App\Http\Middleware\SesionPorHerramienta::class);
+        $middleware->web(replace: [
+            \Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class => \App\Http\Middleware\ValidarCsrfPorHerramienta::class,
+        ]);
+
         // Cabeceras de seguridad HTTP en todas las respuestas
         $middleware->append(SecurityHeaders::class);
 
@@ -25,6 +33,15 @@ return Application::configure(basePath: dirname(__DIR__))
             'admin'      => \App\Http\Middleware\EnsureIsAdmin::class,
             'superadmin' => \App\Http\Middleware\EnsureIsSuperAdmin::class,
             'docente'    => \App\Http\Middleware\EnsureIsDocente::class,
+            'comercial'  => \App\Http\Middleware\EnsureIsComercial::class,
+            'primer.contacto' => \App\Http\Middleware\EnsurePuedePrimerContacto::class,
+            // Espacio «Red DuaLab» de Central (formularios, correo, captaciones): red_dualab, central_dualab y superadmin
+            'red.dualab' => \App\Http\Middleware\EnsurePuedePrimerContacto::class,
+            'practicas' => \App\Http\Middleware\EnsurePuedeGestionarPracticas::class,
+            'usuarios' => \App\Http\Middleware\EnsurePuedeGestionarUsuarios::class,
+            'admin.central' => \App\Http\Middleware\EnsureEsAdminCentral::class,
+            'rol'           => \App\Http\Middleware\EnsureTieneRol::class,
+            'firma.frontoffice' => \App\Http\Middleware\VerificarFirmaFrontoffice::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

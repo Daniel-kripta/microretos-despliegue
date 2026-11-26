@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\AsociarCentroUsuarioRequest;
 use App\Http\Requests\StoreAdminUserRequest;
 use App\Http\Requests\UpdateAdminUserRequest;
 use App\Models\User;
@@ -14,13 +15,17 @@ use Illuminate\Support\Facades\Log;
 // Endpoint API: /admin/usuarios (sin cambios). El frontend renombró su URL a /usuarios — no confundir ambas.
 class AdminUserController extends Controller
 {
+    // Tope de cuentas por listado: el frontend busca, filtra y pagina en cliente sobre la lista,
+    // así que se envían las más recientes hasta este límite y se indica si quedaron fuera
+    private const LIMITE_LISTADO = 1000;
+
     public function index(Request $request): JsonResponse
     {
         $auth = $request->user();
 
         if ($error = $this->requireCentroSiAdmin($auth)) return $error;
 
-        $query = User::with('centroEducativo')
+        $query = User::with('centroEducativo')->withCount('modulos')
             ->whereNot('id', $auth->id)
             ->orderByDesc('created_at');
 
@@ -30,7 +35,7 @@ class AdminUserController extends Controller
                   ->whereNotIn('role', [User::ROLE_SUPERADMIN, User::ROLE_ADMIN]);
         }
 
-        return response()->json(['data' => $this->formatUsers($query->get())]);
+        return response()->json($this->listado($query));
     }
 
     public function store(StoreAdminUserRequest $request): JsonResponse
@@ -42,33 +47,41 @@ class AdminUserController extends Controller
 
         if ($auth->isAdmin()) {
             // Admin de centro: solo puede crear docentes, asignados automáticamente a su centro
-            $user = User::create([
+            $user = new User([
                 'name'                => $data['name'],
                 'email'               => $data['email'],
                 'password'            => Hash::make($data['password']),
-                'role'                => User::ROLE_DOCENTE,
-                'is_blocked'          => false,
-                'email_verified_at'   => null,
                 'centro_educativo_id' => $auth->centro_educativo_id,
             ]);
+            $user->role = User::ROLE_DOCENTE;
         } else {
-            // Superadmin: puede crear docente (2), empresa (3) o admin de centro (4)
-            $user = User::create([
+            // Superadmin: puede crear cualquier rol, también otro superadmin (StoreAdminUserRequest). El
+            // superadmin, el comercial y los roles de Central no pertenecen a ningún centro ni empresa.
+            /** @var int<0, max> $rol  StoreAdminUserRequest restringe role a 1..8 */
+            $rol = (int) $data['role'];
+            $esComercial = in_array($rol, [User::ROLE_SUPERADMIN, User::ROLE_COMERCIAL, User::ROLE_RED_DUALAB, User::ROLE_GESTION_PRACTICAS, User::ROLE_ADMIN_CENTRAL_DUALAB], true);
+            $user = new User([
                 'name'                => $data['name'],
                 'email'               => $data['email'],
                 'password'            => Hash::make($data['password']),
-                'role'                => (int) $data['role'],
-                'is_blocked'          => false,
-                'email_verified_at'   => null,
-                'centro_educativo_id' => $data['centro_educativo_id'] ?? null,
-                'empresa_id'          => $data['empresa_id'] ?? null,
+                'centro_educativo_id' => $esComercial ? null : ($data['centro_educativo_id'] ?? null),
+                'empresa_id'          => $esComercial ? null : ($data['empresa_id'] ?? null),
             ]);
+            $user->role = $rol;
         }
+
+        // Campos sensibles fuera de $fillable: se asignan explícitamente.
+        $user->is_blocked        = false;
+        // El superadmin siempre es operativo (User::isOperational) y su cuenta no se edita después
+        // (checkScope): se crea ya activa. Los demás, pendientes de activar.
+        $user->email_verified_at = $user->isSuperAdmin() ? now() : null;
+        $user->save();
+        app(\App\Services\ActividadCentralService::class)->registrar($auth, 'usuarios', 'crear_cuenta', "Creó la cuenta de {$user->name} ({$user->roleName()}).", $user, $user->isSuperAdmin());
 
         return response()->json([
             'success' => true,
             'data'    => $this->formatUser($user),
-            'message' => 'Cuenta creada. Actívala para que pueda iniciar sesión.',
+            'message' => $user->isSuperAdmin() ? 'Cuenta de superadmin creada: ya puede iniciar sesión.' : 'Cuenta creada. Actívala para que pueda iniciar sesión.',
         ], 201);
     }
 
@@ -76,7 +89,9 @@ class AdminUserController extends Controller
     {
         if ($error = $this->checkScope($request->user(), $user)) return $error;
 
-        $user->update(['email_verified_at' => now()]);
+        $user->email_verified_at = now();
+        $user->save();
+        app(\App\Services\ActividadCentralService::class)->registrar($request->user(), 'usuarios', 'activar_cuenta', "Activó la cuenta de {$user->name}.", $user);
 
         return response()->json(['success' => true, 'data' => $this->formatUser($user->fresh())]);
     }
@@ -85,27 +100,28 @@ class AdminUserController extends Controller
     {
         if ($error = $this->checkScope($request->user(), $user)) return $error;
 
-        $user->update(['is_blocked' => !$user->is_blocked]);
+        $user->is_blocked = !$user->is_blocked;
+        $user->save();
 
         if ($user->is_blocked) {
             DB::table('sessions')->where('user_id', $user->id)->delete();
         }
+        app(\App\Services\ActividadCentralService::class)->registrar($request->user(), 'usuarios', $user->is_blocked ? 'bloquear_cuenta' : 'desbloquear_cuenta',
+            ($user->is_blocked ? 'Bloqueó' : 'Desbloqueó') . " la cuenta de {$user->name}.", $user, true);
 
         return response()->json(['success' => true, 'data' => $this->formatUser($user->fresh())]);
     }
 
     // Solo accesible por superadmin (middleware en ruta)
-    public function asociarCentro(Request $request, User $user): JsonResponse
+    public function asociarCentro(AsociarCentroUsuarioRequest $request, User $user): JsonResponse
     {
         if (!$user->isDocente() && !$user->isAdmin()) {
             return response()->json(['success' => false, 'message' => 'Solo los docentes y administradores de centro pueden tener un centro asociado.'], 422);
         }
 
-        $data = $request->validate([
-            'centro_educativo_id' => 'nullable|exists:centro_educativo,id',
-        ]);
+        $data = $request->validated();
 
-        $user->update(['centro_educativo_id' => $data['centro_educativo_id']]);
+        $user->update(['centro_educativo_id' => $data['centro_educativo_id'] ?? null]);
 
         return response()->json(['success' => true, 'data' => $this->formatUser($user->fresh()->load('centroEducativo'))]);
     }
@@ -122,12 +138,18 @@ class AdminUserController extends Controller
         $user->email = $data['email'];
         $user->role  = (int) $data['role'];
 
-        if ($auth->isSuperAdmin() && array_key_exists('centro_educativo_id', $data)) {
+        if ($auth->gestionaTodosLosUsuarios() && array_key_exists('centro_educativo_id', $data)) {
             $user->centro_educativo_id = $data['centro_educativo_id'];
         }
 
-        if ($auth->isSuperAdmin() && array_key_exists('empresa_id', $data)) {
+        if ($auth->gestionaTodosLosUsuarios() && array_key_exists('empresa_id', $data)) {
             $user->empresa_id = $data['empresa_id'];
+        }
+
+        // Comercial y los roles de Central nunca quedan ligados a un centro o empresa (verían sus datos en la app de docentes)
+        if ($user->esPersonalDualab()) {
+            $user->centro_educativo_id = null;
+            $user->empresa_id          = null;
         }
 
         if ($request->filled('password')) {
@@ -140,6 +162,7 @@ class AdminUserController extends Controller
         }
 
         $user->save();
+        app(\App\Services\ActividadCentralService::class)->registrar($auth, 'usuarios', 'editar_cuenta', "Editó la cuenta de {$user->name} ({$user->roleName()})" . ($request->filled('password') ? ', con cambio de contraseña.' : '.'), $user, $request->filled('password'));
 
         return response()->json(['success' => true, 'data' => $this->formatUser($user->fresh()->load('centroEducativo'))]);
     }
@@ -150,6 +173,7 @@ class AdminUserController extends Controller
 
         DB::table('sessions')->where('user_id', $user->id)->delete();
         $user->delete();
+        app(\App\Services\ActividadCentralService::class)->registrar($request->user(), 'usuarios', 'borrar_cuenta', "Envió a la papelera la cuenta de {$user->name}.", $user, true);
 
         return response()->json(['success' => true, 'message' => 'Cuenta enviada a la papelera.']);
     }
@@ -168,7 +192,7 @@ class AdminUserController extends Controller
                   ->whereNotIn('role', [User::ROLE_SUPERADMIN, User::ROLE_ADMIN]);
         }
 
-        return response()->json(['data' => $this->formatUsers($query->get())]);
+        return response()->json($this->listado($query));
     }
 
     public function restaurar(Request $request, int $id): JsonResponse
@@ -178,6 +202,11 @@ class AdminUserController extends Controller
 
         $user = User::onlyTrashed()->findOrFail($id);
 
+        // Una cuenta de superadmin solo la restaura un superadmin
+        if ($user->isSuperAdmin() && !$auth->isSuperAdmin()) {
+            return response()->json(['success' => false, 'message' => 'Solo un superadmin puede restaurar esta cuenta.'], 403);
+        }
+
         if ($auth->isAdmin()) {
             if ($user->isSuperAdmin() || $user->isAdmin() ||
                 $user->centro_educativo_id !== $auth->centro_educativo_id) {
@@ -186,6 +215,7 @@ class AdminUserController extends Controller
         }
 
         $user->restore();
+        app(\App\Services\ActividadCentralService::class)->registrar($auth, 'usuarios', 'restaurar_cuenta', "Restauró la cuenta de {$user->name}.", $user, true);
 
         return response()->json(['success' => true, 'data' => $this->formatUser($user->fresh())]);
     }
@@ -209,7 +239,9 @@ class AdminUserController extends Controller
         }
 
         DB::table('sessions')->where('user_id', $user->id)->delete();
+        $nombre = $user->name;
         $user->forceDelete();
+        app(\App\Services\ActividadCentralService::class)->registrar($auth, 'usuarios', 'borrar_cuenta_definitivo', "Borró definitivamente la cuenta de {$nombre}.", null, true);
 
         return response()->json(['success' => true, 'message' => 'Cuenta eliminada definitivamente.']);
     }
@@ -255,6 +287,20 @@ class AdminUserController extends Controller
         return null;
     }
 
+    /**
+     * @param \Illuminate\Database\Eloquent\Builder<User> $query
+     * @return array{data: array<int, mixed>, truncado: bool}
+     */
+    private function listado(\Illuminate\Database\Eloquent\Builder $query): array
+    {
+        $usuarios = $query->take(self::LIMITE_LISTADO + 1)->get();
+
+        return [
+            'data'     => $this->formatUsers($usuarios->take(self::LIMITE_LISTADO)),
+            'truncado' => $usuarios->count() > self::LIMITE_LISTADO,
+        ];
+    }
+
     private function formatUsers($collection): array
     {
         return $collection->map(fn($u) => $this->formatUser($u))->values()->all();
@@ -278,6 +324,9 @@ class AdminUserController extends Controller
             'created_at'          => $user->created_at?->toDateTimeString(),
             'password_changed_at' => $user->password_changed_at?->toDateTimeString(),
             'deleted_at'          => $user->deleted_at?->toDateTimeString(),
+            // Módulos que imparte: solo se cuenta en el listado (withCount); una cuenta recién
+            // creada no tiene ninguno. null = no calculado (otras respuestas)
+            'num_modulos'         => $user->modulos_count ?? ($user->wasRecentlyCreated ? 0 : null),
         ];
     }
 }

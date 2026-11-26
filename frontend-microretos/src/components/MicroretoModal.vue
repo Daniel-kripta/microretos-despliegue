@@ -1,6 +1,8 @@
 <script setup>
+import { formatearFecha } from '../utils/fechas.js'
 import { ref, computed, watch } from 'vue'
 import api from '../api.js'
+import AvisoEmpresaBorrada from './AvisoEmpresaBorrada.vue'
 import { usePdfExport } from '../composables/usePdfExport.js'
 
 const props = defineProps({
@@ -8,15 +10,24 @@ const props = defineProps({
   // Acceso público alternativo (workspace de alumnado): ficha del reto de un equipo por su token,
   // sin necesitar sesión Sanctum. Tiene prioridad sobre microretoId si ambos llegan informados.
   token: { type: String, default: null },
+  // Reto ya cargado (p. ej. los borradores de la app comercial, que aún no son microretos):
+  // se muestra tal cual, sin pedirlo al servidor.
+  datosReto: { type: Object, default: null },
 })
 const emit = defineEmits(['close'])
 
-const abierto  = computed(() => Boolean(props.microretoId || props.token))
+const abierto  = computed(() => Boolean(props.datosReto || props.microretoId || props.token))
 const reto     = ref(null)
 const cargando = ref(false)
 const error    = ref(false)
 
 const { descargarPDF } = usePdfExport()
+
+watch(() => props.datosReto, (datos) => {
+  if (!datos) return
+  reto.value  = datos
+  error.value = false
+}, { immediate: true })
 
 // Carga cuando cambia el ID o el token
 watch([() => props.microretoId, () => props.token], async ([id, token]) => {
@@ -43,7 +54,7 @@ const imagenFondo = computed(() => {
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, '-')
     .replace(/[^a-z0-9-]/g, '')
-  const base = import.meta.env.VITE_API_URL.replace(/\/api$/, '')
+  const base = (import.meta.env.VITE_API_URL ?? '').replace(/\/api$/, '')
   return `${base}/familias/${slug}.webp`
 })
 
@@ -53,7 +64,7 @@ const tieneDatosRecogidos = computed(() => {
   const e = reto.value?.empresa
   if (!e) return false
   return !!(e.dia_a_normal || e.friccion_area || e.friccion_problema
-    || e.consecuencias || e.restricciones || e.lo_que_no_quieren)
+    || e.consecuencias || e.restricciones || e.lo_que_no_quieren || e.expectativas_alumno)
 })
 
 function cerrar() {
@@ -65,7 +76,7 @@ function cerrar() {
   <Teleport to="body">
     <Transition name="microreto-modal">
       <div v-if="abierto"
-           class="fixed inset-0 z-[60] flex items-start justify-center p-4 overflow-y-auto">
+           class="fixed inset-0 z-[95] flex items-start justify-center p-4 overflow-y-auto">
 
         <!-- Backdrop -->
         <div @click="cerrar"
@@ -73,19 +84,19 @@ function cerrar() {
 
         <!-- Panel scrollable -->
         <div class="relative z-10 w-full max-w-4xl my-6 bg-[#F8FAFC] rounded-[2rem]
-                    shadow-2xl border border-gray-200 overflow-hidden font-sans text-[#1F2937]">
+                    shadow-2xl border border-gray-200 overflow-clip font-sans text-[#1F2937]">
 
           <!-- ── Barra superior fija con botón cerrar ── -->
           <div class="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-gray-100
-                      px-6 py-3 flex items-center justify-between gap-4">
+                      px-4 sm:px-6 py-3 flex items-center justify-between gap-2 sm:gap-4">
             <p class="text-[10px] font-black uppercase tracking-[0.18em] text-gray-400">
               Ficha del reto
             </p>
             <div class="flex items-center gap-2">
               <button v-if="reto" @click="descargarPDF(reto)"
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl
+                      class="inline-flex h-9 items-center gap-1.5 px-3 py-1.5 rounded-full
                              bg-gray-50 border border-gray-200 text-[10px] font-black uppercase
-                             tracking-widest text-gray-500 hover:border-[#00A859] hover:text-[#00A859]
+                             tracking-widest text-gray-500 hover:border-centros hover:text-centros
                              transition-all">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -94,7 +105,7 @@ function cerrar() {
                 PDF
               </button>
               <button @click="cerrar"
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl
+                      class="inline-flex h-9 items-center gap-1.5 px-3 py-1.5 rounded-full
                              bg-[#1F2937] text-white text-[10px] font-black uppercase tracking-widest
                              hover:bg-black transition-all">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -107,17 +118,17 @@ function cerrar() {
           </div>
 
           <!-- ── Cargando ── -->
-          <div v-if="cargando" class="flex flex-col items-center justify-center py-32">
-            <svg class="animate-spin w-10 h-10 text-[#00A859] mb-4" viewBox="0 0 24 24">
+          <div v-if="cargando" class="flex flex-col items-center justify-center py-16 sm:py-32">
+            <svg class="animate-spin w-10 h-10 text-centros mb-4" viewBox="0 0 24 24">
               <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/>
             </svg>
-            <p class="text-[#00A859] font-black tracking-widest uppercase text-sm animate-pulse">
+            <p class="text-centros font-black tracking-widest uppercase text-sm animate-pulse">
               Cargando ficha...
             </p>
           </div>
 
           <!-- ── Error ── -->
-          <div v-else-if="error" class="text-center py-24">
+          <div v-else-if="error" class="text-center py-12 sm:py-24">
             <div class="w-14 h-14 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
               <svg class="w-7 h-7 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -145,16 +156,16 @@ function cerrar() {
                 </div>
 
                 <div class="relative z-10 px-6 py-8 md:px-12 md:pt-10 md:pb-8 max-w-3xl">
-                  <p class="text-[#00A859] font-bold text-[10px] tracking-[0.2em] uppercase mb-3
+                  <p class="text-centros font-bold text-[10px] tracking-[0.2em] uppercase mb-3
                             flex items-center gap-2">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586
                                a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                     </svg>
-                    DuaLab · Ficha de Reto
+                    DUALAB · Ficha de Reto
                   </p>
-                  <h1 class="text-2xl md:text-4xl font-black text-[#1F2937] tracking-tight leading-tight mb-2">
+                  <h1 class="text-2xl md:text-4xl font-black text-azul-noche tracking-tight leading-tight mb-2 break-words">
                     {{ reto.titulo }}
                   </h1>
                   <h2 class="text-base md:text-lg text-gray-600 font-bold leading-snug mb-2">
@@ -163,10 +174,13 @@ function cerrar() {
                   <h3 class="text-sm md:text-base text-gray-500 font-medium leading-relaxed mb-6">
                     {{ reto.subtitulo }}
                   </h3>
+                  <p v-if="reto.creado_en" class="text-[11px] text-gray-400 font-bold uppercase tracking-widest mb-4">
+                    Reto creado el {{ formatearFecha(reto.creado_en) }}
+                  </p>
 
                   <div class="flex flex-wrap gap-2">
                     <span class="flex items-center gap-1.5 px-3 py-1.5 bg-[#1F2937] text-white
-                                 rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm">
+                                 rounded-full text-[10px] font-bold uppercase tracking-wider shadow-sm">
                       <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                               d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5
@@ -175,35 +189,63 @@ function cerrar() {
                       </svg>
                       {{ reto.empresa_nombre }}
                     </span>
+                    <span v-if="reto.empresa_es_simulada != null"
+                          :class="reto.empresa_es_simulada
+                            ? 'bg-amber-50 border-amber-200 text-amber-700'
+                            : 'bg-emerald-50 border-emerald-200 text-emerald-700'"
+                          class="flex items-center gap-1.5 px-3 py-1.5 border rounded-full
+                                 text-[10px] font-bold uppercase tracking-wider">
+                      <svg v-if="reto.empresa_es_simulada" class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3
+                                 m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374
+                                 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                      </svg>
+                      <svg v-else class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                      </svg>
+                      {{ reto.empresa_es_simulada ? 'Empresa ficticia' : 'Empresa real' }}
+                    </span>
+                    <AvisoEmpresaBorrada :estado="reto.empresa_estado" tamano="md" />
+                    <span v-if="reto.es_simulado"
+                          class="flex items-center gap-1.5 px-3 py-1.5 bg-rose-50 border border-rose-200
+                                 text-rose-700 rounded-full text-[10px] font-bold uppercase tracking-wider">
+                      <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                      </svg>
+                      Info simulada
+                    </span>
                     <span v-if="reto.familia"
                           class="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 border border-gray-200
-                                 text-[#1F2937] rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                                 text-[#1F2937] rounded-full text-[10px] font-bold uppercase tracking-wider">
                       {{ reto.familia }}
                     </span>
                     <span v-if="reto.ciclo"
-                          class="flex items-center gap-1.5 px-3 py-1.5 bg-[#00A859]/10 border
-                                 border-[#00A859]/20 text-[#00A859] rounded-lg text-[10px] font-bold
+                          class="flex items-center gap-1.5 px-3 py-1.5 bg-centros/10 border
+                                 border-centros/20 text-centros rounded-full text-[10px] font-bold
                                  uppercase tracking-wider">
                       {{ reto.ciclo }}
                     </span>
                     <span v-if="reto.curso"
                           class="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 border border-indigo-200
-                                 text-indigo-700 rounded-lg text-[10px] font-bold uppercase tracking-wider">
-                      {{ reto.curso }}º Curso
+                                 text-indigo-700 rounded-full text-[10px] font-bold uppercase tracking-wider">
+                      {{ reto.curso === 'ambos_cursos' ? '1º y 2º Curso' : `${reto.curso}º Curso` }}
                     </span>
                     <span v-if="reto.nivel_grupo"
                           class="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 border border-gray-200
-                                 text-gray-500 rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                                 text-gray-500 rounded-full text-[10px] font-bold uppercase tracking-wider">
                       Nivel {{ reto.nivel_grupo }}
                     </span>
                     <span v-if="reto.empresa?.sector"
                           class="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 border border-gray-200
-                                 text-gray-500 rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                                 text-gray-500 rounded-full text-[10px] font-bold uppercase tracking-wider">
                       {{ reto.empresa.sector }}
                     </span>
                     <span v-if="reto.empresa?.tamano"
                           class="flex items-center gap-1.5 px-3 py-1.5 bg-white/80 border border-gray-200
-                                 text-gray-500 rounded-lg text-[10px] font-bold uppercase tracking-wider">
+                                 text-gray-500 rounded-full text-[10px] font-bold uppercase tracking-wider">
                       {{ reto.empresa.tamano }}
                     </span>
                   </div>
@@ -211,14 +253,15 @@ function cerrar() {
               </div>
 
               <!-- Cuerpo de la ficha -->
-              <div class="px-6 py-8 md:px-12 md:py-10 space-y-10">
+              <div class="px-4 py-6 sm:px-6 sm:py-8 md:px-12 md:py-10 space-y-8 sm:space-y-10">
 
                 <!-- Datos recogidos de la empresa: diagnóstico crudo, tal cual lo aportó el
                      docente/empresa — es la materia prima que la IA resume debajo. -->
-                <div v-if="tieneDatosRecogidos"
-                     class="bg-gradient-to-br from-orange-50 to-white border-2 border-orange-200
+                <!-- Plegado por defecto: el texto crudo es largo y la atención debe ir al resumen. -->
+                <details v-if="tieneDatosRecogidos"
+                     class="group bg-gradient-to-br from-orange-50 to-white border-2 border-orange-200
                             rounded-2xl p-5 md:p-7 shadow-sm">
-                  <div class="flex items-center gap-3 mb-5">
+                  <summary class="flex flex-wrap sm:flex-nowrap items-center gap-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
                     <div class="w-9 h-9 rounded-xl bg-orange-500 flex items-center justify-center shrink-0 shadow-sm">
                       <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -226,46 +269,79 @@ function cerrar() {
                                  a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                       </svg>
                     </div>
-                    <div>
+                    <div class="min-w-0">
                       <h3 class="text-orange-700 font-black uppercase text-xs md:text-sm tracking-[0.15em]">
                         Datos recogidos de la empresa
                       </h3>
-                      <p class="text-[11px] text-orange-400 font-medium">Diagnóstico original, sin resumir por IA</p>
+                      <p class="text-[11px] text-orange-400 font-medium">
+                        <template v-if="reto.diagnostico_modificado_en_reto">Diagnóstico ajustado para este reto · no coincide con la ficha de la empresa</template>
+                    <template v-else>Diagnóstico original, sin resumir por IA</template><template v-if="reto.diagnostico_recogido_en"> · recogido el {{ formatearFecha(reto.diagnostico_recogido_en) }}</template>
+                      </p>
                     </div>
-                  </div>
+                    <!-- Pastilla "Ver más info"/"Ocultar info": el texto cambia según esté abierto -->
+                    <span class="ml-auto inline-flex items-center gap-1.5 min-h-[36px] px-4 rounded-full bg-white border border-orange-300
+                                 text-orange-600 text-xs font-bold whitespace-nowrap shrink-0 shadow-sm group-hover:bg-orange-50 transition-colors">
+                      <span class="group-open:hidden">Ver más info</span>
+                      <span class="hidden group-open:inline">Ocultar info</span>
+                      <svg class="w-3.5 h-3.5 transition-transform group-open:rotate-180" aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+                    </span>
+                  </summary>
+                  <div class="mt-5">
+                    <!-- La empresa cambió su diagnóstico después de crear el reto (solo lo recibe el personal) -->
+                    <div v-if="reto.diagnostico_desactualizado || reto.interes_desactualizado" role="note"
+                         class="mb-4 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                      <svg class="w-4 h-4 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                      <p class="text-xs text-amber-800 leading-relaxed">
+                        <strong>La empresa ha actualizado {{ reto.diagnostico_desactualizado && reto.interes_desactualizado ? 'su diagnóstico y lo que busca con esta familia' : reto.diagnostico_desactualizado ? 'su diagnóstico' : 'lo que busca con esta familia' }} después de crear este reto.</strong>
+                        Este reto se basa en la versión anterior, que es la que se muestra aquí.
+                      </p>
+                    </div>
                   <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    <!-- Para qué quería la empresa al alumnado de esta familia cuando se generó el reto -->
+                    <div v-if="reto.interes_familia" class="bg-white/70 rounded-xl p-4 border border-orange-100 md:col-span-2">
+                      <p class="text-[10px] font-black uppercase tracking-wider text-orange-500 mb-1">
+                        Qué busca la empresa con {{ reto.familia ? `«${reto.familia}»` : 'esta familia' }}
+                        <span v-if="reto.interes_modificado_en_reto" class="ml-1 normal-case tracking-normal font-bold text-amber-600">· ajustado para este reto</span>
+                      </p>
+                      <p class="text-sm text-gray-700 leading-relaxed break-words">{{ reto.interes_familia }}</p>
+                    </div>
                     <div v-if="reto.empresa.dia_a_normal" class="bg-white/70 rounded-xl p-4 border border-orange-100">
                       <p class="text-[10px] font-black uppercase tracking-wider text-orange-500 mb-1">Su día a día</p>
-                      <p class="text-sm text-gray-700 leading-relaxed">{{ reto.empresa.dia_a_normal }}</p>
+                      <p class="text-sm text-gray-700 leading-relaxed break-words">{{ reto.empresa.dia_a_normal }}</p>
                     </div>
                     <div v-if="reto.empresa.friccion_area || reto.empresa.friccion_problema" class="bg-white/70 rounded-xl p-4 border border-orange-100">
                       <p class="text-[10px] font-black uppercase tracking-wider text-orange-500 mb-1">Fricciones de la empresa</p>
-                      <p v-if="reto.empresa.friccion_area" class="text-sm text-gray-700 leading-relaxed">{{ reto.empresa.friccion_area }}</p>
-                      <p v-if="reto.empresa.friccion_problema" class="text-sm text-gray-700 leading-relaxed mt-1">{{ reto.empresa.friccion_problema }}</p>
+                      <p v-if="reto.empresa.friccion_area" class="text-sm text-gray-700 leading-relaxed break-words">{{ reto.empresa.friccion_area }}</p>
+                      <p v-if="reto.empresa.friccion_problema" class="text-sm text-gray-700 leading-relaxed mt-1 break-words">{{ reto.empresa.friccion_problema }}</p>
                     </div>
                     <div v-if="reto.empresa.consecuencias" class="bg-white/70 rounded-xl p-4 border border-orange-100">
                       <p class="text-[10px] font-black uppercase tracking-wider text-orange-500 mb-1">Consecuencias</p>
-                      <p class="text-sm text-gray-700 leading-relaxed">{{ reto.empresa.consecuencias }}</p>
+                      <p class="text-sm text-gray-700 leading-relaxed break-words">{{ reto.empresa.consecuencias }}</p>
                     </div>
                     <div v-if="reto.empresa.restricciones" class="bg-white/70 rounded-xl p-4 border border-orange-100">
                       <p class="text-[10px] font-black uppercase tracking-wider text-orange-500 mb-1">Restricciones</p>
-                      <p class="text-sm text-gray-700 leading-relaxed">{{ reto.empresa.restricciones }}</p>
+                      <p class="text-sm text-gray-700 leading-relaxed break-words">{{ reto.empresa.restricciones }}</p>
                     </div>
                     <div v-if="reto.empresa.lo_que_no_quieren" class="bg-white/70 rounded-xl p-4 border border-orange-100 md:col-span-2">
                       <p class="text-[10px] font-black uppercase tracking-wider text-orange-500 mb-1">Lo que no quieren</p>
-                      <p class="text-sm text-gray-700 leading-relaxed">{{ reto.empresa.lo_que_no_quieren }}</p>
+                      <p class="text-sm text-gray-700 leading-relaxed break-words">{{ reto.empresa.lo_que_no_quieren }}</p>
+                    </div>
+                    <div v-if="reto.empresa.expectativas_alumno" class="bg-white/70 rounded-xl p-4 border border-orange-100 md:col-span-2">
+                      <p class="text-[10px] font-black uppercase tracking-wider text-orange-500 mb-1">Qué esperan del alumnado</p>
+                      <p class="text-sm text-gray-700 leading-relaxed break-words">{{ reto.empresa.expectativas_alumno }}</p>
                     </div>
                   </div>
-                </div>
+                  </div>
+                </details>
 
                 <!-- Resumen de diagnóstico: la lectura de la IA a partir de los datos de arriba —
                      agrupa quién es/día a día, dificultades, pregunta del reto, qué necesitan y
                      limitaciones bajo un único título para que se lea como el "resumen" del
                      diagnóstico crudo, no como información nueva y distinta. -->
                 <div class="space-y-8">
-                  <h3 class="flex items-center gap-2 text-[#1F2937] font-bold uppercase text-xs
+                  <h3 class="flex items-center gap-2 text-azul-noche font-bold uppercase text-xs
                              tracking-widest border-b-2 border-gray-200 pb-2">
-                    <svg class="w-5 h-5 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg class="w-5 h-5 text-centros shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586
                                a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
@@ -276,7 +352,7 @@ function cerrar() {
                   <!-- Quién es / Día a día -->
                   <div class="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-10">
                     <div v-if="reto.quien_es">
-                      <h3 class="section-title text-[#00A859]">
+                      <h3 class="section-title text-centros">
                         <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0
@@ -286,17 +362,17 @@ function cerrar() {
                         </svg>
                         ¿Quién es {{ reto.empresa_nombre }}?
                       </h3>
-                      <p class="text-gray-600 text-sm leading-relaxed">{{ reto.quien_es }}</p>
+                      <p class="text-gray-600 text-sm leading-relaxed break-words">{{ reto.quien_es }}</p>
                     </div>
                     <div v-if="reto.dia_a_dia">
-                      <h3 class="section-title text-[#00A859]">
+                      <h3 class="section-title text-centros">
                         <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
                         </svg>
                         Su día a día
                       </h3>
-                      <p class="text-gray-600 text-sm leading-relaxed">{{ reto.dia_a_dia }}</p>
+                      <p class="text-gray-600 text-sm leading-relaxed break-words">{{ reto.dia_a_dia }}</p>
                     </div>
                   </div>
 
@@ -314,15 +390,15 @@ function cerrar() {
                       <li v-for="(item, i) in reto.dificultades" :key="i"
                           class="flex items-start gap-3 text-sm text-gray-700">
                         <span class="text-yellow-500 font-black mt-0.5 shrink-0">•</span>
-                        <span>{{ item }}</span>
+                        <span class="min-w-0 break-words">{{ item }}</span>
                       </li>
                     </ul>
                   </div>
 
                   <!-- Pregunta del reto -->
-                  <div class="bg-gradient-to-r from-gray-50 to-white border-l-4 border-[#00A859]
-                              p-6 rounded-r-2xl shadow-sm border-y border-r border-gray-100">
-                    <h3 class="text-[#00A859] font-black uppercase text-[10px] tracking-[0.2em] mb-3">
+                  <div class="bg-gradient-to-r from-gray-50 to-white border-l-4 border-centros
+                              p-4 sm:p-6 rounded-r-2xl shadow-sm border-y border-r border-gray-100">
+                    <h3 class="text-centros font-black uppercase text-[10px] tracking-[0.2em] mb-3">
                       Este reto consiste en responder a:
                     </h3>
                     <p class="text-lg md:text-xl font-bold text-[#1F2937] leading-snug">
@@ -333,7 +409,7 @@ function cerrar() {
                   <!-- Qué necesitan / Limitaciones -->
                   <div class="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-10">
                     <div v-if="reto.que_necesitan?.length">
-                      <h3 class="section-title text-[#00A859]">
+                      <h3 class="section-title text-centros">
                         <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                 d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0
@@ -344,8 +420,8 @@ function cerrar() {
                       <ul class="space-y-2 pl-1">
                         <li v-for="(item, i) in reto.que_necesitan" :key="i"
                             class="flex items-start gap-3 text-sm text-gray-700">
-                          <span class="text-[#00A859] font-black mt-0.5 shrink-0">•</span>
-                          <span>{{ item }}</span>
+                          <span class="text-centros font-black mt-0.5 shrink-0">•</span>
+                          <span class="min-w-0 break-words">{{ item }}</span>
                         </li>
                       </ul>
                     </div>
@@ -362,7 +438,7 @@ function cerrar() {
                         <li v-for="(item, i) in reto.limitaciones" :key="i"
                             class="flex items-start gap-3 text-sm text-gray-700">
                           <span class="text-red-500 font-black mt-0.5 shrink-0">•</span>
-                          <span>{{ item }}</span>
+                          <span class="min-w-0 break-words">{{ item }}</span>
                         </li>
                       </ul>
                     </div>
@@ -372,7 +448,7 @@ function cerrar() {
                 <!-- Prototipos / ODS -->
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-10">
                   <div v-if="reto.prototipos?.length">
-                    <h3 class="section-title text-[#00A859]">
+                    <h3 class="section-title text-centros">
                       <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                               d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
@@ -382,8 +458,8 @@ function cerrar() {
                     <ul class="space-y-2 pl-1">
                       <li v-for="(item, i) in reto.prototipos" :key="i"
                           class="flex items-start gap-3 text-sm text-gray-700">
-                        <span class="text-[#00A859] font-black mt-0.5 shrink-0">•</span>
-                        <span>{{ item }}</span>
+                        <span class="text-centros font-black mt-0.5 shrink-0">•</span>
+                        <span class="min-w-0 break-words">{{ item }}</span>
                       </li>
                     </ul>
                   </div>
@@ -426,9 +502,9 @@ function cerrar() {
 
                 <!-- RA / CE -->
                 <div v-if="reto.evaluacion_oficial?.length" class="pt-2">
-                  <h3 class="flex items-center gap-2 text-[#1F2937] font-bold uppercase text-xs
+                  <h3 class="flex items-center gap-2 text-azul-noche font-bold uppercase text-xs
                              tracking-widest border-b-2 border-gray-200 pb-2 mb-6">
-                    <svg class="w-5 h-5 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg class="w-5 h-5 text-centros shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5z"/>
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0
@@ -443,8 +519,8 @@ function cerrar() {
                       <p class="text-[10px] uppercase font-bold text-gray-400 mb-0.5">Módulo</p>
                       <p class="font-black text-[#1F2937] text-base mb-4">{{ evalObj.modulo }}</p>
                       <div class="mb-4">
-                        <p class="text-[10px] uppercase font-bold text-[#00A859] mb-1">Resultado de Aprendizaje</p>
-                        <p class="text-sm font-semibold text-gray-700 bg-gray-50 p-3 rounded-xl border border-gray-100">
+                        <p class="text-[10px] uppercase font-bold text-centros mb-1">Resultado de Aprendizaje</p>
+                        <p class="text-sm font-semibold text-gray-700 bg-gray-50 p-3 rounded-xl border border-gray-100 break-words">
                           {{ evalObj.ra }}
                         </p>
                       </div>
@@ -453,13 +529,13 @@ function cerrar() {
                         <ul class="space-y-1.5">
                           <li v-for="(ce, i) in evalObj.ce" :key="i"
                               class="text-sm text-gray-600 flex items-start gap-2">
-                            <span class="text-[#00A859] font-bold mt-0.5 shrink-0">✓</span>
-                            <span>{{ ce }}</span>
+                            <span class="text-centros font-bold mt-0.5 shrink-0">✓</span>
+                            <span class="min-w-0 break-words">{{ ce }}</span>
                           </li>
                         </ul>
                       </div>
                       <div v-if="evalObj.aplicacion" class="mt-3 pt-3 border-t border-gray-100">
-                        <p class="text-sm text-gray-500 italic">
+                        <p class="text-sm text-gray-500 italic break-words">
                           <span class="font-bold not-italic text-[#1F2937]">Aplicación: </span>
                           {{ evalObj.aplicacion }}
                         </p>
@@ -470,7 +546,7 @@ function cerrar() {
 
                 <!-- Variantes -->
                 <div v-if="reto.variantes?.length" class="pt-2">
-                  <h3 class="section-title text-[#00A859]">
+                  <h3 class="section-title text-centros">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                             d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/>
@@ -482,7 +558,7 @@ function cerrar() {
                         class="text-sm text-gray-700 bg-gray-50 border border-gray-200 p-4 rounded-xl">
                       <template v-if="varItem.includes(':')">
                         <strong class="text-[#1F2937] block mb-1">{{ varItem.split(':')[0] }}</strong>
-                        <span>{{ varItem.substring(varItem.indexOf(':') + 1).trim() }}</span>
+                        <span class="min-w-0 break-words">{{ varItem.substring(varItem.indexOf(':') + 1).trim() }}</span>
                       </template>
                       <template v-else>{{ varItem }}</template>
                     </li>
@@ -495,13 +571,13 @@ function cerrar() {
             <!-- GUÍA DOCENTE -->
             <div v-if="reto.tips_profesorado?.length"
                  class="relative mx-0 bg-gray-50 border-t border-gray-200
-                        px-6 py-8 md:px-12 md:py-10">
+                        px-4 py-6 sm:px-6 sm:py-8 md:px-12 md:py-10">
               <div class="absolute top-0 right-0 bg-white border-b border-l border-gray-200
                           text-gray-400 px-4 py-1.5 font-black text-[9px] tracking-widest uppercase
                           rounded-bl-2xl">
                 Uso Exclusivo Docente
               </div>
-              <h2 class="text-lg md:text-xl font-black text-[#1F2937] mb-1 mt-2 flex items-center gap-3">
+              <h2 class="text-lg md:text-xl font-black text-azul-noche mb-1 mt-2 flex items-center gap-3">
                 <svg class="w-5 h-5 text-yellow-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0
@@ -517,7 +593,7 @@ function cerrar() {
                      class="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm">
                   <div class="text-sm text-gray-700 leading-relaxed">
                     <template v-if="tip.includes(':')">
-                      <strong class="text-[#00A859] flex items-center gap-1.5 mb-2
+                      <strong class="text-centros flex items-center gap-1.5 mb-2
                                      uppercase tracking-wider text-[10px]">
                         <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -525,7 +601,7 @@ function cerrar() {
                         </svg>
                         {{ tip.split(':')[0] }}
                       </strong>
-                      <span class="block text-gray-600">
+                      <span class="block text-gray-600 break-words">
                         {{ tip.substring(tip.indexOf(':') + 1).trim() }}
                       </span>
                     </template>
@@ -538,10 +614,10 @@ function cerrar() {
             </div>
 
             <!-- Pie del modal -->
-            <div class="px-6 py-5 md:px-12 bg-white border-t border-gray-100
+            <div class="px-4 sm:px-6 py-5 md:px-12 bg-white border-t border-gray-100
                         flex items-center justify-end">
               <button @click="cerrar"
-                      class="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl
+                      class="inline-flex items-center gap-2 px-6 py-2.5 rounded-full
                              bg-[#1F2937] text-white text-xs font-black uppercase tracking-widest
                              hover:bg-black transition-all">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

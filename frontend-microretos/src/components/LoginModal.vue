@@ -12,7 +12,7 @@
                     d="M13 10V3L4 14h7v7l9-11h-7z"/>
                 </svg>
               </div>
-              <h2 class="modal-title">Acceso DuaLab</h2>
+              <h2 class="modal-title">Acceso DUALAB</h2>
               <p class="modal-subtitle">Introduce tus credenciales</p>
             </div>
 
@@ -103,83 +103,18 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
-import { useAuthStore } from '../stores/auth'
-import api, { primeCsrfCookie } from '../api.js'
+import { useLoginForm } from '../composables/useLoginForm.js'
 
-const authStore = useAuthStore()
-
-const props = defineProps({
+defineProps({
   modelValue: Boolean
 })
 
 const emit = defineEmits(['update:modelValue', 'login-success'])
 
-const form = reactive({ email: '', password: '' })
-const errors = reactive({ email: '', password: '' })
-const loginError = ref('')
-const isLoading = ref(false)
-const showPassword = ref(false)
-
-function validate() {
-  let valid = true
-  errors.email = ''
-  errors.password = ''
-
-  if (!form.email) {
-    errors.email = 'El correo es obligatorio'
-    valid = false
-  } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) {
-    errors.email = 'Formato de correo inválido'
-    valid = false
-  }
-
-  if (!form.password) {
-    errors.password = 'La contraseña es obligatoria'
-    valid = false
-  }
-
-  return valid
-}
-
-async function handleLogin() {
-  if (!validate()) return
-
-  isLoading.value = true
-  loginError.value = ''
-
-  try {
-    // Sanctum SPA stateful: la cookie XSRF-TOKEN tiene que existir antes de un POST.
-    await primeCsrfCookie()
-
-    const response = await api.post('/admin/login', {
-      email: form.email,
-      password: form.password
-    })
-
-    if (response.data.success) {
-      authStore.login(response.data)
-      emit('login-success', response.data)
-      emit('update:modelValue', false)
-      form.email = ''
-      form.password = ''
-    }
-  } catch (error) {
-    const status = error.response?.status
-    if (status === 401) {
-      loginError.value = 'Credenciales incorrectas. Inténtalo de nuevo.'
-    } else if (status === 403 || status === 429) {
-      loginError.value = error.response?.data?.message || 'No se ha podido iniciar sesión.'
-    } else if (status === 422) {
-      const errs = error.response?.data?.errors ?? {}
-      loginError.value = Object.values(errs)[0]?.[0] || 'Revisa el correo y la contraseña introducidos.'
-    } else {
-      loginError.value = 'Error de conexión. Inténtalo más tarde.'
-    }
-  } finally {
-    isLoading.value = false
-  }
-}
+const { form, errors, loginError, isLoading, showPassword, handleLogin } = useLoginForm((data) => {
+  emit('login-success', data)
+  emit('update:modelValue', false)
+})
 </script>
 
 <style scoped>
@@ -205,10 +140,16 @@ async function handleLogin() {
   padding: 3rem 2.5rem 2.5rem;
   width: 100%;
   max-width: 420px;
+  max-height: 90dvh;
+  overflow-y: auto;
   box-shadow:
-    0 0 0 1px rgba(0, 168, 89, 0.04),
+    0 0 0 1px rgba(48, 114, 170, 0.04),
     0 40px 80px rgba(0, 0, 0, 0.12),
-    0 0 60px rgba(0, 168, 89, 0.06);
+    0 0 60px rgba(48, 114, 170, 0.06);
+}
+
+@media (max-width: 640px) {
+  .modal-card { padding: 2rem 1.25rem 1.5rem; }
 }
 
 .modal-header {
@@ -222,10 +163,10 @@ async function handleLogin() {
   justify-content: center;
   width: 52px;
   height: 52px;
-  background: linear-gradient(135deg, #00A859, #99CC33);
+  background: linear-gradient(135deg, #3072AA, #6BA4D5);
   border-radius: 14px;
   margin-bottom: 1.25rem;
-  box-shadow: 0 8px 24px rgba(0, 168, 89, 0.3);
+  box-shadow: 0 8px 24px rgba(48, 114, 170, 0.3);
 }
 
 .modal-title {
@@ -281,8 +222,8 @@ async function handleLogin() {
 
 .field-input {
   width: 100%;
-  background: #F0FBF4;
-  border: 2px solid #BBE8D0;
+  background: #F2F7FB;
+  border: 2px solid #C7DCEC;
   border-radius: 12px;
   padding: 0.85rem 2.8rem 0.85rem 2.8rem;
   color: #1F2937;
@@ -295,9 +236,9 @@ async function handleLogin() {
 .field-input::placeholder { color: #9CA3AF; }
 
 .field-input:focus {
-  border-color: #00A859;
-  background: #E6F7EE;
-  box-shadow: 0 0 0 4px rgba(0, 168, 89, 0.12);
+  border-color: #3072AA;
+  background: #E5EFF7;
+  box-shadow: 0 0 0 4px rgba(48, 114, 170, 0.12);
 }
 
 .has-error .field-input {
@@ -307,15 +248,19 @@ async function handleLogin() {
 
 .toggle-password {
   position: absolute;
-  right: 0.9rem;
+  right: 0.4rem;
   background: none;
   border: none;
+  border-radius: 9999px;
   cursor: pointer;
   color: #9CA3AF;
-  padding: 0.2rem;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   transition: color 0.2s;
   display: flex;
   align-items: center;
+  justify-content: center;
 }
 
 .toggle-password:hover { color: #6B7280; }
@@ -344,9 +289,9 @@ async function handleLogin() {
   margin-top: 0.5rem;
   width: 100%;
   padding: 0.95rem;
-  background: linear-gradient(135deg, #00A859, #3db87a);
+  background: linear-gradient(135deg, #3072AA, #6BA4D5);
   border: none;
-  border-radius: 12px;
+  border-radius: 9999px;
   color: white;
   font-size: 0.8rem;
   font-weight: 900;
@@ -354,7 +299,7 @@ async function handleLogin() {
   text-transform: uppercase;
   cursor: pointer;
   transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
-  box-shadow: 0 4px 20px rgba(0, 168, 89, 0.3);
+  box-shadow: 0 4px 20px rgba(48, 114, 170, 0.3);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -363,7 +308,7 @@ async function handleLogin() {
 
 .btn-submit:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 8px 28px rgba(0, 168, 89, 0.4);
+  box-shadow: 0 8px 28px rgba(48, 114, 170, 0.4);
 }
 
 .btn-submit:active:not(:disabled) { transform: translateY(0); }
@@ -397,10 +342,10 @@ async function handleLogin() {
   right: 1.25rem;
   background: #f3f4f6;
   border: none;
-  border-radius: 8px;
+  border-radius: 9999px;
   color: #9CA3AF;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   cursor: pointer;
   transition: background 0.2s, color 0.2s;
   display: flex;

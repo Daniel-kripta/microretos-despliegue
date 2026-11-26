@@ -10,10 +10,16 @@ const apiURL = isLocal ? '/api' : 'https://api.dualab.es/api';
 // grupo de rutas 'web', no en 'api'. En local, vite.config.js proxya /sanctum igual que /api.
 const rootURL = isLocal ? '' : 'https://api.dualab.es';
 
+// La app comercial y Central tienen su propia sesión en el backend (SesionPorHerramienta.php)
+// y su propia cookie del token CSRF; la app DuaLab sigue con XSRF-TOKEN. __HERRAMIENTA__ lo
+// define vite.comercial.config.js / vite.central.config.js.
+const herramienta = typeof __HERRAMIENTA__ === 'undefined' ? null : __HERRAMIENTA__;
+
 const api = axios.create({
   baseURL: apiURL,
   withCredentials: true,
   withXSRFToken: true,
+  xsrfCookieName: herramienta ? `XSRF-TOKEN-${herramienta}` : 'XSRF-TOKEN',
   headers: {
     'Accept': 'application/json',
     'Content-Type': 'application/json'
@@ -26,7 +32,15 @@ const api = axios.create({
 // debe cerrar la sesión del usuario ni disparar una redirección a login.
 api.interceptors.response.use(
   response => response,
-  error => {
+  async error => {
+    // 419 = la cookie XSRF-TOKEN ya no corresponde a la sesión. Pasa cuando otra app de
+    // *.dualab.es con Sanctum (la gestión web de dualab.es) planta su propia XSRF-TOKEN en el
+    // mismo dominio. Se pide una nueva y se repite la petición una sola vez.
+    if (error.response?.status === 419 && error.config && !error.config._reintentoCsrf) {
+      error.config._reintentoCsrf = true;
+      await primeCsrfCookie();
+      return api(error.config);
+    }
     if (error.response?.status === 401 && !error.config?.skipAuthRedirect) {
       // Notificar a los componentes que escuchen este evento
       window.dispatchEvent(new CustomEvent('auth:token-expired'));

@@ -1,13 +1,30 @@
 <!-- Ruta: /retos (name: biblioteca). Antes vivía en /biblioteca — ver router/index.js. -->
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue';
+import { formatearFecha } from '../utils/fechas.js';
+import CabeceraSeccion from '../components/CabeceraSeccion.vue'
+import AvisoEmpresaBorrada from '../components/AvisoEmpresaBorrada.vue';
+import MiniaturaReto from '../components/MiniaturaReto.vue'
+import { iconoFiltro } from '../config/iconosFiltro.js';
+import { usePaginacion } from '../composables/usePaginacion.js'
+import { esRetoCruzado } from '../config/sectoresEmpresa.js'
+import { modulosDeReto, modulosDisponibles as listarModulos } from '../utils/modulos.js'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { useAuthStore } from '../stores/auth'
 import api from '../api.js';
 import LoginModal from '../components/LoginModal.vue';
 import EliminarMicrorretoModal from '../components/EliminarMicrorretoModal.vue';
+import { useCursoAcademicoStore, cursoDeReto, etiquetaCurso } from '../stores/cursoAcademico.js';
+import SelectorCurso from '../components/SelectorCurso.vue';
+import FiltrosPanel from '../components/FiltrosPanel.vue';
+import FiltroSegmentado from '../components/FiltroSegmentado.vue';
+import FiltroSelect from '../components/FiltroSelect.vue';
+import { useFiltroEmpresaSector } from '../composables/useFiltroEmpresaSector.js';
+import TituloResultados from '../components/TituloResultados.vue';
+import FamiliaModulos from '../components/FamiliaModulos.vue';
 import { usePdfExport } from '../composables/usePdfExport.js';
-import { iconoFamilia, colorFamilia } from '../utils/familiaIconos.js';
+import { useRoleTheme } from '../composables/useRoleTheme.js';
+import { usePanelFiltros } from '../composables/usePanelFiltros.js';
 
 const router = useRouter();
 const route = useRoute();
@@ -18,10 +35,15 @@ const cargando = ref(true);
 const familias = ref([]);
 const showLogin = ref(false);
 const accionPendiente = ref(null);
-const familiaSeleccionada = ref(null);
+// Explorador de retos (diseño biblioteca_retos.png): la familia es un filtro más (varias a la
+// vez) del panel «Filtros rápidos». Va en la URL (?familia=…, se puede repetir).
+const filtroFamilias = ref([]);
+
 
 const authStore = useAuthStore();
+const { theme } = useRoleTheme();
 const { descargarPDF, descargarPDFGrupo } = usePdfExport();
+
 
 // Estado de generación de PDF de grupo (evita dobles clics y muestra feedback)
 const generandoPDFGrupo = ref(false);
@@ -29,13 +51,39 @@ const generandoPDFGrupo = ref(false);
 // ── FILTROS ──────────────────────────────────────────────
 const filtroCentro      = ref('');
 const filtroCiclo       = ref('');
+const filtroModulo      = ref('');        // nombre de módulo (dentro de familia + ciclo)
 const filtroNivel       = ref('');        // '' | 'Bajo' | 'Medio' | 'Alto'
 const filtroCurso       = ref('');        // '' | '1' | '2'
-const filtroInfoSimulada = ref('');       // '' | 'real' | 'simulada'  → es_simulado
-const filtroEmpresaTipo  = ref('');       // '' | 'real' | 'ficticia'  → empresa_es_simulada
+// Tipo de reto (varios a la vez): 'real' (empresa real) · 'ficticia' (empresa ficticia) ·
+// 'simulada' (información simulada con IA). Se cumplen si el reto encaja en alguno.
+const filtroTipos       = ref([]);
+const filtroEmpresa     = ref('');
+const filtroSector      = ref('');        // sector de la empresa del reto
+const orden             = ref('cruzados');   // 'cruzados' | 'recientes' | 'antiguos' | 'titulo'
+// «Filtros rápidos»: abierto en escritorio, plegado en móvil; se reajusta al cambiar el ancho
+const panelFiltrosAbierto = usePanelFiltros();
+// Columnas de tarjetas según el ancho que deja el panel lateral (abierto en lg+ le quita ~18rem).
+const columnasRetos = computed(() => panelFiltrosAbierto.value
+  ? 'md:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3'
+  : 'md:grid-cols-2 xl:grid-cols-3');
+const familiasExpandidas  = ref(false);
+const errorCarga        = ref('');
+const menuReto          = ref(null);         // id del reto con el menú «⋯» abierto
+// Cierre de los menús de las tarjetas al pulsar fuera: un overlay fixed no sirve, porque queda
+// por encima del menú (el contenedor de la vista es su propio contexto de apilamiento) y se
+// tragaba los clics en las opciones. Cuenta como «dentro» todo lo marcado con data-menu-raiz.
+function cerrarMenusAlPulsarFuera(e) {
+  if (!e.target.closest?.('[data-menu-raiz]')) { menuReto.value = null }
+}
+watch(() => !!menuReto.value, (abierto) => {
+  document[abierto ? 'addEventListener' : 'removeEventListener']('click', cerrarMenusAlPulsarFuera, true)
+});
+onUnmounted(() => document.removeEventListener('click', cerrarMenusAlPulsarFuera, true));
+
+const VISTA_KEY = 'dualab_retos_vista';
+const vista = ref((() => { try { return localStorage.getItem(VISTA_KEY) || 'cuadricula' } catch { return 'cuadricula' } })());
+watch(vista, v => { try { localStorage.setItem(VISTA_KEY, v) } catch { /* sin almacenamiento */ } });
 const busqueda          = ref('');
-const empresaFiltroAbierto = ref(false);
-const infoFiltroAbierto    = ref(false);
 
 // Docentes y admins docentes solo pueden ver su propio centro
 const esCentroRestringido = computed(() => authStore.isDocente || authStore.isAdmin);
@@ -43,138 +91,194 @@ const esCentroRestringido = computed(() => authStore.isDocente || authStore.isAd
 const centrosDisponibles = computed(() => centros.value.map(c => c.nombre).sort());
 
 // Total de microretos del centro seleccionado (para mostrar en el botón de descarga)
+// Curso académico compartido (store): conteos, filtros, listado y PDFs salen de esta lista.
+// Las bajas siguen trabajando sobre `microretos` (la lista completa).
+const cursoStore      = useCursoAcademicoStore();
+// Los de la recámara (retos a medida aún sin publicar) solo llegan al superadmin: ocultos salvo que los pida
+const verRecamara = ref(false);
+const enRecamara = computed(() => microretos.value.filter(r => r.en_recamara && cursoStore.coincide(cursoDeReto(r))).length);
+const microretosCurso = computed(() => microretos.value.filter(r => (verRecamara.value || !r.en_recamara) && cursoStore.coincide(cursoDeReto(r))));
+const cursosConDatos  = computed(() => [...new Set(microretos.value.map(cursoDeReto))]);
+
 const countCentroActual = computed(() => {
-  if (!filtroCentro.value) return microretos.value.length;
-  return microretos.value.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value).length;
+  if (!filtroCentro.value) return microretosCurso.value.length;
+  return microretosCurso.value.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value).length;
 });
 
+// Base para opciones y conteos: curso académico + centro (+ familias elegidas).
+const baseCentro = computed(() => filtroCentro.value
+  ? microretosCurso.value.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value)
+  : microretosCurso.value);
+const baseFamilias = computed(() => filtroFamilias.value.length
+  ? baseCentro.value.filter(m => filtroFamilias.value.includes(m.familia))
+  : baseCentro.value);
+
 const ciclosDisponibles = computed(() => {
-  let d = microretos.value.filter(m => m.familia === familiaSeleccionada.value);
-  if (filtroCentro.value) d = d.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value);
+  let d = baseFamilias.value;
   return [...new Set(d.map(m => m.ciclo).filter(Boolean))].sort();
 });
 
+// Módulos de los retos de la familia (y del ciclo, si hay uno elegido)
+const modulosDisponibles = computed(() => {
+  let d = baseFamilias.value;
+  if (filtroCiclo.value)  d = d.filter(m => m.ciclo === filtroCiclo.value);
+  return listarModulos(d, modulosDeReto);
+});
+// El módulo depende del ciclo: al cambiar de ciclo se quita
+watch(filtroCiclo, () => { filtroModulo.value = ''; });
+
 const cursosDisponibles = computed(() => {
-  let d = microretos.value.filter(m => m.familia === familiaSeleccionada.value);
-  if (filtroCentro.value) d = d.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value);
+  let d = baseFamilias.value;
   // 'ambos_cursos' se muestra aparte (botón fijo), no mezclado en el orden numérico 1º/2º.
   return [...new Set(d.map(m => m.curso).filter(v => v != null && v !== 'ambos_cursos'))].sort((a, b) => a - b);
 });
 
 // Un reto "ambos cursos" vale para 1º y 2º a la vez (cruza módulos de los dos años).
 const hayRetosAmbosCursos = computed(() => {
-  let d = microretos.value.filter(m => m.familia === familiaSeleccionada.value);
-  if (filtroCentro.value) d = d.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value);
+  let d = baseFamilias.value;
   return d.some(m => m.curso === 'ambos_cursos');
 });
 
 // Conteo por nivel dentro de familia+centro (sin aplicar otros filtros activos)
 const conteoNiveles = computed(() => {
   const r = { Bajo: 0, Medio: 0, Alto: 0, total: 0 };
-  if (!familiaSeleccionada.value) return r;
-  let d = microretos.value.filter(m => m.familia === familiaSeleccionada.value);
-  if (filtroCentro.value) d = d.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value);
+  let d = baseFamilias.value;
   d.forEach(m => { r.total++; if (m.nivel_grupo && m.nivel_grupo in r) r[m.nivel_grupo]++; });
   return r;
 });
 
-// Conteo por tipo de empresa (real vs ficticia)
-const conteoEmpresaTipo = computed(() => {
-  const r = { real: 0, ficticia: 0, total: 0 };
-  if (!familiaSeleccionada.value) return r;
-  let d = microretos.value.filter(m => m.familia === familiaSeleccionada.value);
-  if (filtroCentro.value) d = d.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value);
-  d.forEach(m => {
-    r.total++;
-    if (m.empresa_es_simulada) r.ficticia++; else r.real++;
-  });
-  return r;
-});
-
-// Conteo por tipo de información (real vs simulada con IA)
-const conteoInfoSimulada = computed(() => {
-  const r = { real: 0, simulada: 0, total: 0 };
-  if (!familiaSeleccionada.value) return r;
-  let d = microretos.value.filter(m => m.familia === familiaSeleccionada.value);
-  if (filtroCentro.value) d = d.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value);
-  d.forEach(m => {
-    r.total++;
-    if (m.es_simulado) r.simulada++; else r.real++;
-  });
-  return r;
-});
-
-const microretosFiltrados = computed(() => {
+// Todos los filtros salvo el curso académico (que filtra microretosCurso)
+function cumpleFiltros(reto) {
   const q = busqueda.value.toLowerCase().trim();
-  return microretos.value.filter(reto => {
-    const centro = reto.centro_educativo || reto.centro;
-    const infoOk = filtroInfoSimulada.value === ''
-      ? true
-      : filtroInfoSimulada.value === 'simulada'
-        ? reto.es_simulado === true
-        : reto.es_simulado !== true;
-    const empresaOk = filtroEmpresaTipo.value === ''
-      ? true
-      : filtroEmpresaTipo.value === 'ficticia'
-        ? reto.empresa_es_simulada === true
-        : reto.empresa_es_simulada !== true;
-    return (
-      reto.familia === familiaSeleccionada.value &&
-      (filtroCentro.value === '' || centro === filtroCentro.value) &&
-      (filtroCiclo.value  === '' || reto.ciclo === filtroCiclo.value) &&
-      (filtroNivel.value  === '' || reto.nivel_grupo === filtroNivel.value) &&
-      (filtroCurso.value  === ''
-        || String(reto.curso) === filtroCurso.value
-        // 2º puede con todo: su propio curso, el de 1º (ya cursado) y los transversales.
-        || (filtroCurso.value === '2' && (reto.curso === 'ambos_cursos' || String(reto.curso) === '1'))
-      ) &&
-      infoOk && empresaOk &&
-      (!q || [reto.titulo, reto.pregunta_reto, reto.empresa_nombre, reto.ciclo]
-        .some(f => f && f.toLowerCase().includes(q)))
-    );
+  const centro = reto.centro_educativo || reto.centro;
+  const t = filtroTipos.value;
+  const tipoOk = !t.length
+    || (t.includes('real') && reto.empresa_es_simulada !== true)
+    || (t.includes('ficticia') && reto.empresa_es_simulada === true)
+    || (t.includes('simulada') && reto.es_simulado === true);
+  return (
+    (!filtroFamilias.value.length || filtroFamilias.value.includes(reto.familia)) &&
+    cumpleEmpresaSector(reto) &&
+    (filtroCentro.value === '' || centro === filtroCentro.value) &&
+    (filtroCiclo.value  === '' || reto.ciclo === filtroCiclo.value) &&
+    (filtroModulo.value === '' || modulosDeReto(reto).includes(filtroModulo.value)) &&
+    (filtroNivel.value  === '' || reto.nivel_grupo === filtroNivel.value) &&
+    (filtroCurso.value  === ''
+      || String(reto.curso) === filtroCurso.value
+      // 2º puede con todo: su propio curso, el de 1º (ya cursado) y los transversales.
+      || (filtroCurso.value === '2' && (reto.curso === 'ambos_cursos' || String(reto.curso) === '1'))
+    ) &&
+    tipoOk &&
+    (!q || [reto.titulo, reto.pregunta_reto, reto.empresa_nombre, reto.ciclo]
+      .some(f => f && f.toLowerCase().includes(q)))
+  );
+}
+const microretosFiltrados = computed(() => microretosCurso.value.filter(cumpleFiltros));
+
+// Retos que cumplen los filtros en otros cursos académicos: el curso se elige aparte y, si
+// no, un filtro (p. ej. una familia) parece no tener más empresas de las que hay en el curso visto.
+const enOtrosCursos = computed(() => {
+  if (cursoStore.curso === null || !hayFiltrosActivos.value) return [];
+  const conteo = {};
+  microretos.value.forEach(r => {
+    const y = cursoDeReto(r);
+    if (y != null && !cursoStore.coincide(y) && cumpleFiltros(r)) conteo[y] = (conteo[y] || 0) + 1;
   });
+  return Object.entries(conteo).map(([y, n]) => ({ curso: Number(y), n })).sort((a, b) => b.curso - a.curso);
 });
 
 const hayFiltrosActivos = computed(() =>
-  !!(filtroCiclo.value || filtroNivel.value || filtroCurso.value || filtroInfoSimulada.value || filtroEmpresaTipo.value || busqueda.value)
+  !!(filtroFamilias.value.length || filtroTipos.value.length || filtroEmpresa.value || filtroSector.value
+     || filtroCiclo.value || filtroModulo.value || filtroNivel.value || filtroCurso.value || busqueda.value)
 );
+
+// Opciones de los filtros del panel (FiltroSegmentado admite count por opción)
+const opcionesDificultad = computed(() => [
+  { value: '',      label: 'Todos', count: conteoNiveles.value.total },
+  { value: 'Bajo',  label: 'Bajo',  count: conteoNiveles.value.Bajo },
+  { value: 'Medio', label: 'Medio', count: conteoNiveles.value.Medio },
+  { value: 'Alto',  label: 'Alto',  count: conteoNiveles.value.Alto },
+]);
+// Dificultad como desplegable (diseño): la opción vacía la pone FiltroSelect («Todas»).
+const opcionesDificultadSelect = computed(() => opcionesDificultad.value
+  .filter(o => o.value).map(o => ({ value: o.value, label: `${o.label} (${o.count})` })));
+const opcionesCurso = computed(() => [
+  { value: '', label: 'Todos' },
+  ...cursosDisponibles.value.map(c => ({ value: String(c), label: `${c}º` })),
+  ...(hayRetosAmbosCursos.value ? [{ value: 'ambos_cursos', label: 'Ambos' }] : []),
+]);
 
 const conteoPorFamilia = computed(() => {
   const mapa = {};
-  const d = filtroCentro.value
-    ? microretos.value.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value)
-    : microretos.value;
-  d.forEach(m => { if (m.familia) mapa[m.familia] = (mapa[m.familia] || 0) + 1; });
+  baseCentro.value.forEach(m => { if (m.familia) mapa[m.familia] = (mapa[m.familia] || 0) + 1; });
   return mapa;
 });
-
-// Familias con mayor peso institucional: siempre arriba, mismo tamaño que el resto
-const FAMILIAS_DESTACADAS = ['Comercio y Marketing', 'Administración y Gestión', 'Informática y Comunicaciones'];
-// Nº de familias adicionales visibles antes de agruparlas tras "Ver más familias"
-const FAMILIAS_VISIBLES_EXTRA = 8;
-
-const familiasResto = computed(() =>
-  familias.value.filter(f => !FAMILIAS_DESTACADAS.includes(f.nombre))
-);
-
-const familiasVisibles = computed(() => {
-  const destacadas = FAMILIAS_DESTACADAS
-    .map(nombre => familias.value.find(f => f.nombre === nombre))
-    .filter(Boolean);
-  return [...destacadas, ...familiasResto.value.slice(0, FAMILIAS_VISIBLES_EXTRA)];
+// Panel «Filtros rápidos»: familias con retos (más numerosas primero), 6 visibles + «Ver todas».
+const familiasPanel = computed(() =>
+  Object.entries(conteoPorFamilia.value).map(([nombre, n]) => ({ nombre, n })).sort((a, b) => b.n - a.n || a.nombre.localeCompare(b.nombre)));
+const familiasPanelVisibles = computed(() => {
+  const todas = familiasPanel.value;
+  if (familiasExpandidas.value || todas.length <= 6) return todas;
+  // Las marcadas siempre a la vista aunque no estén entre las 6 primeras.
+  return [...todas.slice(0, 6), ...todas.slice(6).filter(f => filtroFamilias.value.includes(f.nombre))];
 });
+const conteoTipos = computed(() => ({
+  real:     baseFamilias.value.filter(m => m.empresa_es_simulada !== true).length,
+  ficticia: baseFamilias.value.filter(m => m.empresa_es_simulada === true).length,
+  simulada: baseFamilias.value.filter(m => m.es_simulado === true).length,
+}));
+// Empresa y Sector (desplegables juntos en la barra): cada uno se acota por el otro. La familia
+// del reto no tiene por qué ser la del sector (una empresa de turismo puede pedir retos de
+// Comercio y Marketing), por eso el sector es un filtro aparte.
+const { empresasDisponibles, sectoresDisponibles, cumpleEmpresaSector } = useFiltroEmpresaSector(baseFamilias, {
+  empresa: filtroEmpresa, sector: filtroSector,
+  sectorDe: r => r.empresa_sector_actual ?? r.empresa?.sector,
+});
+// (En la plantilla los refs llegan desenvueltos: por eso una función por filtro.)
+const alternar = (lista, valor) => lista.includes(valor) ? lista.filter(v => v !== valor) : [...lista, valor];
+function alternarFamilia(nombre) { filtroFamilias.value = alternar(filtroFamilias.value, nombre); }
+function alternarTipo(tipo) { filtroTipos.value = alternar(filtroTipos.value, tipo); }
 
-const familiasOcultas = computed(() => familiasResto.value.slice(FAMILIAS_VISIBLES_EXTRA));
+// Orden y paginación (12 por página, ver POR_PAGINA)
+const fechaReto = r => new Date(r.creado_en || r.created_at || 0).getTime();
+const retosOrdenados = computed(() => {
+  const lista = [...microretosFiltrados.value];
+  if (orden.value === 'titulo') return lista.sort((a, b) => (a.titulo || '').localeCompare(b.titulo || ''));
+  // Primero las empresas de otro sector que piden esa familia (lo menos obvio, lo que más
+  // enseña); luego las del propio sector y al final las de sector desconocido. Dentro, recientes.
+  if (orden.value === 'cruzados') {
+    const rango = r => ({ true: 0, false: 1, null: 2 })[String(esRetoCruzado(r.empresa_sector_actual ?? r.empresa?.sector, r.familia))];
+    return lista.sort((a, b) => rango(a) - rango(b) || fechaReto(b) - fechaReto(a));
+  }
+  return lista.sort((a, b) => orden.value === 'antiguos' ? fechaReto(a) - fechaReto(b) : fechaReto(b) - fechaReto(a));
+});
+// 12 por página: se reparte entero en 1, 2, 3 o 4 columnas (con 9, a 2 columnas quedaba
+// una tarjeta sola en la última fila y un hueco a su derecha)
+const POR_PAGINA = 12;
+const { pagina, totalPaginas, itemsPagina: retosPagina } = usePaginacion(retosOrdenados, POR_PAGINA);
+watch([microretosFiltrados, orden], () => { pagina.value = 0; });
+const paginasVisibles = computed(() => {
+  const n = totalPaginas.value, a = pagina.value;
+  const ini = Math.max(0, Math.min(a - 2, n - 5)), fin = Math.min(n, ini + 5);
+  return Array.from({ length: fin - ini }, (_, i) => ini + i);
+});
+function irAPagina(i) {
+  pagina.value = i;
+  document.getElementById('resultados-retos')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 
+
+// Dificultad del reto con colores de los tokens (texto ≥ 4,5:1 sobre su fondo)
 const nivelClase = (nivel) => ({
-  Bajo:  'bg-[#00A859]/10 border-[#00A859]/20 text-[#00A859]',
-  Medio: 'bg-[#F59E0B]/10 border-[#F59E0B]/20 text-[#F59E0B]',
-  Alto:  'bg-[#D64545]/10 border-[#D64545]/20 text-[#D64545]',
-}[nivel] || 'bg-gray-100 border-gray-200 text-gray-500');
+  Bajo:  'bg-empresas/10 text-empresas-dark',
+  Medio: 'bg-amber-50 text-amber-800',
+  Alto:  'bg-alumnos/15 text-alumnos-dark',
+}[nivel] || 'bg-gray-100 text-gray-700');
 
 // ── CICLO DE VIDA ─────────────────────────────────────────
 const cargarDatos = async () => {
   cargando.value = true;
+  errorCarga.value = '';
   try {
     const [resMicroretos, resFamilias, resCentros] = await Promise.all([
       api.get('/microretos'),
@@ -206,6 +310,7 @@ const cargarDatos = async () => {
       showLogin.value = true;
     } else {
       console.error('Error al cargar la biblioteca:', error);
+      errorCarga.value = 'No se pudieron cargar los retos. Comprueba la conexión e inténtalo de nuevo.';
     }
   } finally {
     cargando.value = false;
@@ -221,39 +326,55 @@ onMounted(async () => {
     return;
   }
   await cargarDatos();
-  if (route.query.familia) {
-    seleccionarFamilia(route.query.familia);
-    router.replace({ name: 'biblioteca' });
+});
+
+// Niveles elegidos para el título de los resultados (TituloResultados): una sola familia →
+// ciclo → módulo. Quitar un nivel quita también los que dependen de él.
+const nivelesTitulo = computed(() => {
+  const niveles = [];
+  if (filtroFamilias.value.length === 1) {
+    niveles.push({ etiqueta: 'Familia profesional', valor: filtroFamilias.value[0],
+      subir: () => { filtroCiclo.value = ''; filtroModulo.value = ''; },
+      quitar: () => { filtroFamilias.value = []; filtroCiclo.value = ''; filtroModulo.value = ''; } });
   }
+  if (filtroCiclo.value) {
+    niveles.push({ etiqueta: 'Ciclo formativo', valor: filtroCiclo.value,
+      subir: () => { filtroModulo.value = ''; }, quitar: () => { filtroCiclo.value = ''; } });
+  }
+  if (filtroModulo.value) {
+    niveles.push({ etiqueta: 'Módulo', valor: filtroModulo.value, subir: () => {}, quitar: () => { filtroModulo.value = ''; } });
+  }
+  return niveles;
+});
+const familiaEnTitulo = computed(() => nivelesTitulo.value[0]?.etiqueta === 'Familia profesional');
+
+// Las familias marcadas viven en la URL (?familia=…, se puede repetir): un enlace con
+// ?familia=X (p. ej. desde fuera) abre el explorador ya filtrado.
+watch(() => route.query.familia, (familia) => {
+  const lista = familia ? (Array.isArray(familia) ? familia : [familia]).map(String) : [];
+  if (lista.join('|') !== filtroFamilias.value.join('|')) filtroFamilias.value = lista;
+}, { immediate: true });
+watch(filtroFamilias, (lista) => {
+  const actual = route.query.familia ? [].concat(route.query.familia).map(String) : [];
+  if (lista.join('|') === actual.join('|')) return;
+  router.replace({ query: { ...route.query, familia: lista.length ? lista : undefined } });
 });
 
 // ── ACCIONES ──────────────────────────────────────────────
 const resetFiltrosDetalle = () => {
+  filtroFamilias.value = [];
+  filtroTipos.value = [];
+  filtroEmpresa.value = '';
+  filtroSector.value = '';
   filtroCiclo.value = '';
+  filtroModulo.value = '';
   filtroNivel.value = '';
   filtroCurso.value = '';
-  filtroInfoSimulada.value = '';
-  filtroEmpresaTipo.value = '';
   busqueda.value = '';
 };
 
 const seleccionarCentro = (centro) => {
   filtroCentro.value = centro;
-  familiaSeleccionada.value = null;
-  resetFiltrosDetalle();
-};
-
-const verMasFamilias = () => {
-  router.push({ name: 'mas-familias', query: filtroCentro.value ? { centro: filtroCentro.value } : {} });
-};
-
-const seleccionarFamilia = (nombre) => {
-  familiaSeleccionada.value = nombre;
-  resetFiltrosDetalle();
-};
-
-const volverAFamilias = () => {
-  familiaSeleccionada.value = null;
   resetFiltrosDetalle();
 };
 
@@ -295,24 +416,11 @@ const _lanzarGeneracion = (fn) => {
 // Nivel 1: descarga TODOS los microretos del centro seleccionado
 const descargarGrupoCentro = () => {
   const retos = filtroCentro.value
-    ? microretos.value.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value)
-    : microretos.value;
+    ? microretosCurso.value.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value)
+    : microretosCurso.value;
   if (!retos.length) return;
   _lanzarGeneracion(() => {
     const titulo    = filtroCentro.value || 'Todos los centros';
-    const subtitulo = `${retos.length} micro-reto${retos.length !== 1 ? 's' : ''}`;
-    descargarPDFGrupo(retos, titulo, subtitulo);
-  });
-};
-
-// Nivel 2: descarga todos los microretos de una familia en el centro seleccionado
-const descargarGrupoFamilia = (familiaName) => {
-  let retos = microretos.value.filter(m => m.familia === familiaName);
-  if (filtroCentro.value)
-    retos = retos.filter(m => (m.centro_educativo || m.centro) === filtroCentro.value);
-  if (!retos.length) return;
-  _lanzarGeneracion(() => {
-    const titulo    = filtroCentro.value ? `${familiaName} – ${filtroCentro.value}` : familiaName;
     const subtitulo = `${retos.length} micro-reto${retos.length !== 1 ? 's' : ''}`;
     descargarPDFGrupo(retos, titulo, subtitulo);
   });
@@ -323,14 +431,15 @@ const descargarGrupoFiltrado = () => {
   const retos = microretosFiltrados.value;
   if (!retos.length) return;
   _lanzarGeneracion(() => {
-    let titulo = familiaSeleccionada.value || 'Retos';
+    let titulo = filtroFamilias.value.length ? filtroFamilias.value.join(', ') : 'Retos';
     if (filtroCentro.value) titulo += ` – ${filtroCentro.value}`;
     const partes = [];
     if (filtroCiclo.value)        partes.push(`Ciclo: ${filtroCiclo.value}`);
     if (filtroNivel.value)        partes.push(`Nivel: ${filtroNivel.value}`);
     if (filtroCurso.value)        partes.push(`${filtroCurso.value}º curso`);
-    if (filtroEmpresaTipo.value)  partes.push(`Empresa ${filtroEmpresaTipo.value}`);
-    if (filtroInfoSimulada.value) partes.push(`Info ${filtroInfoSimulada.value}`);
+    if (filtroTipos.value.length) partes.push(`Tipo: ${filtroTipos.value.join(', ')}`);
+    if (filtroEmpresa.value)      partes.push(`Empresa: ${filtroEmpresa.value}`);
+    if (filtroSector.value)       partes.push(`Sector de la empresa: ${filtroSector.value}`);
     const subtitulo = `${retos.length} micro-reto${retos.length !== 1 ? 's' : ''}${partes.length ? ' · ' + partes.join(' · ') : ''}`;
     descargarPDFGrupo(retos, titulo, subtitulo);
   });
@@ -350,6 +459,26 @@ const abrirModalEliminar = (reto) => {
 };
 
 const cancelarEliminar = () => { modalVisible.value = false; retoAEliminar.value = null; };
+
+// Escaparate de la web pública (dualab.es/info.dualab.es) — opt-in manual por reto, solo
+// superadmin (MicroretoPolicy::publicarEscaparate).
+const togglePublicoEnCurso = ref(new Set());
+const toggleVisiblePublico = async (reto) => {
+  if (togglePublicoEnCurso.value.has(reto.id)) return;
+  togglePublicoEnCurso.value.add(reto.id);
+  try {
+    const { data } = await api.patch(`/microretos/${reto.id}/visible-publico`);
+    reto.visible_publico = data.visible_publico;
+    mostrarSnack(
+      data.visible_publico ? 'Reto publicado en la web pública.' : 'Reto oculto de la web pública.',
+      'ok',
+    );
+  } catch {
+    mostrarSnack('No se pudo actualizar la visibilidad pública.', 'error');
+  } finally {
+    togglePublicoEnCurso.value.delete(reto.id);
+  }
+};
 
 const onRetoEliminado = ({ id, titulo }) => {
   microretos.value = microretos.value.filter(m => m.id !== id);
@@ -372,837 +501,390 @@ function mostrarSnack(mensaje, tipo = 'ok', accion = null) {
 </script>
 
 <template>
-  <div class="min-h-screen p-4 md:p-12 font-sans text-[#1F2937] relative overflow-hidden pt-12 md:pt-12">
+  <!-- Explorador de retos (diseño biblioteca_retos.png): cabecera + filtros + panel «Filtros
+       rápidos» a la izquierda + resultados en cuadrícula o lista con paginación. -->
+  <div class="relative min-h-screen pt-16 font-sans text-azul-noche" @keydown.esc="menuReto = null">
+    <div class="relative z-10 mx-auto max-w-[90rem] space-y-5 px-4 pb-10 pt-5 sm:px-6 lg:px-8">
 
-    <div
-      class="absolute top-[-10%] left-1/2 transform -translate-x-1/2 w-[800px] h-[500px] bg-[#99CC33] blur-[120px] rounded-full pointer-events-none transition-opacity duration-1000"
-      :class="isLoaded ? 'opacity-10' : 'opacity-0'">
-    </div>
-
-    <div class="max-w-7xl mx-auto relative z-10">
-
-      <!-- HEADER -->
-      <header class="mb-10 text-center flex flex-col items-center">
-        <div
-          class="inline-flex items-center mb-8 bg-[#1F2937] py-3 sm:py-4 pr-6 sm:pr-10 pl-4 sm:pl-6 rounded-[3rem] shadow-lg border border-[#333333] transition-all duration-1000 ease-out transform"
-          :class="isLoaded ? 'translate-y-0 opacity-100' : '-translate-y-10 opacity-0'">
-          <img src="../assets/logo.png" alt="Logo DuaLab"
-            class="h-20 sm:h-32 md:h-40 w-auto object-contain -mr-3 sm:-mr-4 md:-mr-8 relative z-10" />
-          <span class="font-black text-2xl sm:text-4xl md:text-5xl tracking-tighter uppercase text-white italic relative z-20">
-            Dua<span class="text-[#00A859]">Lab</span>
-            <span class="text-[#99CC33] not-italic text-sm sm:text-lg md:text-xl ml-1">Library</span>
-          </span>
+      <CabeceraSeccion data-tour="bib-cabecera" plano cinta halos antetitulo="Retos" titulo="Explorador de" destacado="Retos" color="text-centros"
+                       :volver="authStore.isEmpresa ? null : '/seccion/retos-proyectos'"
+                       subtitulo="Encuentra, filtra y reutiliza los desafíos generados por la Inteligencia Artificial para tus alumnos.">
+        <div class="flex flex-wrap items-start gap-2">
+          <!-- Tarjeta «Retos con IA» (solo escritorio): lleva al generador -->
+          <RouterLink v-if="!authStore.isEmpresa" :to="{ name: 'microretos' }"
+                      class="hidden max-w-xs items-center gap-3 rounded-2xl border border-borde bg-white/90 p-4 shadow-sm transition-colors hover:border-rol/40 xl:flex">
+            <span class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rol/10 text-rol-fuerte" aria-hidden="true">
+              <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
+            </span>
+            <span class="min-w-0">
+              <span class="block text-sm font-bold text-azul-noche">Retos con IA</span>
+              <span class="block text-xs leading-snug text-texto-secundario">Genera retos adaptados a tus ciclos, módulos y objetivos.</span>
+            </span>
+          </RouterLink>
+          <template v-if="authStore.isSuperAdmin">
+            <!-- Descarga de todos los retos del centro: solo superadmin -->
+            <button v-if="filtroCentro && countCentroActual > 0 && !cargando" type="button"
+                    @click="descargarGrupoCentro" :disabled="generandoPDFGrupo"
+                    class="accion-secundaria disabled:cursor-wait disabled:opacity-60"
+                    :title="`Descargar todos los retos de ${filtroCentro}`">
+              <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2"/></svg>
+              {{ generandoPDFGrupo ? 'Generando…' : `PDF centro (${countCentroActual})` }}
+            </button>
+            <!-- Papelera de «Base de datos»: solo superadmin -->
+            <button type="button" @click="router.push({ name: 'papelera' })" class="accion-icono"
+                    title="Ver elementos eliminados en la papelera" aria-label="Papelera">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            </button>
+          </template>
         </div>
-        <h1
-          class="text-4xl md:text-5xl font-black tracking-tight mb-4 text-[#121212] transition-all duration-1000 delay-150 ease-out transform"
-          :class="isLoaded ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'">
-          Explorador de
-          <span class="text-transparent bg-clip-text bg-gradient-to-r from-[#00A859] to-[#99CC33]">Retos</span>
-        </h1>
-        <p class="text-gray-500 max-w-2xl mx-auto text-base md:text-lg leading-relaxed font-medium transition-all duration-1000 delay-300 ease-out transform"
-          :class="isLoaded ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'">
-          Encuentra, filtra y reutiliza los desafíos generados por la Inteligencia Artificial para tus alumnos.
-        </p>
-      </header>
+      </CabeceraSeccion>
 
-      <!-- CARGANDO -->
-      <div v-if="cargando" class="flex flex-col items-center justify-center py-20">
-        <svg class="animate-spin w-12 h-12 text-[#00A859] mb-4" viewBox="0 0 24 24">
-          <path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z" />
-        </svg>
-        <p class="text-[#00A859] font-black tracking-widest uppercase text-sm animate-pulse">Cargando Biblioteca...</p>
+      <!-- Filtros principales (FiltrosPanel común): buscador + curso + Generar · fila de filtros -->
+      <FiltrosPanel data-tour="bib-filtros" separadores v-model:busqueda="busqueda" placeholder="Buscar por título, empresa, ciclo o pregunta del reto…">
+        <template #curso>
+          <div class="flex flex-wrap items-center gap-2">
+            <SelectorCurso permitir-todos :cursos-con-datos="cursosConDatos" />
+            <RouterLink v-if="!authStore.isEmpresa" data-tour="bib-generar" :to="{ name: 'microretos' }" class="accion-principal">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
+              Generar con IA
+            </RouterLink>
+            <!-- «Más filtros» en la fila del buscador (en la de filtros, con 4 o más, bajaba solo a otra fila) -->
+            <button type="button" data-tour="bib-mas-filtros" @click="panelFiltrosAbierto = !panelFiltrosAbierto" :aria-expanded="panelFiltrosAbierto"
+                    aria-controls="filtros-rapidos" :title="panelFiltrosAbierto ? 'Ocultar los filtros rápidos' : 'Mostrar los filtros rápidos'"
+                    :aria-label="'Más filtros'"
+                    class="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-full border px-5 text-sm font-semibold transition-colors"
+                    :class="panelFiltrosAbierto ? 'border-rol-fuerte/30 bg-rol/10 text-rol-fuerte' : 'border-rol-fuerte/30 bg-white text-rol-fuerte hover:bg-rol-fuerte/5'">
+                    <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
+                    <span>Más filtros</span>
+                    </button>
+          </div>
+        </template>
+
+        <!-- Centro: superadmin y empresa eligen; docente / admin docente ven solo el suyo -->
+        <FiltroSelect v-if="!esCentroRestringido" label="Centro educativo"
+          :model-value="filtroCentro" @update:model-value="seleccionarCentro"
+          :opciones="centrosDisponibles" todos="Todos los centros"
+          title="Filtra retos del centro de formación profesional seleccionado." />
+        <div v-else class="flex w-full min-w-0 max-w-full items-end gap-2.5 sm:w-auto">
+          <span aria-hidden="true" class="mb-px inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rol/10 text-rol-fuerte">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path :d="iconoFiltro('Centro educativo')" /></svg>
+          </span>
+          <div class="min-w-0 flex-1 sm:flex-none">
+            <p class="mb-1 text-xs font-semibold text-azul-noche">Centro educativo</p>
+            <p class="flex h-9 w-full min-w-0 items-center rounded-xl sm:w-48 lg:w-40 border border-borde bg-gray-50 px-3 text-sm font-semibold text-azul-noche">
+              <span class="truncate">{{ authStore.userCentroNombre || filtroCentro }}</span>
+            </p>
+          </div>
+        </div>
+
+        <FiltroSelect label="Ciclo formativo" v-model="filtroCiclo" :opciones="ciclosDisponibles" todos="Todos los ciclos"
+          title="Filtra por ciclo formativo al que está orientado el reto." />
+        <FiltroSelect v-if="modulosDisponibles.length" label="Módulo" v-model="filtroModulo" :opciones="modulosDisponibles" todos="Todos los módulos"
+          title="Filtra por módulo profesional. Los retos de varios módulos aparecen en cada uno." />
+        <FiltroSegmentado label="Nivel" v-model="filtroCurso" :opciones="opcionesCurso"
+          title="Nivel del ciclo: 1º (primer año) o 2º (segundo año). Ambos cursos: vale para 1º y 2º." />
+        <FiltroSelect label="Dificultad" v-model="filtroNivel" :opciones="opcionesDificultadSelect" todos="Todas"
+          title="Dificultad del reto: Bajo (introductorio), Medio (aplicado), Alto (avanzado)." />
+        <FiltroSelect label="Empresa" v-model="filtroEmpresa" :opciones="empresasDisponibles" todos="Todas las empresas"
+          title="Filtra por la empresa que plantea el reto." />
+        <FiltroSelect label="Sector de la empresa" v-model="filtroSector" :opciones="sectoresDisponibles" todos="Todos los sectores"
+          title="Filtra por el sector de la empresa. Puede no coincidir con la familia del reto." />
+      </FiltrosPanel>
+
+      <!-- Error de carga -->
+      <div v-if="errorCarga && !cargando" class="flex flex-col items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 sm:flex-row sm:items-center" role="alert">
+        <p class="min-w-0 flex-1 text-sm font-medium text-red-700">{{ errorCarga }}</p>
+        <button type="button" @click="cargarDatos" class="inline-flex h-10 items-center rounded-full bg-white px-4 text-sm font-semibold text-red-700 ring-1 ring-red-200 hover:bg-red-100">Reintentar</button>
       </div>
 
-      <template v-else>
+      <div class="flex flex-col gap-5 lg:flex-row lg:items-start">
 
-        <!-- ========================================== -->
-        <!-- SELECTOR DE CENTRO (visible en ambas capas) -->
-        <!-- ========================================== -->
-        <div
-          class="mb-8 transition-all duration-1000 delay-400 ease-out transform"
-          :class="isLoaded ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'">
-          <div class="bg-white/90 backdrop-blur-md rounded-[2rem] p-5 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.04)]">
-            <div class="flex flex-col sm:flex-row sm:items-center gap-4">
-              <label class="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 flex items-center gap-2 whitespace-nowrap">
-                <svg class="w-3.5 h-3.5 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                </svg>
-                Centro Educativo
-                <span class="tooltip-wrap">
-                  <svg class="w-3 h-3 text-gray-400 cursor-help flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4m0-4h.01"/></svg>
-                  <span class="tooltip-text">Filtra retos del centro de formación profesional seleccionado.</span>
-                </span>
-              </label>
-              <div class="flex flex-wrap items-center gap-2 flex-1">
-                <!-- Superadmin y empresa: selector completo de centros -->
-                <template v-if="!esCentroRestringido">
-                  <button
-                    v-for="centro in centrosDisponibles"
-                    :key="centro"
-                    @click="seleccionarCentro(centro)"
-                    class="px-4 py-2 rounded-full text-xs font-black uppercase tracking-widest transition-all duration-200 border"
-                    :class="filtroCentro === centro
-                      ? 'bg-[#00A859] text-white border-[#00A859] shadow-md'
-                      : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-[#00A859] hover:text-[#00A859]'">
-                    {{ centro }}
-                  </button>
-                </template>
-                <!-- Docente / Admin docente: solo badge de su propio centro -->
-                <span v-else
-                  class="px-4 py-2 rounded-full text-xs font-black uppercase tracking-widest bg-[#00A859] text-white border border-[#00A859] shadow-md">
-                  {{ authStore.userCentroNombre || filtroCentro }}
-                </span>
-
-                <!-- Descarga de todos los microretos del centro: solo superadmin -->
-                <button
-                  v-if="authStore.isSuperAdmin && filtroCentro && countCentroActual > 0 && !cargando"
-                  @click="descargarGrupoCentro"
-                  :disabled="generandoPDFGrupo"
-                  class="flex items-center gap-1.5 px-3.5 py-2 rounded-full text-xs font-black uppercase tracking-widest border transition-all duration-200"
-                  :class="generandoPDFGrupo
-                    ? 'border-gray-200 text-gray-400 bg-gray-50 cursor-wait'
-                    : 'border-[#00A859]/40 text-[#00A859] hover:bg-[#00A859] hover:text-white hover:border-[#00A859]'"
-                  :title="`Descargar todos los retos de ${filtroCentro}`">
-                  <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  {{ generandoPDFGrupo ? 'Generando...' : `PDF centro (${countCentroActual})` }}
-                </button>
-
-                <!-- Acceso directo a la papelera — la papelera de "Base de datos" es solo superadmin;
-                     admin gestiona su propia papelera de cuentas desde /usuarios, no desde aquí. -->
-                <button
-                  v-if="authStore.isSuperAdmin"
-                  @click="router.push({ name: 'papelera' })"
-                  class="flex items-center gap-1.5 px-3.5 py-2 rounded-full text-xs font-black uppercase tracking-widest border border-gray-200 text-gray-500 bg-gray-50 hover:border-amber-300 hover:text-amber-600 hover:bg-amber-50 transition-all duration-200"
-                  title="Ver elementos eliminados en la papelera">
-                  <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                  </svg>
-                  Papelera
-                </button>
-              </div>
-            </div>
+        <!-- ═══ Filtros rápidos (panel lateral; en < lg se abre con «Más filtros») ═══ -->
+        <aside id="filtros-rapidos" data-tour="bib-filtros-rapidos" aria-label="Filtros rápidos"
+               class="w-full shrink-0 rounded-2xl border border-borde bg-white p-4 shadow-sm lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:w-64 xl:w-72"
+               :class="panelFiltrosAbierto ? 'block' : 'hidden'">
+          <div class="mb-3 flex items-center justify-between gap-2">
+            <h2 class="text-base font-bold text-azul-noche">Filtros rápidos</h2>
+            <button v-if="hayFiltrosActivos" type="button" @click="limpiarFiltros"
+                    class="inline-flex h-9 items-center rounded-full px-3 text-sm font-semibold text-rol-fuerte hover:bg-rol/10">Limpiar</button>
           </div>
-        </div>
 
-        <!-- ================================ -->
-        <!-- CAPA 1: TARJETAS DE FAMILIAS     -->
-        <!-- ================================ -->
-        <Transition name="slide-up" mode="out-in">
-          <div v-if="!familiaSeleccionada" key="familias"
-            class="transition-all duration-1000 delay-500 ease-out transform"
-            :class="isLoaded ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'">
-
-            <p class="text-center text-gray-400 text-sm font-bold uppercase tracking-widest mb-8">
-              Selecciona una familia profesional para explorar sus micro-retos
-            </p>
-
-            <div v-if="familiasVisibles.length > 0" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-              <div
-                v-for="familia in familiasVisibles"
-                :key="familia.nombre"
-                @click="seleccionarFamilia(familia.nombre)"
-                @keydown.enter.prevent="seleccionarFamilia(familia.nombre)"
-                @keydown.space.prevent="seleccionarFamilia(familia.nombre)"
-                role="button"
-                tabindex="0"
-                class="group relative rounded-[1.5rem] overflow-hidden border border-gray-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 bg-white text-left focus:outline-none focus:ring-2 focus:ring-[#00A859]/40 cursor-pointer">
-
-                <div :class="['relative h-44 overflow-hidden bg-gradient-to-br flex items-center justify-center', colorFamilia(familia.nombre).bg]">
-                  <svg :class="['w-16 h-16 group-hover:scale-110 transition-transform duration-300', colorFamilia(familia.nombre).icon]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path v-for="d in iconoFamilia(familia.nombre)" :key="d"
-                      stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" :d="d" />
-                  </svg>
-                  <div
-                    v-if="conteoPorFamilia[familia.nombre]"
-                    class="absolute top-3 right-3 bg-[#00A859] text-white text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full shadow">
-                    {{ conteoPorFamilia[familia.nombre] }} reto{{ conteoPorFamilia[familia.nombre] !== 1 ? 's' : '' }}
-                  </div>
-                </div>
-
-                <div class="p-5 flex items-end justify-between gap-2">
-                  <div class="min-w-0">
-                    <h3 class="font-black text-[#1F2937] text-base leading-tight mb-3 group-hover:text-[#00A859] transition-colors line-clamp-2">
-                      {{ familia.nombre }}
-                    </h3>
-                    <div class="flex items-center gap-2 text-[#00A859] text-xs font-black uppercase tracking-widest">
-                      <span>Explorar</span>
-                      <svg class="w-3.5 h-3.5 transform group-hover:translate-x-1 transition-transform"
-                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                      </svg>
-                    </div>
-                  </div>
-
-                  <!-- Botón de descarga PDF de toda la familia (nivel 2) -->
-                  <button
-                    @click.stop="descargarGrupoFamilia(familia.nombre)"
-                    :disabled="generandoPDFGrupo || !conteoPorFamilia[familia.nombre]"
-                    class="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center border transition-all duration-200"
-                    :class="generandoPDFGrupo
-                      ? 'border-gray-100 text-gray-300 bg-gray-50 cursor-wait'
-                      : 'border-gray-200 text-gray-400 bg-white hover:border-[#00A859] hover:bg-[#00A859]/5 hover:text-[#00A859]'"
-                    :title="`Descargar PDF de ${familia.nombre} (${conteoPorFamilia[familia.nombre] || 0} retos)`">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-
-              <!-- Tarjeta "ver más familias": agrupa el resto, homogénea con las demás -->
-              <button
-                v-if="familiasOcultas.length > 0"
-                @click="verMasFamilias"
-                class="group relative rounded-[1.5rem] overflow-hidden border-2 border-dashed border-gray-200 hover:border-[#00A859]/40 transition-all duration-300 bg-gray-50 hover:bg-white text-left focus:outline-none focus:ring-2 focus:ring-[#00A859]/40 flex flex-col items-center justify-center gap-3 min-h-[15.5rem] p-6 text-center">
-                <div class="w-14 h-14 rounded-full bg-white border border-gray-200 group-hover:border-[#00A859]/40 flex items-center justify-center shadow-sm">
-                  <svg class="w-6 h-6 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                  </svg>
-                </div>
-                <div>
-                  <h3 class="font-black text-[#1F2937] text-base leading-tight">Ver más familias</h3>
-                  <p class="text-gray-400 text-xs font-bold uppercase tracking-widest mt-1">
-                    +{{ familiasOcultas.length }} familia{{ familiasOcultas.length !== 1 ? 's' : '' }}
-                  </p>
-                </div>
-              </button>
-            </div>
-
-            <div v-else class="text-center py-20 bg-white rounded-[2rem] border border-dashed border-gray-300 shadow-sm">
-              <div class="w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-5 border border-gray-100 shadow-inner">
-                <svg class="w-10 h-10 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-              <h3 class="text-[#1F2937] font-black text-2xl mb-2">Sin micro-retos para este centro</h3>
-              <p class="text-gray-500 text-sm max-w-md mx-auto">Este centro todavía no tiene micro-retos generados.</p>
-            </div>
-
+          <div class="border-t border-borde pt-3" role="group" aria-labelledby="titulo-filtro-familia">
+            <p id="titulo-filtro-familia" class="mb-1.5 text-sm font-semibold text-azul-noche">Familia profesional</p>
+            <label v-for="f in familiasPanelVisibles" :key="f.nombre"
+                   class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="checkbox" :checked="filtroFamilias.includes(f.nombre)" @change="alternarFamilia(f.nombre)"
+                     class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="min-w-0 flex-1 truncate text-sm text-azul-noche" :title="f.nombre">{{ f.nombre }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ f.n }}</span>
+            </label>
+            <p v-if="!familiasPanel.length && !cargando" class="px-1 py-1 text-sm text-texto-secundario">Sin retos en este curso.</p>
+            <button v-if="familiasPanel.length > 6" type="button" @click="familiasExpandidas = !familiasExpandidas"
+                    class="mt-1 inline-flex h-9 items-center rounded-full px-1 text-sm font-semibold text-rol-fuerte hover:underline">
+              {{ familiasExpandidas ? 'Ver menos' : `Ver todas (${familiasPanel.length})` }}
+            </button>
           </div>
-        </Transition>
 
-        <!-- ================================ -->
-        <!-- CAPA 2: MICRORETOS DE LA FAMILIA -->
-        <!-- ================================ -->
-        <Transition name="slide-up" mode="out-in">
-          <div v-if="familiaSeleccionada" key="microretos">
-
-            <!-- Breadcrumb -->
-            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
-              <div class="flex items-center gap-4">
-                <button @click="volverAFamilias"
-                  class="flex items-center gap-2 text-xs font-black uppercase tracking-widest text-gray-500 hover:text-[#00A859] transition-colors group">
-                  <svg class="w-4 h-4 transform group-hover:-translate-x-1 transition-transform"
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                  </svg>
-                  Todas las familias
-                </button>
-                <span class="text-gray-200">|</span>
-                <h2 class="text-xl font-black text-[#1F2937]">{{ familiaSeleccionada }}</h2>
-              </div>
-              <div class="flex items-center gap-3">
-                <span class="text-xs text-gray-400 font-bold">
-                  {{ microretosFiltrados.length }} reto{{ microretosFiltrados.length !== 1 ? 's' : '' }}
-                </span>
-
-                <!-- Botón de descarga del grupo filtrado actual (nivel 3) -->
-                <button
-                  v-if="microretosFiltrados.length > 0"
-                  @click="descargarGrupoFiltrado"
-                  :disabled="generandoPDFGrupo"
-                  class="flex items-center gap-1.5 px-4 py-2 rounded-full text-xs font-black uppercase tracking-widest border transition-all duration-200"
-                  :class="generandoPDFGrupo
-                    ? 'border-gray-200 text-gray-400 bg-gray-50 cursor-wait'
-                    : 'border-[#00A859]/30 text-[#00A859] hover:bg-[#00A859] hover:text-white hover:border-[#00A859]'"
-                  :title="hayFiltrosActivos ? 'Descargar retos con los filtros actuales' : 'Descargar todos los retos de esta familia'">
-                  <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  {{ generandoPDFGrupo ? 'Generando...' : `Descargar ${microretosFiltrados.length}` }}
-                </button>
-              </div>
-            </div>
-
-            <!-- ── CARDS DE DIFICULTAD ───────────────────────────── -->
-            <p class="text-[9px] font-black uppercase tracking-[0.2em] text-gray-400 mb-3 px-1 flex items-center gap-1.5">
-              Nivel del reto
-              <span class="tooltip-wrap">
-                <svg class="w-3 h-3 text-gray-400 cursor-help flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4m0-4h.01"/></svg>
-                <span class="tooltip-text">Dificultad del reto: Bajo (básico/introductorio), Medio (aplicado), Alto (avanzado).</span>
+          <div class="mt-3 border-t border-borde pt-3" role="group" aria-labelledby="titulo-filtro-tipo">
+            <p id="titulo-filtro-tipo" class="mb-1.5 text-sm font-semibold text-azul-noche">Tipo de reto</p>
+            <label v-for="t in [
+                     { v: 'real', label: 'Empresa real', n: conteoTipos.real, cls: 'bg-empresas/10 text-empresas-dark', icono: 'M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6M9 10h.01M15 10h.01' },
+                     { v: 'ficticia', label: 'Empresa ficticia', n: conteoTipos.ficticia, cls: 'bg-amber-50 text-amber-800', icono: 'M3 21h18M5 21V7l7-4 7 4v14M9.5 10.5a2.5 2.5 0 114 2c-.8.5-1.5 1-1.5 2M12 18h.01' },
+                     { v: 'simulada', label: 'Información simulada', n: conteoTipos.simulada, cls: 'bg-gray-100 text-azul-noche', icono: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+                   ]" :key="t.v" class="flex cursor-pointer items-center gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input type="checkbox" :checked="filtroTipos.includes(t.v)" @change="alternarTipo(t.v)"
+                     class="h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" :class="t.cls" aria-hidden="true">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" :d="t.icono"/></svg>
               </span>
-            </p>
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+              <span class="min-w-0 flex-1 text-sm text-azul-noche">{{ t.label }}</span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ t.n }}</span>
+            </label>
+          </div>
 
-              <!-- TODOS -->
-              <button
-                @click="filtroNivel = ''"
-                class="relative p-4 rounded-2xl border-2 text-left transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-gray-400/30"
-                :class="filtroNivel === ''
-                  ? 'bg-[#1F2937] border-[#1F2937] shadow-lg scale-[1.02]'
-                  : 'bg-white border-gray-100 hover:border-gray-300 hover:shadow-md'">
-                <div class="flex items-end justify-between mb-3">
-                  <div class="flex items-end gap-0.5">
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:8px"
-                      :class="filtroNivel === '' ? 'bg-white' : 'bg-gray-300'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:12px"
-                      :class="filtroNivel === '' ? 'bg-white' : 'bg-gray-300'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:16px"
-                      :class="filtroNivel === '' ? 'bg-white' : 'bg-gray-300'"></span>
-                  </div>
-                  <span class="text-2xl font-black leading-none"
-                    :class="filtroNivel === '' ? 'text-white' : 'text-gray-400'">
-                    {{ conteoNiveles.total }}
-                  </span>
-                </div>
-                <p class="text-[10px] font-black uppercase tracking-[0.18em] leading-none"
-                  :class="filtroNivel === '' ? 'text-white' : 'text-gray-600'">Todos</p>
-                <p class="text-[9px] mt-1 leading-none"
-                  :class="filtroNivel === '' ? 'text-white/60' : 'text-gray-400'">los niveles</p>
+          <!-- Superadmin: retos a medida aún en la recámara (no los ve ningún centro) -->
+          <div v-if="authStore.isSuperAdmin && enRecamara" class="mt-3 border-t border-borde pt-3">
+            <label class="flex cursor-pointer items-start gap-2.5 rounded-lg px-1 py-2 hover:bg-gray-50">
+              <input v-model="verRecamara" type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 accent-rol-fuerte" />
+              <span class="min-w-0 flex-1 text-sm text-azul-noche">
+                Mostrar los de la recámara
+                <span class="block text-xs text-texto-secundario">Retos a medida aún sin publicar: no los ve ningún centro.</span>
+              </span>
+              <span class="shrink-0 text-xs text-texto-secundario">{{ enRecamara }}</span>
+            </label>
+          </div>
+
+        </aside>
+
+        <!-- ═══ Resultados ═══ -->
+        <section id="resultados-retos" class="min-w-0 flex-1 scroll-mt-24" aria-label="Retos">
+          <div data-tour="bib-resultados" class="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <TituloResultados :niveles="nivelesTitulo" :cargando="cargando">
+              <template v-if="cargando">Cargando retos…</template>
+              <template v-else>{{ microretosFiltrados.length }} {{ microretosFiltrados.length === 1 ? 'reto encontrado' : 'retos encontrados' }}</template>
+            </TituloResultados>
+            <!-- Chips de filtros activos -->
+            <div v-if="(filtroFamilias.length && !familiaEnTitulo) || filtroTipos.length" class="flex w-full flex-wrap gap-1.5 sm:order-last">
+              <!-- Una sola familia ya está en el título de los resultados: sin chip repetido -->
+              <button v-for="f in (familiaEnTitulo ? [] : filtroFamilias)" :key="'f-' + f" type="button" @click="alternarFamilia(f)"
+                      class="inline-flex h-9 max-w-full items-center gap-1.5 rounded-full bg-rol/10 px-3 text-xs font-semibold text-rol-fuerte hover:bg-rol/15"
+                      :aria-label="`Quitar filtro ${f}`">
+                <span class="truncate">{{ f }}</span><span aria-hidden="true">✕</span>
               </button>
-
-              <!-- BAJO -->
-              <button
-                @click="filtroNivel = filtroNivel === 'Bajo' ? '' : 'Bajo'"
-                class="relative p-4 rounded-2xl border-2 text-left transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#00A859]/30"
-                :class="filtroNivel === 'Bajo'
-                  ? 'bg-[#00A859] border-[#00A859] shadow-lg scale-[1.02]'
-                  : 'bg-white border-gray-100 hover:border-[#00A859]/50 hover:shadow-md'">
-                <div class="flex items-end justify-between mb-3">
-                  <div class="flex items-end gap-0.5">
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:8px"
-                      :class="filtroNivel === 'Bajo' ? 'bg-white' : 'bg-[#00A859]'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:12px"
-                      :class="filtroNivel === 'Bajo' ? 'bg-white/30' : 'bg-gray-200'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:16px"
-                      :class="filtroNivel === 'Bajo' ? 'bg-white/30' : 'bg-gray-200'"></span>
-                  </div>
-                  <span class="text-2xl font-black leading-none"
-                    :class="filtroNivel === 'Bajo' ? 'text-white' : 'text-[#00A859]'">
-                    {{ conteoNiveles.Bajo }}
-                  </span>
-                </div>
-                <p class="text-[10px] font-black uppercase tracking-[0.18em] leading-none"
-                  :class="filtroNivel === 'Bajo' ? 'text-white' : 'text-gray-600'">Bajo</p>
-                <p class="text-[9px] mt-1 leading-none"
-                  :class="filtroNivel === 'Bajo' ? 'text-white/60' : 'text-gray-400'">accesible</p>
+              <button v-for="t in filtroTipos" :key="'t-' + t" type="button" @click="alternarTipo(t)"
+                      class="inline-flex h-9 items-center gap-1.5 rounded-full bg-gray-100 px-3 text-xs font-semibold text-azul-noche hover:bg-gray-200"
+                      :aria-label="`Quitar filtro ${t}`">
+                {{ { real: 'Empresa real', ficticia: 'Empresa ficticia', simulada: 'Información simulada' }[t] }}<span aria-hidden="true">✕</span>
               </button>
-
-              <!-- MEDIO -->
-              <button
-                @click="filtroNivel = filtroNivel === 'Medio' ? '' : 'Medio'"
-                class="relative p-4 rounded-2xl border-2 text-left transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#F59E0B]/30"
-                :class="filtroNivel === 'Medio'
-                  ? 'bg-[#F59E0B] border-[#F59E0B] shadow-lg scale-[1.02]'
-                  : 'bg-white border-gray-100 hover:border-[#F59E0B]/50 hover:shadow-md'">
-                <div class="flex items-end justify-between mb-3">
-                  <div class="flex items-end gap-0.5">
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:8px"
-                      :class="filtroNivel === 'Medio' ? 'bg-white' : 'bg-[#F59E0B]'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:12px"
-                      :class="filtroNivel === 'Medio' ? 'bg-white' : 'bg-[#F59E0B]'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:16px"
-                      :class="filtroNivel === 'Medio' ? 'bg-white/30' : 'bg-gray-200'"></span>
-                  </div>
-                  <span class="text-2xl font-black leading-none"
-                    :class="filtroNivel === 'Medio' ? 'text-white' : 'text-[#F59E0B]'">
-                    {{ conteoNiveles.Medio }}
-                  </span>
-                </div>
-                <p class="text-[10px] font-black uppercase tracking-[0.18em] leading-none"
-                  :class="filtroNivel === 'Medio' ? 'text-white' : 'text-gray-600'">Medio</p>
-                <p class="text-[9px] mt-1 leading-none"
-                  :class="filtroNivel === 'Medio' ? 'text-white/60' : 'text-gray-400'">retador</p>
-              </button>
-
-              <!-- ALTO -->
-              <button
-                @click="filtroNivel = filtroNivel === 'Alto' ? '' : 'Alto'"
-                class="relative p-4 rounded-2xl border-2 text-left transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-[#D64545]/30"
-                :class="filtroNivel === 'Alto'
-                  ? 'bg-[#D64545] border-[#D64545] shadow-lg scale-[1.02]'
-                  : 'bg-white border-gray-100 hover:border-[#D64545]/50 hover:shadow-md'">
-                <div class="flex items-end justify-between mb-3">
-                  <div class="flex items-end gap-0.5">
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:8px"
-                      :class="filtroNivel === 'Alto' ? 'bg-white' : 'bg-[#D64545]'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:12px"
-                      :class="filtroNivel === 'Alto' ? 'bg-white' : 'bg-[#D64545]'"></span>
-                    <span class="w-1.5 rounded-sm inline-block transition-colors" style="height:16px"
-                      :class="filtroNivel === 'Alto' ? 'bg-white' : 'bg-[#D64545]'"></span>
-                  </div>
-                  <span class="text-2xl font-black leading-none"
-                    :class="filtroNivel === 'Alto' ? 'text-white' : 'text-[#D64545]'">
-                    {{ conteoNiveles.Alto }}
-                  </span>
-                </div>
-                <p class="text-[10px] font-black uppercase tracking-[0.18em] leading-none"
-                  :class="filtroNivel === 'Alto' ? 'text-white' : 'text-gray-600'">Alto</p>
-                <p class="text-[9px] mt-1 leading-none"
-                  :class="filtroNivel === 'Alto' ? 'text-white/60' : 'text-gray-400'">exigente</p>
-              </button>
-
             </div>
-
-            <!-- ── CARDS TIPO EMPRESA + TIPO INFORMACIÓN ─────────── -->
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-
-              <!-- GRUPO: EMPRESA -->
-              <div class="bg-[#00A859]/10 rounded-2xl border border-[#00A859]/30">
-                <button @click="empresaFiltroAbierto = !empresaFiltroAbierto"
-                  class="w-full flex items-center justify-between px-3 py-2.5 hover:bg-[#00A859]/15 transition-colors">
-                  <div class="flex items-center gap-2">
-                    <p class="text-[9px] font-black uppercase tracking-[0.2em] text-[#00A859]">Empresa</p>
-                    <span class="tooltip-wrap" @click.stop>
-                      <svg class="w-3 h-3 text-[#00A859]/60 cursor-help flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4m0-4h.01"/></svg>
-                      <span class="tooltip-text">Empresa real (existente) o ficticia (inventada para la práctica docente).</span>
-                    </span>
-                    <span v-if="!empresaFiltroAbierto && filtroEmpresaTipo"
-                      class="text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full"
-                      :class="filtroEmpresaTipo === 'ficticia' ? 'bg-[#F59E0B]/10 text-[#F59E0B]' : 'bg-[#00A859]/10 text-[#00A859]'">
-                      {{ filtroEmpresaTipo === 'ficticia' ? 'Ficticia' : 'Real' }}
-                    </span>
-                  </div>
-                  <svg class="w-3.5 h-3.5 text-[#00A859]/70 transition-transform duration-200"
-                    :class="empresaFiltroAbierto ? 'rotate-180' : ''"
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
-                  </svg>
-                </button>
-                <Transition name="filter-collapse">
-                  <div v-if="empresaFiltroAbierto" class="px-3 pb-3">
-                <div class="grid grid-cols-3 gap-2">
-
-                  <button
-                    @click="filtroEmpresaTipo = ''"
-                    class="relative p-3 rounded-xl border-2 text-left transition-all duration-200 focus:outline-none"
-                    :class="filtroEmpresaTipo === ''
-                      ? 'bg-[#1F2937] border-[#1F2937] shadow-md scale-[1.02]'
-                      : 'bg-white border-gray-100 hover:border-gray-300 hover:shadow-sm'">
-                    <div class="flex items-end justify-between mb-1.5">
-                      <svg class="w-4 h-4" :class="filtroEmpresaTipo === '' ? 'text-white' : 'text-gray-400'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
-                      </svg>
-                      <span class="text-xl font-black leading-none" :class="filtroEmpresaTipo === '' ? 'text-white' : 'text-gray-400'">{{ conteoEmpresaTipo.total }}</span>
-                    </div>
-                    <p class="text-[9px] font-black uppercase tracking-[0.15em] leading-none" :class="filtroEmpresaTipo === '' ? 'text-white' : 'text-gray-600'">Todas</p>
-                  </button>
-
-                  <button
-                    @click="filtroEmpresaTipo = filtroEmpresaTipo === 'real' ? '' : 'real'"
-                    class="relative p-3 rounded-xl border-2 text-left transition-all duration-200 focus:outline-none"
-                    :class="filtroEmpresaTipo === 'real'
-                      ? 'bg-[#00A859] border-[#00A859] shadow-md scale-[1.02]'
-                      : 'bg-white border-gray-100 hover:border-[#00A859]/50 hover:shadow-sm'">
-                    <div class="flex items-end justify-between mb-1.5">
-                      <svg class="w-4 h-4" :class="filtroEmpresaTipo === 'real' ? 'text-white' : 'text-[#00A859]'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1v1H9V7zm5 0h1v1h-1V7zm-5 4h1v1H9v-1zm5 0h1v1h-1v-1z"/>
-                      </svg>
-                      <span class="text-xl font-black leading-none" :class="filtroEmpresaTipo === 'real' ? 'text-white' : 'text-[#00A859]'">{{ conteoEmpresaTipo.real }}</span>
-                    </div>
-                    <p class="text-[9px] font-black uppercase tracking-[0.15em] leading-none" :class="filtroEmpresaTipo === 'real' ? 'text-white' : 'text-gray-600'">Real</p>
-                    <p class="text-[8px] mt-0.5 leading-none" :class="filtroEmpresaTipo === 'real' ? 'text-white/60' : 'text-gray-400'">empresa real</p>
-                  </button>
-
-                  <button
-                    @click="filtroEmpresaTipo = filtroEmpresaTipo === 'ficticia' ? '' : 'ficticia'"
-                    class="relative p-3 rounded-xl border-2 text-left transition-all duration-200 focus:outline-none"
-                    :class="filtroEmpresaTipo === 'ficticia'
-                      ? 'bg-[#F59E0B] border-[#F59E0B] shadow-md scale-[1.02]'
-                      : 'bg-white border-gray-100 hover:border-[#F59E0B]/50 hover:shadow-sm'">
-                    <div class="flex items-end justify-between mb-1.5">
-                      <svg class="w-4 h-4" :class="filtroEmpresaTipo === 'ficticia' ? 'text-white' : 'text-[#F59E0B]'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"/>
-                      </svg>
-                      <span class="text-xl font-black leading-none" :class="filtroEmpresaTipo === 'ficticia' ? 'text-white' : 'text-[#F59E0B]'">{{ conteoEmpresaTipo.ficticia }}</span>
-                    </div>
-                    <p class="text-[9px] font-black uppercase tracking-[0.15em] leading-none" :class="filtroEmpresaTipo === 'ficticia' ? 'text-white' : 'text-gray-600'">Ficticia</p>
-                    <p class="text-[8px] mt-0.5 leading-none" :class="filtroEmpresaTipo === 'ficticia' ? 'text-white/60' : 'text-gray-400'">inventada</p>
-                  </button>
-
-                </div>
-                  </div>
-                </Transition>
-              </div>
-
-              <!-- GRUPO: INFORMACIÓN -->
-              <div class="bg-[#6366F1]/10 rounded-2xl border border-[#6366F1]/30">
-                <button @click="infoFiltroAbierto = !infoFiltroAbierto"
-                  class="w-full flex items-center justify-between px-3 py-2.5 hover:bg-[#6366F1]/15 transition-colors">
-                  <div class="flex items-center gap-2">
-                    <p class="text-[9px] font-black uppercase tracking-[0.2em] text-[#6366F1]">Información del reto</p>
-                    <span class="tooltip-wrap" @click.stop>
-                      <svg class="w-3 h-3 text-[#6366F1]/60 cursor-help flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4m0-4h.01"/></svg>
-                      <span class="tooltip-text">Datos del reto reales (de empresa existente) o generados por IA para simulación.</span>
-                    </span>
-                    <span v-if="!infoFiltroAbierto && filtroInfoSimulada"
-                      class="text-[8px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full"
-                      :class="filtroInfoSimulada === 'simulada' ? 'bg-[#6366F1]/10 text-[#6366F1]' : 'bg-[#00A859]/10 text-[#00A859]'">
-                      {{ filtroInfoSimulada === 'simulada' ? 'Simulada' : 'Real' }}
-                    </span>
-                  </div>
-                  <svg class="w-3.5 h-3.5 text-[#6366F1]/70 transition-transform duration-200"
-                    :class="infoFiltroAbierto ? 'rotate-180' : ''"
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
-                  </svg>
-                </button>
-                <Transition name="filter-collapse">
-                  <div v-if="infoFiltroAbierto" class="px-3 pb-3">
-                <div class="grid grid-cols-3 gap-2">
-
-                  <button
-                    @click="filtroInfoSimulada = ''"
-                    class="relative p-3 rounded-xl border-2 text-left transition-all duration-200 focus:outline-none"
-                    :class="filtroInfoSimulada === ''
-                      ? 'bg-[#1F2937] border-[#1F2937] shadow-md scale-[1.02]'
-                      : 'bg-white border-gray-100 hover:border-gray-300 hover:shadow-sm'">
-                    <div class="flex items-end justify-between mb-1.5">
-                      <svg class="w-4 h-4" :class="filtroInfoSimulada === '' ? 'text-white' : 'text-gray-400'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                      </svg>
-                      <span class="text-xl font-black leading-none" :class="filtroInfoSimulada === '' ? 'text-white' : 'text-gray-400'">{{ conteoInfoSimulada.total }}</span>
-                    </div>
-                    <p class="text-[9px] font-black uppercase tracking-[0.15em] leading-none" :class="filtroInfoSimulada === '' ? 'text-white' : 'text-gray-600'">Toda</p>
-                  </button>
-
-                  <button
-                    @click="filtroInfoSimulada = filtroInfoSimulada === 'real' ? '' : 'real'"
-                    class="relative p-3 rounded-xl border-2 text-left transition-all duration-200 focus:outline-none"
-                    :class="filtroInfoSimulada === 'real'
-                      ? 'bg-[#00A859] border-[#00A859] shadow-md scale-[1.02]'
-                      : 'bg-white border-gray-100 hover:border-[#00A859]/50 hover:shadow-sm'">
-                    <div class="flex items-end justify-between mb-1.5">
-                      <svg class="w-4 h-4" :class="filtroInfoSimulada === 'real' ? 'text-white' : 'text-[#00A859]'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                      </svg>
-                      <span class="text-xl font-black leading-none" :class="filtroInfoSimulada === 'real' ? 'text-white' : 'text-[#00A859]'">{{ conteoInfoSimulada.real }}</span>
-                    </div>
-                    <p class="text-[9px] font-black uppercase tracking-[0.15em] leading-none" :class="filtroInfoSimulada === 'real' ? 'text-white' : 'text-gray-600'">Real</p>
-                    <p class="text-[8px] mt-0.5 leading-none" :class="filtroInfoSimulada === 'real' ? 'text-white/60' : 'text-gray-400'">datos reales</p>
-                  </button>
-
-                  <button
-                    @click="filtroInfoSimulada = filtroInfoSimulada === 'simulada' ? '' : 'simulada'"
-                    class="relative p-3 rounded-xl border-2 text-left transition-all duration-200 focus:outline-none"
-                    :class="filtroInfoSimulada === 'simulada'
-                      ? 'bg-[#6366F1] border-[#6366F1] shadow-md scale-[1.02]'
-                      : 'bg-white border-gray-100 hover:border-[#6366F1]/50 hover:shadow-sm'">
-                    <div class="flex items-end justify-between mb-1.5">
-                      <svg class="w-4 h-4" :class="filtroInfoSimulada === 'simulada' ? 'text-white' : 'text-[#6366F1]'" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-                      </svg>
-                      <span class="text-xl font-black leading-none" :class="filtroInfoSimulada === 'simulada' ? 'text-white' : 'text-[#6366F1]'">{{ conteoInfoSimulada.simulada }}</span>
-                    </div>
-                    <p class="text-[9px] font-black uppercase tracking-[0.15em] leading-none" :class="filtroInfoSimulada === 'simulada' ? 'text-white' : 'text-gray-600'">Simulada</p>
-                    <p class="text-[8px] mt-0.5 leading-none" :class="filtroInfoSimulada === 'simulada' ? 'text-white/60' : 'text-gray-400'">generada IA</p>
-                  </button>
-
-                </div>
-                  </div>
-                </Transition>
-              </div>
-
+            <button v-if="microretosFiltrados.length && !authStore.isEmpresa" data-tour="bib-pdf" type="button" @click="descargarGrupoFiltrado" :disabled="generandoPDFGrupo"
+                    class="inline-flex h-9 items-center gap-1.5 rounded-full border border-rol-fuerte/30 bg-white px-3 text-sm font-semibold text-rol-fuerte hover:bg-rol-fuerte/5 disabled:cursor-wait disabled:opacity-60"
+                    :title="hayFiltrosActivos ? 'Descargar los retos con los filtros actuales' : 'Descargar todos los retos listados'">
+              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2"/></svg>
+              {{ generandoPDFGrupo ? 'Generando…' : `PDF (${microretosFiltrados.length})` }}
+            </button>
+            <label class="flex items-center gap-2 text-sm text-texto-secundario">
+              <span class="hidden sm:inline">Ordenar por</span>
+              <select v-model="orden" class="h-9 rounded-xl px-3 text-sm text-azul-noche" aria-label="Ordenar retos">
+                <option value="cruzados">Otros sectores primero</option>
+                <option value="recientes">Más recientes</option>
+                <option value="antiguos">Más antiguos</option>
+                <option value="titulo">Título (A-Z)</option>
+              </select>
+            </label>
+            <div class="flex rounded-full bg-gray-100 p-1" role="group" aria-label="Vista de los resultados">
+              <button type="button" @click="vista = 'cuadricula'" :aria-pressed="vista === 'cuadricula'" aria-label="Vista en cuadrícula" title="Cuadrícula"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full transition-colors"
+                      :class="vista === 'cuadricula' ? 'bg-rol-fuerte text-white shadow-sm' : 'text-texto-secundario hover:text-azul-noche'">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+              </button>
+              <button type="button" @click="vista = 'lista'" :aria-pressed="vista === 'lista'" aria-label="Vista en lista" title="Lista"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full transition-colors"
+                      :class="vista === 'lista' ? 'bg-rol-fuerte text-white shadow-sm' : 'text-texto-secundario hover:text-azul-noche'">
+                <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+              </button>
             </div>
+          </div>
 
-            <!-- ── BARRA DE FILTROS ──────────────────────────────── -->
-            <section class="bg-white/90 backdrop-blur-md rounded-[2rem] p-5 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.04)] mb-8">
+          <!-- Con estos filtros también hay retos en otros cursos: el curso se elige arriba y no se ve aquí -->
+          <div v-if="!cargando && enOtrosCursos.length" data-tour="bib-otros-cursos" role="status"
+               class="mb-3 flex flex-col gap-2 rounded-2xl border border-borde bg-gray-50 px-4 py-3 text-sm text-azul-noche sm:flex-row sm:flex-wrap sm:items-center">
+            <span class="min-w-0 flex-1">
+              También hay
+              <template v-for="(c, i) in enOtrosCursos" :key="c.curso">{{ i ? ' y ' : '' }}<strong>{{ c.n }} {{ c.n === 1 ? 'reto' : 'retos' }} en {{ etiquetaCurso(c.curso) }}</strong></template>
+              con estos filtros.
+            </span>
+            <div class="flex flex-wrap gap-2">
+              <button v-for="c in enOtrosCursos" :key="c.curso" type="button" @click="cursoStore.curso = c.curso"
+                      class="inline-flex h-9 items-center rounded-full bg-white px-3 text-sm font-semibold text-rol-fuerte ring-1 ring-rol-fuerte/30 hover:bg-rol/10">
+                Ver {{ etiquetaCurso(c.curso) }}
+              </button>
+              <button type="button" @click="cursoStore.curso = null"
+                      class="inline-flex h-9 items-center rounded-full px-3 text-sm font-semibold text-rol-fuerte hover:bg-rol/10">
+                Todos los cursos
+              </button>
+            </div>
+          </div>
 
-              <!-- Búsqueda -->
-              <div class="mb-4">
-                <label class="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 ml-1 mb-2 flex items-center gap-1.5">
-                  Búsqueda por palabras clave
-                  <span class="tooltip-wrap">
-                    <svg class="w-3 h-3 text-gray-400 cursor-help flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4m0-4h.01"/></svg>
-                    <span class="tooltip-text">Busca en título, empresa, ciclo formativo y pregunta del reto.</span>
-                  </span>
-                </label>
-                <div class="relative">
-                  <svg class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none"
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
-                  <input
-                    v-model="busqueda"
-                    type="text"
-                    placeholder="Título, empresa, ciclo, pregunta del reto..."
-                    class="w-full bg-gray-50 border border-gray-200 rounded-xl pl-10 pr-10 py-3.5 text-sm font-medium text-[#1F2937] placeholder-gray-400 focus:bg-white focus:border-[#00A859] focus:ring-2 focus:ring-[#00A859]/10 outline-none transition-all"
-                  />
-                  <Transition name="fade">
-                    <button v-if="busqueda" @click="busqueda = ''"
-                      class="absolute right-3 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-gray-200 hover:bg-gray-300 text-gray-500 transition-colors">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </Transition>
-                </div>
-              </div>
+          <!-- Carga: skeleton con la forma de las tarjetas -->
+          <div v-if="cargando" class="grid grid-cols-1 gap-4" :class="columnasRetos" aria-busy="true">
+            <div v-for="n in 6" :key="n" class="flex animate-pulse gap-3 rounded-2xl border border-borde bg-white p-4">
+              <div class="h-24 w-24 shrink-0 rounded-xl bg-gray-200" />
+              <div class="flex-1 space-y-2"><div class="h-3 w-1/3 rounded-full bg-gray-200" /><div class="h-4 w-4/5 rounded-full bg-gray-200" /><div class="h-3 w-full rounded-full bg-gray-200" /><div class="h-3 w-2/3 rounded-full bg-gray-200" /></div>
+            </div>
+            <span class="sr-only">Cargando retos…</span>
+          </div>
 
-              <!-- Ciclo + Curso -->
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <!-- Vacío -->
+          <div v-else-if="!microretosFiltrados.length && !errorCarga"
+               class="rounded-2xl border border-dashed border-borde bg-white px-4 py-10 text-center sm:px-6 sm:py-14">
+            <span class="mx-auto inline-flex h-14 w-14 items-center justify-center rounded-full bg-rol/10 text-rol-fuerte" aria-hidden="true">
+              <svg class="h-7 w-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0"/></svg>
+            </span>
+            <h3 class="mt-3 text-lg font-bold text-azul-noche">No hay retos con estos filtros</h3>
+            <p class="mx-auto mt-1 max-w-md text-sm text-texto-secundario">Prueba a quitar algún filtro o genera retos nuevos con IA.</p>
+            <div class="mt-4 flex flex-wrap justify-center gap-2">
+              <button v-if="hayFiltrosActivos" type="button" @click="limpiarFiltros" class="accion-secundaria">Limpiar filtros</button>
+              <RouterLink v-if="!authStore.isEmpresa" :to="{ name: 'microretos' }" class="accion-principal">Generar con IA</RouterLink>
+            </div>
+          </div>
 
-                <div>
-                  <label class="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 ml-1 mb-2 flex items-center gap-1.5">
-                    Ciclo Formativo
-                    <span class="tooltip-wrap">
-                      <svg class="w-3 h-3 text-gray-400 cursor-help flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4m0-4h.01"/></svg>
-                      <span class="tooltip-text">Filtra por ciclo formativo al que está orientado el reto.</span>
-                    </span>
-                  </label>
-                  <select v-model="filtroCiclo"
-                    class="w-full bg-gray-50 border border-gray-200 rounded-xl p-3.5 text-sm font-bold text-[#1F2937] focus:bg-white focus:border-[#00A859] focus:ring-2 focus:ring-[#00A859]/10 outline-none transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    :disabled="ciclosDisponibles.length === 0">
-                    <option value="">Todos los ciclos...</option>
-                    <option v-for="ciclo in ciclosDisponibles" :key="ciclo" :value="ciclo">{{ ciclo }}</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label class="text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 ml-1 mb-2 flex items-center gap-1.5">
-                    Curso
-                    <span class="tooltip-wrap">
-                      <svg class="w-3 h-3 text-gray-400 cursor-help flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 16v-4m0-4h.01"/></svg>
-                      <span class="tooltip-text">Filtra por el año del ciclo: 1º (primer año) o 2º (segundo año).</span>
-                    </span>
-                  </label>
-                  <div class="flex gap-2">
-                    <button
-                      @click="filtroCurso = ''"
-                      class="flex-1 py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all border"
-                      :class="filtroCurso === ''
-                        ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-sm'
-                        : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-gray-400 hover:text-[#1F2937]'">
-                      Todos
-                    </button>
-                    <button
-                      v-for="curso in cursosDisponibles"
-                      :key="curso"
-                      @click="filtroCurso = filtroCurso === String(curso) ? '' : String(curso)"
-                      class="flex-1 py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all border"
-                      :class="filtroCurso === String(curso)
-                        ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-sm'
-                        : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-gray-400 hover:text-[#1F2937]'">
-                      {{ curso }}º
-                    </button>
-                    <button
-                      v-if="hayRetosAmbosCursos"
-                      @click="filtroCurso = filtroCurso === 'ambos_cursos' ? '' : 'ambos_cursos'"
-                      title="Ambos Cursos: posibilidad 1º y 2º"
-                      class="flex-1 py-3.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all border"
-                      :class="filtroCurso === 'ambos_cursos'
-                        ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-sm'
-                        : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-gray-400 hover:text-[#1F2937]'">
-                      Ambos Cursos
-                    </button>
-                  </div>
-                </div>
-
-              </div>
-
-              <!-- Chips de filtros activos -->
-              <Transition name="fade">
-                <div v-if="hayFiltrosActivos" class="flex flex-wrap items-center gap-2 mt-4 pt-4 border-t border-gray-100">
-                  <span class="text-[9px] font-black uppercase tracking-widest text-gray-400">Activos:</span>
-
-                  <span v-if="filtroEmpresaTipo"
-                    class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider"
-                    :class="filtroEmpresaTipo === 'ficticia' ? 'bg-[#F59E0B]/10 text-[#F59E0B]' : 'bg-[#00A859]/10 text-[#00A859]'">
-                    {{ filtroEmpresaTipo === 'ficticia' ? 'Empresa Ficticia' : 'Empresa Real' }}
-                    <button @click="filtroEmpresaTipo = ''" class="ml-0.5 hover:opacity-70 transition-opacity">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </span>
-
-                  <span v-if="filtroInfoSimulada"
-                    class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider"
-                    :class="filtroInfoSimulada === 'simulada' ? 'bg-[#6366F1]/10 text-[#6366F1]' : 'bg-[#00A859]/10 text-[#00A859]'">
-                    {{ filtroInfoSimulada === 'simulada' ? 'Info Simulada' : 'Info Real' }}
-                    <button @click="filtroInfoSimulada = ''" class="ml-0.5 hover:opacity-70 transition-opacity">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </span>
-
-                  <span v-if="filtroNivel"
-                    class="inline-flex items-center gap-1 bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider">
-                    Nivel {{ filtroNivel }}
-                    <button @click="filtroNivel = ''" class="ml-0.5 text-gray-400 hover:text-gray-700 transition-colors">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </span>
-
-                  <span v-if="filtroCurso"
-                    class="inline-flex items-center gap-1 bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider">
-                    Curso {{ filtroCurso }}º
-                    <button @click="filtroCurso = ''" class="ml-0.5 text-gray-400 hover:text-gray-700 transition-colors">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </span>
-
-                  <span v-if="filtroCiclo"
-                    class="inline-flex items-center gap-1 bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider max-w-[220px]">
-                    <span class="truncate">{{ filtroCiclo }}</span>
-                    <button @click="filtroCiclo = ''" class="ml-0.5 text-gray-400 hover:text-gray-700 transition-colors shrink-0">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </span>
-
-                  <span v-if="busqueda"
-                    class="inline-flex items-center gap-1 bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full text-[10px] font-black tracking-wider max-w-[200px]">
-                    <svg class="w-3 h-3 shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                    </svg>
-                    <span class="truncate italic">"{{ busqueda }}"</span>
-                    <button @click="busqueda = ''" class="ml-0.5 text-gray-400 hover:text-gray-700 transition-colors shrink-0">
-                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </span>
-
-                  <button @click="limpiarFiltros"
-                    class="ml-auto text-[10px] font-black uppercase tracking-widest text-red-400 hover:text-red-600 transition-colors flex items-center gap-1 shrink-0">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                    Limpiar todo
-                  </button>
-                </div>
-              </Transition>
-
-            </section>
-
-            <!-- ── GRID DE MICRORETOS ───────────────────────────── -->
-            <div v-if="microretosFiltrados.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              <div v-for="reto in microretosFiltrados" :key="reto.id"
-                class="bg-white rounded-[1.5rem] border border-gray-100 hover:border-[#00A859]/40 hover:shadow-[0_20px_40px_rgba(0,0,0,0.06)] shadow-sm transition-all duration-300 flex flex-col group overflow-hidden transform hover:-translate-y-1">
-
-                <div class="p-5 pb-0 flex items-start justify-between gap-2">
-                  <!-- Papelera -->
-                  <button v-if="!authStore.isEmpresa"
-                    @click.prevent="abrirModalEliminar(reto)"
-                    class="shrink-0 w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center shadow-sm transition-all duration-300 hover:bg-red-50 hover:border-red-300 active:scale-95"
-                    title="Eliminar reto">
-                    <svg class="w-4 h-4 text-gray-400 hover:text-red-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
-
-                  <!-- Badges derecha -->
-                  <div class="flex flex-wrap justify-end gap-1.5 min-w-0">
-                    <span class="border px-2.5 py-0.5 text-[9px] font-black uppercase tracking-widest rounded-full whitespace-nowrap"
-                      :class="nivelClase(reto.nivel_grupo)">
+          <!-- Tarjetas -->
+          <ul v-else-if="microretosFiltrados.length"
+              :class="vista === 'cuadricula' ? ['grid grid-cols-1 gap-4', columnasRetos] : 'space-y-3'">
+            <li v-for="reto in retosPagina" :key="reto.id" :data-tour="reto === retosPagina[0] ? 'bib-tarjeta' : undefined"
+                class="group flex min-w-0 flex-col rounded-2xl border border-borde bg-white p-4 shadow-sm transition-shadow hover:shadow-md">
+              <div class="flex min-w-0 gap-3" :class="vista === 'lista' ? 'sm:items-center' : ''">
+                <MiniaturaReto class="flex shrink-0" :class="vista === 'lista' ? 'h-16 w-20' : 'h-20 w-20 sm:h-24 sm:w-24'" />
+                <div class="min-w-0 flex-1">
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-bold uppercase tracking-wide" :class="nivelClase(reto.nivel_grupo)">
                       Nivel: {{ reto.nivel_grupo || 'N/D' }}
                     </span>
-                    <span
-                      class="px-2.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-full whitespace-nowrap border"
-                      :class="reto.empresa_es_simulada
-                        ? 'bg-[#F59E0B]/10 border-[#F59E0B]/20 text-[#F59E0B]'
-                        : 'bg-[#00A859]/10 border-[#00A859]/20 text-[#00A859]'">
-                      {{ reto.empresa_es_simulada ? 'Empresa ficticia' : 'Empresa real' }}
+                    <span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-bold uppercase tracking-wide"
+                          :class="reto.empresa_es_simulada ? 'bg-amber-50 text-amber-800' : 'bg-empresas/10 text-empresas-dark'">
+                      {{ reto.empresa_es_simulada ? 'Ficticia' : 'Real' }}
                     </span>
-                    <span v-if="reto.es_simulado"
-                      class="bg-rose-50 border border-rose-200 text-rose-700 px-2.5 py-0.5 text-[8px] font-black uppercase tracking-widest rounded-full whitespace-nowrap">
+                    <span v-if="reto.es_simulado" class="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-azul-noche"
+                          title="Información generada con IA para simulación">
                       Info simulada
                     </span>
+                    <AvisoEmpresaBorrada :estado="reto.empresa_estado" />
+                    <span v-if="reto.en_recamara" class="inline-flex items-center gap-1 rounded-full bg-gray-200 px-2 py-0.5 text-xs font-bold uppercase tracking-wide text-texto-secundario"
+                          title="Reto a medida aún sin publicar: no lo ve ningún centro">En la recámara</span>
                   </div>
-                </div>
-
-                <div class="px-7 pb-7 pt-4 flex-1 flex flex-col">
-                  <h3 class="text-[#1F2937] font-black text-xl leading-tight mb-4 group-hover:text-[#00A859] transition-colors line-clamp-2" :title="reto.titulo">
-                    {{ reto.titulo }}
+                  <h3 class="mt-1.5 line-clamp-2 font-heading text-base font-bold leading-snug text-azul-noche" :title="reto.titulo">
+                    <button type="button" @click="irADetalle(reto)" class="text-left hover:text-rol-fuerte hover:underline">{{ reto.titulo }}</button>
                   </h3>
-                  <div class="flex flex-col gap-2 mb-5 border-l-2 border-gray-100 group-hover:border-[#00A859]/30 pl-3 transition-colors">
-                    <p class="text-[#1F2937] text-xs font-bold uppercase tracking-wider flex items-center gap-2">
-                      <svg class="w-4 h-4 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                      </svg>
-                      <span class="truncate">{{ reto.empresa_nombre }}</span>
-                    </p>
-                    <p class="text-gray-500 text-[10px] font-bold uppercase tracking-wider flex items-center gap-2">
-                      <svg class="w-4 h-4 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5z" />
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z" />
-                      </svg>
-                      <span class="truncate">{{ reto.centro_educativo || 'Centro ND' }}</span>
-                    </p>
-                  </div>
-                  <p class="text-gray-600 text-sm leading-relaxed line-clamp-3 mb-6 flex-1">
-                    {{ reto.pregunta_reto }}
-                  </p>
-                  <div class="mt-auto flex flex-wrap items-center gap-2">
-                    <span class="inline-block bg-gray-50 text-gray-600 border border-gray-200 px-3 py-1.5 rounded-lg text-xs font-medium truncate max-w-full shadow-sm" :title="reto.ciclo">
-                      {{ reto.ciclo }}
-                    </span>
-                    <span v-if="reto.curso" class="inline-block bg-gray-50 text-gray-500 border border-gray-200 px-2.5 py-1.5 rounded-lg text-xs font-bold shadow-sm shrink-0"
-                          :title="reto.curso === 'ambos_cursos' ? 'Ambos Cursos: posibilidad 1º y 2º' : ''">
-                      {{ reto.curso === 'ambos_cursos' ? 'Ambos Cursos' : reto.curso + 'º curso' }}
-                    </span>
-                  </div>
-                </div>
-
-                <div class="flex border-t border-gray-100 group-hover:border-[#00A859] transition-colors duration-300">
-                  <button @click.stop="descargarPDF(reto)"
-                    class="flex items-center justify-center gap-1.5 px-4 py-4 bg-gray-50 group-hover:bg-[#00A859]/10 text-gray-400 group-hover:text-[#00A859] font-black text-[10px] uppercase tracking-widest transition-all duration-300 border-r border-gray-100 group-hover:border-[#00A859]/20 shrink-0"
-                    title="Descargar PDF">
-                    <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    PDF
-                  </button>
-                  <button @click="irADetalle(reto)"
-                    class="flex-1 bg-gray-50 group-hover:bg-[#00A859] text-gray-500 group-hover:text-white font-black text-xs uppercase tracking-widest py-4 transition-all duration-300 flex items-center justify-center gap-2">
-                    Ver Ficha Técnica
-                    <svg class="w-4 h-4 transform group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-                    </svg>
-                  </button>
+                  <p class="mt-1 text-sm leading-snug text-texto-secundario"
+                     :class="vista === 'cuadricula' ? 'line-clamp-3' : 'line-clamp-2'">{{ reto.pregunta_reto }}</p>
                 </div>
               </div>
-            </div>
 
-            <!-- Empty state -->
-            <div v-else class="text-center py-20 bg-white rounded-[2rem] border border-dashed border-gray-300 shadow-sm">
-              <div class="w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center mx-auto mb-5 border border-gray-100 shadow-inner">
-                <svg class="w-10 h-10 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
+              <!-- Familia y módulos diferenciados, con «+N» desplegable (FamiliaModulos, común a las bibliotecas) -->
+              <FamiliaModulos class="mt-3" :familia="reto.familia" :modulos="modulosDeReto(reto)" :modulo-activo="filtroModulo" />
+              <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-texto-secundario">
+                <span v-if="reto.curso" class="inline-flex items-center gap-1.5">
+                  {{ reto.curso === 'ambos_cursos' ? '1º y 2º curso' : `${reto.curso}º curso` }}
+                </span>
+                <span v-if="reto.creado_en || reto.created_at">{{ formatearFecha(reto.creado_en || reto.created_at) }}</span>
               </div>
-              <h3 class="text-[#1F2937] font-black text-2xl mb-2">No hay resultados</h3>
-              <p class="text-gray-500 text-sm max-w-md mx-auto">Prueba a limpiar los filtros o genera nuevos retos en el Estudio interactivo.</p>
-              <button @click="limpiarFiltros"
-                class="mt-6 px-6 py-2 bg-white border border-gray-200 hover:border-[#00A859] hover:text-[#00A859] text-[#1F2937] rounded-full text-xs font-bold uppercase tracking-widest transition-colors shadow-sm">
-                Restablecer Búsqueda
-              </button>
-            </div>
+              <p v-if="reto.diagnostico_desactualizado || reto.interes_desactualizado || reto.diagnostico_modificado_en_reto || reto.interes_modificado_en_reto"
+                 class="mt-2 inline-flex w-fit items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-800"
+                 :title="[reto.diagnostico_modificado_en_reto && 'Diagnóstico ajustado para este reto', reto.diagnostico_desactualizado && 'La empresa actualizó su diagnóstico después', reto.interes_modificado_en_reto && 'Interés ajustado para este reto', reto.interes_desactualizado && 'La empresa cambió su interés después'].filter(Boolean).join(' · ')">
+                <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                {{ (reto.diagnostico_desactualizado || reto.interes_desactualizado) ? 'Datos de la empresa actualizados después' : 'Ajustado para este reto' }}
+              </p>
 
+              <div class="mt-3 flex items-center gap-2 border-t border-borde pt-3">
+                <span class="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-empresas/10 text-empresas-dark sm:inline-flex" aria-hidden="true">
+                  <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                </span>
+                <!-- Sector debajo: una empresa de otro sector puede pedir esta familia (p. ej. una
+                     energética que busca Marketing); el interés va en el title y en el detalle -->
+                <span class="min-w-0 flex-1" :title="[reto.empresa_nombre, reto.empresa?.sector, reto.interes_familia && `Qué busca con ${reto.familia}: ${reto.interes_familia}`].filter(Boolean).join(' · ')">
+                  <span class="block truncate text-sm text-azul-noche">{{ reto.empresa_nombre }}</span>
+                  <span v-if="reto.empresa?.sector" class="block truncate text-xs text-texto-secundario">{{ reto.empresa.sector }}</span>
+                </span>
+                <!-- En móvil solo el icono: deja sitio a empresa y sector -->
+                <button type="button" :data-tour="reto === retosPagina[0] ? 'bib-ver-reto' : undefined" @click="irADetalle(reto)" :aria-label="`Ver reto «${reto.titulo}»`"
+                        class="inline-flex h-9 w-9 shrink-0 items-center justify-center gap-1.5 rounded-full border border-rol-fuerte/40 bg-white px-0 text-sm font-semibold text-rol-fuerte transition-colors hover:bg-rol-fuerte/5 sm:w-auto sm:px-4">
+                  <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/></svg>
+                  <span class="hidden sm:inline">Ver reto</span>
+                </button>
+                <!-- Menú «⋯»: PDF; escaparate y eliminar solo para quien puede gestionar -->
+                <div class="relative shrink-0" data-menu-raiz>
+                  <button type="button" :data-tour="reto === retosPagina[0] ? 'bib-menu' : undefined" @click="menuReto = menuReto === reto.id ? null : reto.id"
+                          :aria-expanded="menuReto === reto.id" aria-haspopup="menu" :aria-label="`Más acciones de «${reto.titulo}»`"
+                          class="inline-flex h-9 w-9 items-center justify-center rounded-full border border-borde text-texto-secundario hover:bg-gray-50">
+                    <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true"><circle cx="4" cy="10" r="1.6"/><circle cx="10" cy="10" r="1.6"/><circle cx="16" cy="10" r="1.6"/></svg>
+                  </button>
+                  <div v-if="menuReto === reto.id" role="menu"
+                       class="absolute bottom-full right-0 z-30 mb-1 w-60 rounded-xl border border-borde bg-white py-1 shadow-lg">
+                    <!-- Abre el ajuste del reto con este reto ya elegido -->
+                    <button v-if="authStore.isAuthenticated && !authStore.isEmpresa" type="button" role="menuitem"
+                            @click="menuReto = null; router.push({ name: 'startup-day-crear', query: { reto: reto.uuid || reto.id } })"
+                            class="block w-full px-4 py-2 text-left text-sm font-semibold text-rol-fuerte hover:bg-gray-50">Trabajar este reto</button>
+                    <button type="button" role="menuitem" @click="menuReto = null; descargarPDF(reto)"
+                            class="block w-full px-4 py-2 text-left text-sm text-azul-noche hover:bg-gray-50">Descargar PDF</button>
+                    <template v-if="!authStore.isEmpresa">
+                      <!-- Escaparate de la web pública (frontoffice dualab.es): solo superadmin (lo comprueba
+                           el backend, MicroretoPolicy::publicarEscaparate). Mismo aspecto que en Proyectos:
+                           turquesa de administraciones, marca «Superadmin» y explicación al pasar el ratón. -->
+                      <div v-if="authStore.isSuperAdmin" class="group/escaparate relative">
+                        <button type="button" role="menuitem" aria-describedby="ayuda-escaparate-reto"
+                                @click="menuReto = null; toggleVisiblePublico(reto)" :disabled="togglePublicoEnCurso.has(reto.id)"
+                                class="mx-1 my-0.5 flex w-[calc(100%-0.5rem)] items-center gap-2 rounded-lg bg-administraciones/10 px-3 py-2 text-left text-sm font-semibold text-administraciones-dark hover:bg-administraciones/15 disabled:opacity-50">
+                          <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0zM3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 010 18M12 3a15 15 0 000 18"/></svg>
+                          <span class="min-w-0 flex-1">{{ reto.visible_publico ? 'Ocultar de la web pública' : 'Publicar en la web pública' }}</span>
+                          <span class="shrink-0 rounded-full bg-white/70 px-1.5 py-0.5 text-[11px] font-bold">Superadmin</span>
+                        </button>
+                        <span id="ayuda-escaparate-reto" role="tooltip"
+                              class="pointer-events-none absolute bottom-full right-1 z-40 mb-1 hidden w-60 rounded-xl bg-azul-noche px-3 py-2 text-xs font-normal leading-snug text-white shadow-lg sm:group-hover/escaparate:block sm:group-focus-within/escaparate:block">
+                          Escaparate de dualab.es: el reto aparece en la web pública, visible sin iniciar sesión, cuando además tiene un proyecto completado y publicado. Solo el superadmin puede publicarlo u ocultarlo.
+                        </span>
+                        <!-- En móvil no hay hover: la explicación va como línea corta bajo la opción -->
+                        <p class="px-4 pb-1 text-[11px] leading-snug text-texto-secundario sm:hidden" aria-hidden="true">
+                          Sale en dualab.es si tiene un proyecto completado y publicado. Solo el superadmin puede cambiarlo.
+                        </p>
+                      </div>
+                      <button type="button" role="menuitem" @click="menuReto = null; abrirModalEliminar(reto)"
+                              class="block w-full px-4 py-2 text-left text-sm text-red-700 hover:bg-red-50">Eliminar reto</button>
+                    </template>
+                  </div>
+                </div>
+              </div>
+              <!-- Aviso de que está en la web pública (lo ven todos los que gestionan; solo el superadmin lo cambia) -->
+              <p v-if="!authStore.isEmpresa && reto.visible_publico" class="mt-2 inline-flex w-fit items-center gap-1 text-xs font-semibold text-administraciones-dark"
+                 title="Publicado en el escaparate de la web pública dualab.es">
+                <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                Publicado en la web pública
+              </p>
+            </li>
+          </ul>
+
+          <!-- Paginación -->
+          <div v-if="!cargando && totalPaginas > 1" data-tour="bib-paginacion" class="mt-5 flex flex-col flex-wrap items-center justify-between gap-3 sm:flex-row">
+            <p class="text-sm text-texto-secundario">
+              Mostrando {{ retosPagina.length }} de {{ microretosFiltrados.length }} retos
+            </p>
+            <nav class="flex flex-wrap items-center justify-center gap-1" aria-label="Paginación de retos">
+              <button type="button" @click="irAPagina(0)" :disabled="pagina === 0" aria-label="Primera página"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">«</button>
+              <button type="button" @click="irAPagina(pagina - 1)" :disabled="pagina === 0" aria-label="Página anterior"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">‹</button>
+              <button v-for="i in paginasVisibles" :key="i" type="button" @click="irAPagina(i)"
+                      :aria-current="i === pagina ? 'page' : undefined" :aria-label="`Página ${i + 1}`"
+                      class="inline-flex h-9 min-w-9 items-center justify-center rounded-full px-2 text-sm font-semibold"
+                      :class="i === pagina ? 'bg-rol-fuerte text-white' : 'text-azul-noche hover:bg-gray-100'">{{ i + 1 }}</button>
+              <button type="button" @click="irAPagina(pagina + 1)" :disabled="pagina >= totalPaginas - 1" aria-label="Página siguiente"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">›</button>
+              <button type="button" @click="irAPagina(totalPaginas - 1)" :disabled="pagina >= totalPaginas - 1" aria-label="Última página"
+                      class="inline-flex h-9 w-9 items-center justify-center rounded-full text-texto-secundario hover:bg-gray-100 disabled:opacity-40">»</button>
+            </nav>
           </div>
-        </Transition>
-
-      </template>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -1218,19 +900,19 @@ function mostrarSnack(mensaje, tipo = 'ok', accion = null) {
   <Transition name="snack">
     <div
       v-if="snackbar.visible"
-      class="fixed bottom-6 right-6 z-[60] flex items-center gap-3
-             px-5 py-3.5 rounded-2xl shadow-xl text-sm font-bold
-             max-w-sm bg-[#1F2937] text-white border border-[#333333]"
+      class="fixed bottom-6 left-4 right-4 sm:left-auto sm:right-6 z-[60] flex flex-wrap items-center gap-3
+             max-h-[40vh] overflow-y-auto px-5 py-3.5 rounded-2xl shadow-xl text-sm font-bold
+             max-w-[calc(100vw-2rem)] sm:max-w-sm bg-azul-noche text-white"
     >
       <svg class="w-4 h-4 text-amber-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
           d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
       </svg>
-      <span class="flex-1">{{ snackbar.mensaje }}</span>
+      <span class="flex-1 min-w-0 break-words line-clamp-3" :title="snackbar.mensaje">{{ snackbar.mensaje }}</span>
       <button
         v-if="snackbar.accion"
         @click="snackbar.accion.fn(); snackbar.visible = false"
-        class="ml-1 shrink-0 px-3 py-1.5 rounded-xl bg-amber-400 text-[#1F2937] text-[10px] font-black uppercase tracking-widest hover:bg-amber-300 transition-all"
+        class="ml-1 shrink-0 inline-flex h-9 items-center px-3 rounded-full bg-amber-400 text-azul-noche text-xs font-bold uppercase tracking-widest hover:bg-amber-300 transition-all"
       >
         {{ snackbar.accion.label }}
       </button>
@@ -1242,15 +924,10 @@ function mostrarSnack(mensaje, tipo = 'ok', accion = null) {
 </template>
 
 <style scoped>
-@import "tailwindcss";
-
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: #F8FAFC; }
 ::-webkit-scrollbar-thumb { background: #E2E8F0; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #00A859; }
-
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
+::-webkit-scrollbar-thumb:hover { background: v-bind('theme.hex'); }
 
 .snack-enter-active { transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
 .snack-leave-active { transition: all 0.2s ease-in; }
@@ -1262,46 +939,4 @@ function mostrarSnack(mensaje, tipo = 'ok', accion = null) {
 .slide-up-enter-from { opacity: 0; transform: translateY(20px); }
 .slide-up-leave-to { opacity: 0; transform: translateY(-10px); }
 
-.filter-collapse-enter-active { transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
-.filter-collapse-leave-active { transition: all 0.15s ease-in; }
-.filter-collapse-enter-from, .filter-collapse-leave-to { opacity: 0; transform: translateY(-6px); }
-
-.tooltip-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-.tooltip-text {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: #1F2937;
-  color: #fff;
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1.4;
-  padding: 6px 10px;
-  border-radius: 8px;
-  width: max-content;
-  max-width: 210px;
-  white-space: normal;
-  text-align: center;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease;
-  z-index: 30;
-  text-transform: none;
-  letter-spacing: 0.01em;
-}
-.tooltip-wrap:hover .tooltip-text { opacity: 1; }
-.tooltip-text::after {
-  content: '';
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 5px solid transparent;
-  border-top-color: #1F2937;
-}
 </style>

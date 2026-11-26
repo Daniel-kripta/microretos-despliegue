@@ -8,7 +8,7 @@ const emit = defineEmits(['seleccionar'])
     <div v-if="show"
          class="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
       <div class="relative bg-white border border-gray-200 rounded-[2rem]
-                  shadow-2xl max-w-md w-full p-8">
+                  shadow-2xl max-w-md w-full p-6 sm:p-8 max-h-[90dvh] overflow-y-auto">
 
         <!-- Cabecera -->
         <div class="flex items-center gap-3 mb-2">
@@ -21,12 +21,12 @@ const emit = defineEmits(['seleccionar'])
             </svg>
           </div>
           <div>
-            <p class="text-[10px] font-black uppercase tracking-widest text-amber-500 mb-0.5">Startup Day · Fase 2</p>
-            <h2 class="text-xl font-black tracking-tight text-[#121212]">¿Qué necesitas?</h2>
+            <p class="text-[10px] font-black uppercase tracking-widest text-amber-500 mb-0.5">Mis retos ajustados</p>
+            <h2 class="text-xl font-black tracking-tight text-azul-noche">¿Qué necesitas?</h2>
           </div>
         </div>
         <p class="text-xs text-gray-500 leading-relaxed mb-6 pl-[3.75rem]">
-          Aquí se trabajan los retos para convertirlos en proyectos reales de empresa.
+          Aquí se trabajan los retos para ajustarlos a tu aula: tu alumnado los resolverá en un encuentro.
         </p>
 
         <!-- Opciones -->
@@ -35,30 +35,30 @@ const emit = defineEmits(['seleccionar'])
           <!-- a) Crear microproyecto -->
           <button @click="emit('seleccionar', 'crear')"
                   class="w-full flex items-start gap-4 p-4 rounded-2xl border border-gray-200
-                         bg-gray-50 hover:bg-[#00A859]/8 hover:border-[#00A859]/30
+                         bg-gray-50 hover:bg-centros/8 hover:border-centros/30
                          transition-all duration-200 text-left group">
-            <div class="w-9 h-9 rounded-xl bg-[#00A859]/10 border border-[#00A859]/20
+            <div class="w-9 h-9 rounded-xl bg-centros/10 border border-centros/20
                         flex items-center justify-center shrink-0 mt-0.5
-                        group-hover:bg-[#00A859]/20 transition-colors">
-              <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        group-hover:bg-centros/20 transition-colors">
+              <svg class="w-4 h-4 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
               </svg>
             </div>
             <div>
-              <p class="font-black text-[#1F2937] text-sm mb-0.5">Crear una propuesta</p>
-              <p class="text-xs text-gray-500 leading-relaxed">Empieza el wizard guiado para registrar una nueva propuesta StartUp Day.</p>
+              <p class="font-black text-[#1F2937] text-sm mb-0.5">Trabajar un reto</p>
+              <p class="text-xs text-gray-500 leading-relaxed">Abre el Ajuste del reto para adaptar un reto a tu alumnado paso a paso.</p>
             </div>
           </button>
 
           <!-- b) Continuar con una propuesta o proyecto -->
           <button @click="emit('seleccionar', 'trabajar')"
                   class="w-full flex items-start gap-4 p-4 rounded-2xl border border-gray-200
-                         bg-gray-50 hover:bg-[#99CC33]/8 hover:border-[#99CC33]/40
+                         bg-gray-50 hover:bg-centros/8 hover:border-centros/40
                          transition-all duration-200 text-left group">
-            <div class="w-9 h-9 rounded-xl bg-[#99CC33]/10 border border-[#99CC33]/30
+            <div class="w-9 h-9 rounded-xl bg-centros/10 border border-centros/30
                         flex items-center justify-center shrink-0 mt-0.5
-                        group-hover:bg-[#99CC33]/20 transition-colors">
-              <svg class="w-4 h-4 text-[#6ea800]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        group-hover:bg-centros/20 transition-colors">
+              <svg class="w-4 h-4 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -66,8 +66,8 @@ const emit = defineEmits(['seleccionar'])
               </svg>
             </div>
             <div>
-              <p class="font-black text-[#1F2937] text-sm mb-0.5">Continuar con una propuesta o proyecto</p>
-              <p class="text-xs text-gray-500 leading-relaxed">Accede a la biblioteca y continúa editando una propuesta o proyecto existente.</p>
+              <p class="font-black text-[#1F2937] text-sm mb-0.5">Continuar con un reto ajustado</p>
+              <p class="text-xs text-gray-500 leading-relaxed">Accede al listado y continúa editando un reto ajustado que ya tengas.</p>
             </div>
           </button>
 
@@ -96,7 +96,7 @@ const emit = defineEmits(['seleccionar'])
         </div>
 
         <button @click="emit('seleccionar', 'trabajar')"
-                class="w-full text-center text-[10px] font-bold text-gray-400
+                class="w-full min-h-9 text-center text-[10px] font-bold text-gray-400
                        hover:text-gray-600 transition-colors py-1">
           Saltar
         </button>

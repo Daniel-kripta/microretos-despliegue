@@ -1,15 +1,29 @@
 <!-- Ruta: /retos/crear (name: microretos). Antes vivía en /microretos — ver router/index.js. -->
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue';
-import { useRouter } from 'vue-router';
-import api from '../api.js';
+import { ref, unref, onMounted, onUnmounted, onActivated, onDeactivated, watch, computed, nextTick } from 'vue';
+import CabeceraSeccion from '../components/CabeceraSeccion.vue'
+import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router';
+import { getFamilias, getCiclosDeFamilia, getModulosDeCiclo } from '../services/datosFPService.js';
+import { getEmpresas, getFamiliasDeEmpresa, crearEmpresa, actualizarEmpresa, actualizarDiagnosticoEmpresa, actualizarInteresEmpresa, getCatalogoEmpresas, guardarEmpresaFicticiaIA, descartarEmpresaFicticiaIA, verPropuestaFicticiaIA, usarEmpresaCatalogo } from '../services/empresaService.js';
+import { getDemos, getDemoDeFamilia, getMicroretosDemoDeFamilia } from '../services/demoService.js';
+import { generarMicroretos, simularInfoEmpresa, guardarMicroreto, guardarMicroretosLote } from '../services/microretoService.js';
+import AvisoModoDemo from '../components/AvisoModoDemo.vue';
 import { useAuthStore } from '../stores/auth';
 import LoginModal from '../components/LoginModal.vue';
+import Modal from '../components/Modal.vue';
 import InsertModifyEmpresa from '../components/InsertModifyEmpresa.vue';
 import { useUIState } from '../composables/useUIState.js';
-import TourPromptModal from '../components/TourPromptModal.vue';
+import SelectorRaCeModulos from '../components/SelectorRaCeModulos.vue';
+import CrearEmpresaFicticiaIA from '../components/CrearEmpresaFicticiaIA.vue';
+import { ejemploInteres } from '../config/ejemplosInteresFamilia.js';
+import { SECTORES_EMPRESA } from '../config/sectoresEmpresa.js';
+import { TAMANOS_EMPRESA } from '../config/tamanosEmpresa.js';
+import { PREGUNTA, OPCIONES_CONSECUENCIAS, OPCIONES_LIMITACIONES } from '../config/preguntasDiagnostico.js';
+import { queryRedirect } from '../utils/redirectLogin.js';
+import { getDatosGenerador, getSolicitudesParaGenerador } from '../services/solicitudRetoService.js';
 
 const authStore = useAuthStore();
+const route = useRoute();
 const router = useRouter();
 const showLogin = ref(false);
 
@@ -44,13 +58,18 @@ const empresas = ref([]);
 const familiasFiltradas = ref([]); 
 const buscadorEmpresa = ref('');
 const filtroTipoEmpresa = ref('');   // '' = todas, 'simulada', 'real'
-const filtroSectorEmpresa = ref(''); // '' = todos los sectores
+const filtroFamiliaEmpresa = ref(''); // '' = todas las familias
+// Familia del paso 3 deducida al elegir empresa: 'filtro' (la del filtro del paso 1),
+// 'unica' (la empresa solo tiene una) o '' (hay que elegirla a mano).
+const motivoFamiliaPreseleccionada = ref('');
+const familiaPreseleccionada = ref('');
+const familiasEmpresaCargadas = ref(false);
 const mostrarDropdownEmpresas = ref(false);
 const empresaDetalle = ref(null);
 
 // --- PAGINACIÓN RESULTADOS EMPRESA ---
-// "Elige empresa" ocupa ahora el ancho completo del grid (grid-cols-1 sm:2 lg:3).
-// 12 es múltiplo de 1, 2 y 3 → siempre filas completas en los tres casos.
+// "Elige empresa" ocupa el ancho completo del grid (grid-cols-1 sm:2 lg:3 xl:4).
+// 12 es múltiplo de 1, 2, 3 y 4 → siempre filas completas en todos los anchos.
 const EMPRESAS_POR_PAGINA = 12;
 const paginaEmpresas = ref(1);
 
@@ -62,6 +81,10 @@ const insertModifyRef = ref(null);
 
 // --- ETADO MODO DEMO Y SIMULACIÓN ---
 const esModoDemo = ref(false);
+// Tooltip de los campos bloqueados en la demo (complementa el AvisoModoDemo de cada paso)
+const tituloDemo = computed(() => esModoDemo.value
+  ? 'Bloqueado en la demo: son datos de una empresa de ejemplo. Para usar los tuyos, pulsa «Salir de la demo».'
+  : undefined);
 const demoFamiliaActiva = ref('');
 const demoCicloNombre = ref('');
 const demoModuloNombre = ref('');
@@ -92,18 +115,22 @@ const centrosDisponibles = computed(() => {
   return [...new Set(centros)].sort();
 });
 
-const sectoresDisponibles = computed(() => {
-  const sectores = empresas.value.map(e => e.sector).filter(Boolean);
-  return [...new Set(sectores)].sort();
-});
+// Lista cerrada: el backend rechaza un sector nuevo fuera de ella (lo concreto va en «actividad»)
+const sectoresDisponibles = SECTORES_EMPRESA;
 
-// Sectores presentes entre las empresas del centro seleccionado (para el filtro del buscador)
-const sectoresParaFiltroEmpresa = computed(() => {
+// Para qué quiere la empresa al alumnado de la familia elegida, guardado en la empresa.
+// La IA recibe este o, si el docente lo ajusta en el paso 3, interesAjustado (ver más abajo).
+const interesFamiliaSeleccionada = computed(() =>
+  empresaDetalle.value?.familias?.find(f => f.nombre === seleccion.value.familia)?.interes || '');
+
+// Familias presentes entre las empresas del centro seleccionado (para el filtro del buscador)
+const familiasParaFiltroEmpresa = computed(() => {
   let base = empresas.value;
   if (centroFiltro.value) {
     base = base.filter(e => e.centro_educativo === centroFiltro.value);
   }
-  return [...new Set(base.map(e => e.sector).filter(Boolean))].sort();
+  const nombres = base.flatMap(e => (e.familias || []).map(f => f.nombre)).filter(Boolean);
+  return [...new Set(nombres)].sort((a, b) => a.localeCompare(b, 'es'));
 });
 
 const todasLasFamilias = ref([]);
@@ -130,10 +157,14 @@ const seleccion = ref({
   familia: '',
   cicloId: '', 
   cursoSeleccionado: 2,
-  duracion: '1 a 2 semanas',
   nivelGrupo: 'Medio',
   
   cantidadMicroretos: 3, 
+  // Paso 3, opcional: qué tipo de propuesta quiere trabajar el docente con su alumnado.
+  enfoqueReto: '',
+  // Paso 3, opcionales: tareas reales que hará el alumnado en la empresa y entregable que espera el docente
+  tareasPracticas: '',
+  entregableDocente: '',
 });
 
 const modulosSeleccionados = ref([]);
@@ -141,11 +172,14 @@ const modulosSeleccionados = ref([]);
 const modulosSeleccionadosCurso1 = ref([]);
 const modulosSeleccionadosCurso2 = ref([]);
 
+// Solo módulos con RA y CE (con_ra_ce, de la API): forzar uno sin ellos no aporta nada al reto.
+// En la demo, sus datos propios, sin filtrar.
+const modulosConDatos = computed(() => esModoDemo.value ? modulos.value : modulos.value.filter(m => m.con_ra_ce !== false));
 const modulosDelCurso = computed(() => {
-  return modulos.value.filter(m => m.curso == seleccion.value.cursoSeleccionado);
+  return modulosConDatos.value.filter(m => m.curso == seleccion.value.cursoSeleccionado);
 });
-const modulosCurso1DelCiclo = computed(() => modulos.value.filter(m => m.curso == 1));
-const modulosCurso2DelCiclo = computed(() => modulos.value.filter(m => m.curso == 2));
+const modulosCurso1DelCiclo = computed(() => modulosConDatos.value.filter(m => m.curso == 1));
+const modulosCurso2DelCiclo = computed(() => modulosConDatos.value.filter(m => m.curso == 2));
 
 // El reto recién generado (aún no guardado) no trae `curso` en evaluacion_oficial —
 // ese enriquecido solo lo hace el backend al mostrar la ficha de un microreto ya persistido.
@@ -167,48 +201,257 @@ const ambosCursosModulosValidos = computed(() => {
   return (n1 === 0 && n2 === 0) || (n1 > 0 && n2 > 0);
 });
 
-const limpiarModulosAmbos = () => {
-  if (esModoDemo.value) return;
-  modulosSeleccionadosCurso1.value = [];
-  modulosSeleccionadosCurso2.value = [];
+// Algunos nombres de módulo vienen de la importación del BOE con el código pegado
+// ("Técnica Contable. Código: 0441"). Solo se limpia para mostrar; al backend va el dato tal cual.
+const nombreModuloVisible = (nombre = '') =>
+  nombre.replace(/[\s.,;:-]*C[óo]digo\s*:?\s*[\w-]+\s*\.?\s*$/i, '').trim();
+
+// --- FORZADO DE MÓDULOS: estado visible + toast al cambiar de modo ---
+// "Forzar" = elegir módulos a mano. Sin nada elegido, la IA decide (modo automático).
+const idsModulosForzados = computed(() => esAmbosCursos.value
+  ? [...modulosSeleccionadosCurso1.value, ...modulosSeleccionadosCurso2.value]
+  : modulosSeleccionados.value);
+const nombresModulosForzados = computed(() =>
+  idsModulosForzados.value.map(id => nombreModuloVisible(modulos.value.find(m => m.id === id)?.nombre)).filter(Boolean));
+const hayModulosForzados = computed(() => idsModulosForzados.value.length > 0);
+
+// --- RA/CE FIJADOS A MANO (solo con módulos forzados) ---
+// { [raId]: { moduloId, ceIds: [] } }. Los módulos forzados sin nada fijado quedan a
+// elección de la IA. Al dejar de forzar un módulo se descartan sus RA/CE fijados.
+const seleccionRaCe = ref({});
+const modulosForzadosParaRaCe = computed(() => idsModulosForzados.value
+  .map(id => modulos.value.find(m => m.id === id))
+  .filter(Boolean)
+  .map(m => ({ id: m.id, nombre: nombreModuloVisible(m.nombre), curso: m.curso })));
+const hayRaCeFijados = computed(() => Object.keys(seleccionRaCe.value).length > 0);
+// Al marcar el primer RA/CE (una vez por visita) y al chocar con el límite, el toast señala la
+// sección: lo que se fija aquí se puede cambiar después al ajustar el reto.
+let raCeAvisado = false;
+watch(hayRaCeFijados, (hay) => {
+  if (hay && !raCeAvisado) { raCeAvisado = true; mostrarToastModulos('raCe', 8000); }
+});
+watch(idsModulosForzados, (ids) => {
+  const podado = Object.fromEntries(Object.entries(seleccionRaCe.value).filter(([, s]) => ids.includes(s.moduloId)));
+  if (Object.keys(podado).length !== Object.keys(seleccionRaCe.value).length) seleccionRaCe.value = podado;
+}, { deep: true });
+
+// ─── HISTORIAL DE AVISOS ────────────────────────────────────────────────
+// Los avisos (cambio de paso, errores) no bloquean: se acumulan en el historial, el más reciente
+// arriba. Desde xl es una columna fija a la derecha; por debajo, un botón flotante arriba a la derecha
+// que se despliega, y el último aviso asoma unos segundos bajo el botón aunque esté plegado.
+const historialAvisos = ref([]); // { id, tipo: 'info' | 'error', titulo, texto, hora }
+const avisoFlotante = ref(null);
+const historialAbierto = ref(false);
+const avisosVistos = ref(0);
+const avisosNoLeidos = computed(() => historialAvisos.value.length - avisosVistos.value);
+const toggleHistorial = () => {
+  historialAbierto.value = !historialAbierto.value;
+  avisosVistos.value = historialAvisos.value.length;
+  avisoFlotante.value = null;
+};
+let idAviso = 0;
+let avisoFlotanteTimer = null;
+// --- INTERÉS DE LA EMPRESA EN LA FAMILIA (paso 3) ---
+// Como el diagnóstico: se puede ajustar solo para estos retos (interesAjustado, se manda como
+// interesReto y el reto lo guarda marcado) o, solo DUALAB (superadmin), guardarlo en la empresa:
+// EmpresaPolicy::actualizarInteres.
+const interesAjustado  = ref(null);   // null = se usa el guardado en la empresa
+const editandoInteres  = ref(false);
+const borradorInteres  = ref('');
+const guardandoInteres = ref(false);
+const interesParaReto  = computed(() => interesAjustado.value ?? interesFamiliaSeleccionada.value);
+watch(() => [seleccion.value.familia, seleccion.value.empresaId], () => {
+  interesAjustado.value = null;
+  editandoInteres.value = false;
+});
+const abrirEdicionInteres = () => {
+  borradorInteres.value = interesParaReto.value;
+  editandoInteres.value = true;
+};
+const usarInteresSoloEnReto = () => {
+  const texto = borradorInteres.value.trim();
+  interesAjustado.value = texto && texto !== interesFamiliaSeleccionada.value ? texto : null;
+  editandoInteres.value = false;
+};
+const guardarInteresEnEmpresa = async () => {
+  if (!authStore.isSuperAdmin || !seleccion.value.empresaId || !seleccion.value.familia || guardandoInteres.value) return;
+  guardandoInteres.value = true;
+  const texto = borradorInteres.value.trim();
+  try {
+    await actualizarInteresEmpresa(seleccion.value.empresaId, seleccion.value.familia, texto);
+    const fam = empresaDetalle.value?.familias?.find(f => f.nombre === seleccion.value.familia);
+    if (fam) fam.interes = texto || null;
+    interesAjustado.value = null;
+    editandoInteres.value = false;
+    registrarAviso('Interés guardado', 'Se ha guardado en la empresa y se usará en sus próximos retos con esta familia.');
+  } catch (e) {
+    registrarAviso('Error al guardar el interés', e.response?.data?.error || e.response?.data?.message || 'No se ha podido guardar el interés.', 'error');
+  } finally {
+    guardandoInteres.value = false;
+  }
 };
 
-// Alterna un id dentro de un ref-array (selección de módulos por pills)
+const registrarAviso = (titulo, texto, tipo = 'info') => {
+  const hora = new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  const aviso = { id: ++idAviso, tipo, titulo, texto, hora };
+  historialAvisos.value.unshift(aviso);
+  if (historialAbierto.value) avisosVistos.value = historialAvisos.value.length;
+  avisoFlotante.value = aviso;
+  clearTimeout(avisoFlotanteTimer);
+  avisoFlotanteTimer = setTimeout(() => { avisoFlotante.value = null; }, tipo === 'error' ? 8000 : 5000);
+};
+
+const toastModulos = ref(null); // { tipo: 'auto' | 'forzado', titulo, texto }
+let toastModulosTimer = null;
+const TOASTS_MODULOS = {
+  forzado: { titulo: 'Has forzado módulos', texto: 'La IA ya no elegirá: solo usará los módulos que marques. Pulsa «Vaciar» para volver al modo automático.' },
+  forzadoAmbos: { titulo: 'Has forzado módulos', texto: 'La IA solo usará los módulos que marques.', destacado: 'Recuerda: al menos uno de 1º y uno de 2º.' },
+  auto: { titulo: 'Modo automático', texto: 'No hay módulos forzados: la IA elegirá los más adecuados de todo el currículo.' },
+  ambos: { titulo: 'Reto entre 1º y 2º curso', texto: 'Sin forzar módulos, la IA cruzará RA/CE de todos los módulos de 1º y 2º (mínimo 3 módulos, al menos uno de cada curso).', destacado: 'Si fuerzas módulos, elige al menos uno de 1º y uno de 2º.' },
+  raCe: { titulo: 'RA y CE del reto', texto: 'Los RA y CE pueden modificarse cuando ajustes el reto en «Trabajar un reto».', destacado: 'Aquí fija solo los imprescindibles: máximo 8 RA y 24 CE por reto.' },
+  // El texto lo pone el selector (qué límite se ha alcanzado)
+  raCeLimite: { titulo: 'Has llegado al límite de RA/CE', texto: '', destacado: 'Podrás ampliarlos o modificarlos cuando ajustes el reto en «Trabajar un reto».' },
+};
+// ms = 0: el toast se queda hasta que se cierra con la X (aviso de límite de RA/CE)
+const mostrarToastModulos = (tipo, ms = 5000, texto = null) => {
+  // El aviso de límite no lo tapa ningún toast informativo: solo se va con la X
+  if (toastModulos.value?.tipo === 'raCeLimite' && tipo !== 'raCeLimite') return;
+  toastModulos.value = { tipo, ...TOASTS_MODULOS[tipo], ...(texto ? { texto } : {}) };
+  clearTimeout(toastModulosTimer);
+  if (ms > 0) toastModulosTimer = setTimeout(() => { toastModulos.value = null; }, ms);
+};
+
+const elegirAmbosCursos = () => {
+  if (esModoDemo.value || !cursoTieneDatos('ambos_cursos')) return;
+  const yaEstaba = esAmbosCursos.value;
+  seleccion.value.cursoSeleccionado = 'ambos_cursos';
+  if (!yaEstaba) mostrarToastModulos('ambos', 8000);
+};
+// Solo avisa cuando la acción del usuario cambia de modo (0 ↔ ≥1), no en cada clic.
+const avisarCambioModoModulos = (antes) => {
+  const despues = idsModulosForzados.value.length;
+  if (antes === 0 && despues > 0) mostrarToastModulos(esAmbosCursos.value ? 'forzadoAmbos' : 'forzado', esAmbosCursos.value ? 7000 : 5000);
+  else if (antes > 0 && despues === 0) mostrarToastModulos('auto');
+};
+
+const limpiarModulosAmbos = () => {
+  if (esModoDemo.value) return;
+  const antes = idsModulosForzados.value.length;
+  modulosSeleccionadosCurso1.value = [];
+  modulosSeleccionadosCurso2.value = [];
+  avisarCambioModoModulos(antes);
+};
+
+// --- SWITCH "Seleccionar módulos manualmente" (por defecto: "Elige la IA") ---
+// Los módulos solo se muestran en modo manual, y solo se puede activar con un ciclo
+// elegido (los módulos dependen del ciclo). Volver a "Elige la IA" descarta los módulos
+// marcados (y, con ellos, los RA/CE fijados — ver watch de idsModulosForzados).
+const modoModulosManual = ref(false);
+// En modo demo los módulos los fija la demo: se muestran como manuales, sin poder cambiarse.
+const modulosEnManual = computed(() => modoModulosManual.value || esModoDemo.value);
+const puedeElegirModulosManual = computed(() => !esModoDemo.value && !!seleccion.value.cicloId);
+const toggleModoModulosManual = () => {
+  if (!puedeElegirModulosManual.value) return;
+  if (modoModulosManual.value) {
+    if (esAmbosCursos.value) limpiarModulosAmbos(); else limpiarModulos();
+  }
+  modoModulosManual.value = !modoModulosManual.value;
+};
+
+const limpiarModulos = () => {
+  if (esModoDemo.value) return;
+  const antes = idsModulosForzados.value.length;
+  modulosSeleccionados.value = [];
+  avisarCambioModoModulos(antes);
+};
+
+// Alterna un id dentro de un array reactivo (selección de módulos por pills).
+// Desde el template los refs llegan ya desenvueltos, así que se acepta ref o array.
 const toggleEnArray = (arr, id) => {
-  const i = arr.value.indexOf(id);
-  i === -1 ? arr.value.push(id) : arr.value.splice(i, 1);
+  const antes = idsModulosForzados.value.length;
+  const lista = unref(arr);
+  const i = lista.indexOf(id);
+  i === -1 ? lista.push(id) : lista.splice(i, 1);
+  avisarCambioModoModulos(antes);
 };
 
 const microretosGenerados = ref([]);
 const cargando = ref(false);
 const actualizandoCRM = ref(false);
 const crmActualizado = ref(false);
+
+// --- DIAGNÓSTICO DE EMPRESA (paso 2) ---
+// Un diagnóstico ya recogido de una empresa existente se oculta por defecto; "Editar
+// empresa" solo lo abre si la empresa es ficticia (o eres superadmin = DuaLab). Las
+// reales muestran un aviso: el backend las rechaza igualmente (EmpresaPolicy).
+const editandoDiagnostico = ref(false);
+const avisoEmpresaReal = ref(false);
+const guardandoDiagnostico = ref(false);
+const diagnosticoGuardado = ref(false);
+const verDiagnostico = ref(false); // «Ver más»: muestra el diagnóstico oculto en solo lectura
+let diagnosticoOriginal = null; // copia para «Cancelar» la edición
 const diagnosticoRecuperado = ref(false);
 
 const guardandoTodos = ref(false);
 const todosGuardados = ref(false);
 
-const consecuenciasOpciones = [
-  'Errores frecuentes', 'Costes innecesarios', 'Pérdida de tiempo', 
-  'Insatisfacción del cliente', 'Riesgos de seguridad', 'Desperdicio de materiales', 'Falta de comunicación interna'
-];
+// --- VARIANTES GENERADAS: miniaturas + ficha completa en modal ---
+const refGaleriaRetos = ref(null);
+const retoAbiertoIdx = ref(null);
+// Lista de 0 o 1 elementos para poder alias-ar `reto`/`index` en la plantilla del modal
+const retoAbiertoLista = computed(() => {
+  const i = retoAbiertoIdx.value;
+  const reto = i === null ? null : microretosGenerados.value[i];
+  return reto ? [{ reto, index: i }] : [];
+});
+const numeroVariante = (index) => microretosGenerados.value.length - index;
+const abrirReto = (index) => { retoAbiertoIdx.value = index; };
+const cerrarReto = () => { retoAbiertoIdx.value = null; };
+// Las nuevas variantes se añaden al principio: "anterior" = número de variante menor = índice mayor
+const irRetoAnterior = () => {
+  if (retoAbiertoIdx.value !== null && retoAbiertoIdx.value < microretosGenerados.value.length - 1) retoAbiertoIdx.value++;
+};
+const irRetoSiguiente = () => {
+  if (retoAbiertoIdx.value > 0) retoAbiertoIdx.value--;
+};
+const onTeclaFicha = (e) => {
+  if (retoAbiertoIdx.value === null) return;
+  if (e.key === 'Escape') cerrarReto();
+  else if (e.key === 'ArrowLeft') irRetoAnterior();
+  else if (e.key === 'ArrowRight') irRetoSiguiente();
+};
+watch(retoAbiertoIdx, (i) => {
+  if (i === null) window.removeEventListener('keydown', onTeclaFicha);
+  else window.addEventListener('keydown', onTeclaFicha);
+});
+// Si se vacía la lista (cambio de empresa, vaciar formulario...) se cierra la ficha
+watch(() => microretosGenerados.value.length, (n) => {
+  if (retoAbiertoIdx.value !== null && retoAbiertoIdx.value >= n) cerrarReto();
+});
+onUnmounted(() => window.removeEventListener('keydown', onTeclaFicha));
+const scrollAGaleriaRetos = () => {
+  setTimeout(() => { refGaleriaRetos.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 300);
+};
 
-const limitacionesOpciones = [
-  'Presupuesto Cero/Muy Bajo', 'Equipos obsoletos', 'Internet inestable',
-  'Software cerrado', 'Resistencia al cambio', 'Espacio reducido',
-  'Falta de tiempo', 'Normativa RGPD'
-];
+// Textos y opciones de las preguntas: config/preguntasDiagnostico.json (los comparte con la app comercial)
+const consecuenciasOpciones = OPCIONES_CONSECUENCIAS;
+const limitacionesOpciones = OPCIONES_LIMITACIONES;
 
 // Límites de caracteres por campo. Aviso al 85%, bloqueo en max.
 // Objetivo: ~1.600 tokens de contexto de empresa en el peor caso (≈ 5.800 chars ÷ 3,5).
+// Los de las preguntas de texto libre salen de preguntasDiagnostico.json (= límites del backend).
+const limiteDe = (max) => ({ max, warn: Math.round(max * 0.85) });
 const CHAR_LIMITS = {
-  diaANormal:         { max: 1000, warn: 850 },
-  friccionArea:       { max: 400,  warn: 340 },
-  friccionProblema:   { max: 1200, warn: 1020 },
-  otraLimitacion:     { max: 600,  warn: 510 },
-  loQueNoQuieren:     { max: 500,  warn: 425 },
+  diaANormal:         limiteDe(PREGUNTA.diaANormal.max),
+  friccionArea:       limiteDe(PREGUNTA.friccionArea.max),
+  friccionProblema:   limiteDe(PREGUNTA.friccionProblema.max),
+  otraLimitacion:     limiteDe(PREGUNTA.restricciones.max),
+  loQueNoQuieren:     limiteDe(PREGUNTA.loQueNoQuieren.max),
   otraConsecuencia:   { max: 300,  warn: 255 },
-  expectativasAlumno: { max: 800,  warn: 680 },
+  expectativasAlumno: limiteDe(PREGUNTA.expectativasAlumno.max),
+  enfoqueReto:        { max: 1000, warn: 850 },
+  tareasPracticas:    { max: 1000, warn: 850 },
+  entregableDocente:  { max: 800,  warn: 680 },
 };
 // Reactivo en template: Vue rastrea seleccion.value al renderizar
 const charInfo = (field) => {
@@ -279,8 +522,8 @@ const empresasFiltradasBusqueda = computed(() => {
   } else if (filtroTipoEmpresa.value === 'real') {
     filtradas = filtradas.filter(e => !e.es_simulada);
   }
-  if (filtroSectorEmpresa.value) {
-    filtradas = filtradas.filter(e => e.sector === filtroSectorEmpresa.value);
+  if (filtroFamiliaEmpresa.value) {
+    filtradas = filtradas.filter(e => (e.familias || []).some(f => f.nombre === filtroFamiliaEmpresa.value));
   }
   if (buscadorEmpresa.value) {
     filtradas = filtradas.filter(e =>
@@ -294,12 +537,24 @@ const totalPaginasEmpresas = computed(() =>
   Math.max(1, Math.ceil(empresasFiltradasBusqueda.value.length / EMPRESAS_POR_PAGINA))
 );
 
+// Empresas que quedan en las páginas siguientes a la actual
+const empresasRestantes = computed(() =>
+  Math.max(0, empresasFiltradasBusqueda.value.length - paginaEmpresas.value * EMPRESAS_POR_PAGINA)
+);
+
+// Con filtros amplios ("Todas" / "Todas las familias") la lista es larga: se destaca
+// "Siguiente" para que se note que hay más empresas en las páginas siguientes.
+const destacarSiguienteEmpresas = computed(() =>
+  (filtroTipoEmpresa.value === '' || filtroFamiliaEmpresa.value === '')
+  && paginaEmpresas.value < totalPaginasEmpresas.value
+);
+
 const empresasPaginadas = computed(() => {
   const inicio = (paginaEmpresas.value - 1) * EMPRESAS_POR_PAGINA;
   return empresasFiltradasBusqueda.value.slice(inicio, inicio + EMPRESAS_POR_PAGINA);
 });
 
-watch([buscadorEmpresa, filtroTipoEmpresa, filtroSectorEmpresa, centroFiltro], () => {
+watch([buscadorEmpresa, filtroTipoEmpresa, filtroFamiliaEmpresa, centroFiltro], () => {
   paginaEmpresas.value = 1;
 });
 
@@ -308,21 +563,263 @@ const seleccionarEmpresa = (emp) => {
   seleccion.value.empresaNombre = emp.nombre_comercial;
   buscadorEmpresa.value = emp.nombre_comercial;
   mostrarDropdownEmpresas.value = false;
+  avisoCatalogo.value = '';
 };
 
-const abrirModalEmpresa = () => {
+// Alta manual (grid «Añadir una empresa nueva») y edición de la seleccionada (junto a la ficha):
+// antes era un único botón que cambiaba de función según hubiera empresa elegida.
+const abrirAltaManual = () => {
   if (estaPasoBloqueado(1)) return;
-  if (seleccion.value.empresaId) {
-    mostrarEditarEmpresa.value = true;
-  } else {
-    mostrarNuevaEmpresa.value = true;
-  }
+  mostrarNuevaEmpresa.value = true;
+};
+const abrirEditarEmpresa = () => {
+  if (estaPasoBloqueado(1) || !seleccion.value.empresaId) return;
+  mostrarEditarEmpresa.value = true;
 };
 
 const onEmpresaCreada = (empresa) => {
   empresas.value.push(empresa);
   seleccionarEmpresa(empresa);
 };
+
+// --- "CREAR EMPRESA FICTICIA CON IA" (paso 1) ---
+// La lógica (propuesta → revisar → guardar) vive en CrearEmpresaFicticiaIA.vue, el único
+// flujo de creación con IA (también en «Base de datos»). Aquí solo se abre/cierra y se
+// recibe la empresa guardada para seleccionarla.
+const panelFicticiaIA = ref(false);
+const familiaInicialFicticiaIA = ref('');
+// Con un panel de «otra vía» abierto (IA o catálogo) se ocultan las empresas del centro.
+const eligiendoOtraVia = computed(() => panelFicticiaIA.value || panelCatalogo.value);
+
+const abrirPanelFicticiaIA = (familiaId = null) => {
+  panelCatalogo.value = false;
+  mostrarNuevaEmpresa.value = false; // si se llega desde el modal «Insertar nueva empresa»
+  // Por defecto, la familia indicada o la del filtro del buscador.
+  const delFiltro = todasLasFamilias.value.find(f => (f.nombre ?? f) === filtroFamiliaEmpresa.value);
+  familiaInicialFicticiaIA.value = (typeof familiaId === 'number' ? familiaId : null) ?? delFiltro?.id ?? '';
+  panelFicticiaIA.value = true;
+};
+
+// --- BORRADOR DE EMPRESA FICTICIA CON IA (pasos 1–2) ---
+// La propuesta de la IA no se guarda al generarla: se muestra como ficha en el paso 1, su
+// diagnóstico se revisa (y retoca) en el paso 2 y se guarda al avanzar desde el paso 2. La
+// propuesta vive en el servidor (token, 120 min); aquí solo se guarda el token en
+// sessionStorage para poder recuperarla si se recarga la página (no es una credencial: el
+// servidor solo se la devuelve a su autor).
+const CLAVE_BORRADOR_IA = 'microretos:borradorEmpresaIA';
+const borradorIA = ref(null);       // { token, destino, familia, familia_id, empresa }
+const recuperableIA = ref(null);    // borrador encontrado al volver, pendiente de recuperar/descartar
+const guardandoBorradorIA = ref(false);
+// Con borrador, las empresas del centro y su ficha se ocultan (la ficha es la del borrador).
+// Grid «Añadir una empresa nueva a mi centro» visible (mismas condiciones que la plantilla)
+const mostrarViasNueva = computed(() => !!centroFiltro.value && !esModoDemo.value && !estaPasoBloqueado(1)
+  && !borradorIA.value && !panelFicticiaIA.value && !panelCatalogo.value);
+const ocultarEmpresasCentro = computed(() => eligiendoOtraVia.value || !!borradorIA.value);
+
+const guardarTokenBorrador = (token) => { try { token ? sessionStorage.setItem(CLAVE_BORRADOR_IA, token) : sessionStorage.removeItem(CLAVE_BORRADOR_IA); } catch { /* sin storage: sin recuperación */ } };
+const leerTokenBorrador = () => { try { return sessionStorage.getItem(CLAVE_BORRADOR_IA); } catch { return null; } };
+const partirLista = (texto) => (texto || '').split(',').map(t => t.trim()).filter(Boolean);
+
+const CAMPOS_EMPRESA_SELECCION = {
+  empresaNombre: '', empresaSector: '', empresaTamano: '', empresaWeb: '', empresaUbicacion: '',
+  diaANormal: '', friccionArea: '', friccionProblema: '', loQueNoQuieren: '', expectativasAlumno: '',
+  otraLimitacion: '', otraConsecuencia: '',
+};
+
+const adoptarBorrador = async (data) => {
+  // Soltar la empresa seleccionada (su watcher deja el formulario limpio) antes de rellenar.
+  if (seleccion.value.empresaId) { seleccion.value.empresaId = ''; await nextTick(); }
+  const e = data.empresa;
+  borradorIA.value = data;
+  buscadorEmpresa.value = '';
+  if (authStore.isSuperAdmin && data.destino && data.destino !== 'Catálogo DUALAB') centroFiltro.value = data.destino;
+  Object.assign(seleccion.value, {
+    empresaNombre: e.nombre_comercial || '', empresaSector: e.sector || '', empresaTamano: e.tamano || '',
+    empresaWeb: e.web || '', empresaCentro: centroFiltro.value,
+    empresaUbicacion: [e.municipio, e.provincia].filter(Boolean).join(', '),
+    diaANormal: e.dia_a_normal || '', friccionArea: e.friccion_area || '', friccionProblema: e.friccion_problema || '',
+    loQueNoQuieren: e.lo_que_no_quieren || '', expectativasAlumno: e.expectativas_alumno || '',
+    restricciones: partirLista(e.restricciones), consecuencias: partirLista(e.consecuencias),
+    otraLimitacion: '', otraConsecuencia: '',
+  });
+  // Su familia, para el paso 3 (igual que con una empresa de una sola familia).
+  familiasFiltradas.value = [data.familia];
+  familiasEmpresaCargadas.value = true;
+  seleccion.value.familia = familiaPreseleccionada.value = data.familia;
+  motivoFamiliaPreseleccionada.value = 'unica';
+  guardarTokenBorrador(data.token);
+};
+
+// Descarta el borrador (servidor + sessionStorage) y deja el paso 1 limpio para elegir otra.
+const descartarBorradorIA = () => {
+  const token = borradorIA.value?.token;
+  borradorIA.value = null;
+  guardarTokenBorrador(null);
+  if (token) descartarEmpresaFicticiaIA(token).catch(() => {});
+  Object.assign(seleccion.value, CAMPOS_EMPRESA_SELECCION, { restricciones: [], consecuencias: [], familia: '' });
+  familiasFiltradas.value = []; familiasEmpresaCargadas.value = false; familiaPreseleccionada.value = '';
+};
+
+const descartarBorradorYVolver = () => {
+  if (!confirm('Se descartará la empresa generada con IA (no se ha guardado) y volverás al paso 1. ¿Continuar?')) return;
+  descartarBorradorIA();
+  pasoMaxBloqueado.value = 0;
+  pasoActual.value = 1;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+};
+
+const generarOtraDesdeBorrador = () => {
+  const familiaId = borradorIA.value?.familia_id;
+  descartarBorradorIA();
+  abrirPanelFicticiaIA(familiaId);
+};
+
+// Al avanzar desde el paso 2: guarda la empresa con el diagnóstico tal como se ha dejado.
+const guardarBorradorIA = async () => {
+  if (!borradorIA.value || guardandoBorradorIA.value) return false;
+  guardandoBorradorIA.value = true;
+  try {
+    const datosP2 = getDatosPaso2Preparados();
+    const { data } = await guardarEmpresaFicticiaIA(borradorIA.value.token, {
+      diaANormal: seleccion.value.diaANormal, friccionArea: seleccion.value.friccionArea,
+      friccionProblema: seleccion.value.friccionProblema, loQueNoQuieren: seleccion.value.loQueNoQuieren,
+      expectativasAlumno: seleccion.value.expectativasAlumno,
+      consecuencias: datosP2.consecuenciasStr, restricciones: datosP2.restriccionesStr,
+    });
+    borradorIA.value = null;
+    guardarTokenBorrador(null);
+    // A partir de aquí es una ficticia normal: su watcher carga ficha, diagnóstico y familias.
+    empresas.value.push(data.empresa);
+    seleccionarEmpresa(data.empresa);
+    return true;
+  } catch (e) {
+    if (e.response?.status === 410) {
+      registrarAviso('Empresa caducada', 'La empresa generada ha caducado (más de 2 horas sin guardar). Vuelve al paso 1 y genera otra.', 'error');
+    } else {
+      registrarAviso('Error al guardar la empresa', e.response?.data?.error || e.response?.data?.message || 'No se pudo guardar la empresa. Inténtalo de nuevo.', 'error');
+    }
+    return false;
+  } finally {
+    guardandoBorradorIA.value = false;
+  }
+};
+
+// Recuperación tras recargar: si queda un token y el borrador sigue vivo en el servidor.
+const comprobarBorradorRecuperable = async () => {
+  const token = leerTokenBorrador();
+  if (!token) return;
+  try {
+    const { data } = await verPropuestaFicticiaIA(token);
+    recuperableIA.value = data;
+  } catch {
+    guardarTokenBorrador(null); // caducado o ya guardado
+  }
+};
+const recuperarBorradorIA = async () => {
+  const data = recuperableIA.value;
+  recuperableIA.value = null;
+  if (data) await adoptarBorrador(data);
+};
+const descartarRecuperableIA = () => {
+  const token = recuperableIA.value?.token;
+  recuperableIA.value = null;
+  guardarTokenBorrador(null);
+  if (token) descartarEmpresaFicticiaIA(token).catch(() => {});
+};
+
+// Avisos antes de perder un borrador sin guardar (recarga/cierre de pestaña, otra pantalla).
+// También con retos generados sin guardar: el generador solo vive en memoria y una recarga los pierde.
+const avisoAntesDeSalir = (e) => {
+  if (borradorIA.value || microretosGenerados.value.some(r => !r._ui_guardado)) { e.preventDefault(); e.returnValue = ''; }
+};
+onBeforeRouteLeave(() => {
+  if (!borradorIA.value) return true;
+  if (!confirm('Tienes una empresa generada con IA sin guardar. Si sales, se descartará. ¿Salir igualmente?')) return false;
+  descartarBorradorIA();
+  return true;
+});
+
+const onFicticiaIABorrador = async (data) => {
+  panelFicticiaIA.value = false;
+  await adoptarBorrador(data);
+};
+
+const onFicticiaIAGuardada = (empresa, { paraCatalogo }) => {
+  if (paraCatalogo) {
+    // Plantilla sin centro: no se selecciona (los retos se generan siempre con una copia).
+    catalogoCargadoPara.value = null;
+    return;
+  }
+  panelFicticiaIA.value = false;
+  onEmpresaCreada(empresa);
+};
+
+// --- CATÁLOGO DUALAB (T2): plantillas ficticias compartidas, de solo lectura ---
+// «Usar en mi centro» crea (o reutiliza) una copia del centro y la deja seleccionada.
+const panelCatalogo = ref(false);
+const familiaCatalogo = ref('');
+const empresasCatalogo = ref([]);
+const cargandoCatalogo = ref(false);
+const catalogoCargadoPara = ref(null);   // familia de la última carga (evita repetir peticiones)
+const usandoCatalogoId = ref(null);
+const errorCatalogo = ref('');
+const avisoCatalogo = ref('');
+// El catálogo solo ofrece plantillas de familias con módulos y RA/CE (las demás no
+// permitirían completar el reto): el filtro tampoco muestra familias vacías.
+const familiasCatalogo = computed(() => todasLasFamilias.value.filter(f => f.con_datos_retos));
+
+// Superadmin no tiene centro propio: el catálogo se filtra por el centro elegido en el paso 1
+// (solo plantillas con ciclos de ese centro que tengan módulos y RA/CE).
+const centroCatalogo = computed(() => (authStore.isSuperAdmin ? centroFiltro.value : '') || null);
+
+const cargarCatalogo = async () => {
+  const clave = `${familiaCatalogo.value || 'todas'}|${centroCatalogo.value || ''}`;
+  if (catalogoCargadoPara.value === clave) return;
+  cargandoCatalogo.value = true;
+  errorCatalogo.value = '';
+  try {
+    const { data } = await getCatalogoEmpresas(familiaCatalogo.value || null, centroCatalogo.value);
+    empresasCatalogo.value = data.data ?? data;
+    catalogoCargadoPara.value = clave;
+  } catch (e) {
+    errorCatalogo.value = e.response?.data?.error || 'No se pudo cargar el catálogo.';
+  } finally {
+    cargandoCatalogo.value = false;
+  }
+};
+
+const abrirPanelCatalogo = () => {
+  panelFicticiaIA.value = false;
+  avisoCatalogo.value = '';
+  const delFiltro = familiasCatalogo.value.find(f => f.nombre === filtroFamiliaEmpresa.value);
+  familiaCatalogo.value = delFiltro?.id ?? '';
+  panelCatalogo.value = true;
+  cargarCatalogo();
+};
+watch([familiaCatalogo, centroCatalogo], () => { if (panelCatalogo.value) cargarCatalogo(); });
+
+const usarDelCatalogo = async (plantilla) => {
+  if (usandoCatalogoId.value) return;
+  usandoCatalogoId.value = plantilla.id;
+  errorCatalogo.value = '';
+  try {
+    const payload = authStore.isSuperAdmin ? { centro: centroFiltro.value } : {};
+    const { data } = await usarEmpresaCatalogo(plantilla.id, payload);
+    const yaEnLista = empresas.value.find(e => String(e.id) === String(data.empresa.id));
+    if (yaEnLista) seleccionarEmpresa(yaEnLista); else onEmpresaCreada(data.empresa);
+    // El panel se cierra siempre para que se vea la empresa ya seleccionada debajo; el
+    // aviso se muestra fuera del panel.
+    avisoCatalogo.value = data.nueva
+      ? `«${data.empresa.nombre_comercial}» se ha copiado a ${authStore.isSuperAdmin ? 'este centro' : 'tu centro'} y está seleccionada.`
+      : `${authStore.isSuperAdmin ? 'Este centro' : 'Tu centro'} ya tenía una copia de «${data.empresa.nombre_comercial}»: la hemos seleccionado.`;
+    panelCatalogo.value = false;
+  } catch (e) {
+    errorCatalogo.value = e.response?.data?.error || e.response?.data?.message || 'No se pudo usar esta empresa.';
+  } finally {
+    usandoCatalogoId.value = null;
+  }
+};
+
 
 const onEmpresaActualizada = (empresa) => {
   const idx = empresas.value.findIndex(e => String(e.id) === String(empresa.id));
@@ -335,6 +832,7 @@ const onEmpresaActualizada = (empresa) => {
     seleccion.value.empresaTamano = empresa.tamano || '';
     seleccion.value.empresaWeb = empresa.web || '';
     seleccion.value.empresaCentro = empresa.centro_educativo || '';
+    cargarFamiliasEmpresa(empresa.id); // las familias pueden haber cambiado en la edición
   }
 };
 
@@ -373,37 +871,55 @@ watch(centroFiltro, (newVal, oldVal) => {
 
 // --- FUNCIÓN LIMPIAR FORMULARIO (BOTÓN ROJO) ---
 const limpiarFormulario = () => {
-  if(confirm("¿Estás seguro de que quieres vaciar el formulario y empezar de cero?")) {
-    pasoActual.value = 1;
-    pasoMaxBloqueado.value = 0;
-    buscadorEmpresa.value = '';
-    // Docente/admin: el centro está fijado a su cuenta y no se vacía; superadmin sí lo pierde
-    centroFiltro.value = centroFijadoPorRol.value ? authStore.userCentroNombre : '';
-    empresaDetalle.value = null;
-    microretosGenerados.value = [];
-    crmActualizado.value = false;
-    diagnosticoRecuperado.value = false;
-    todosGuardados.value = false;
-    esModoDemo.value = false;
-    mostrarSelectorDemo.value = false;
-    esInfoSimulada.value = false;
-    cargandoSimulacion.value = false;
-    modulosSeleccionados.value = [];
-    sectorEsLibre.value = false;
-    mostrarDropdownSector.value = false;
-    filtroTipoEmpresa.value = '';
-    filtroSectorEmpresa.value = '';
-    paginaEmpresas.value = 1;
+  if (confirm("¿Estás seguro de que quieres vaciar el formulario y empezar de cero?")) vaciarGenerador();
+};
 
-    seleccion.value = {
-      empresaId: '', empresaNombre: '', empresaCentro: '', empresaSector: '',
-      empresaUbicacion: '', empresaTamano: '', empresaWeb: '',
-      diaANormal: '', friccionArea: '', friccionProblema: '', restricciones: [],
-      otraLimitacion: '', loQueNoQuieren: '', consecuencias: [], otraConsecuencia: '', expectativasAlumno: '',
-      familia: '', cicloId: '', cursoSeleccionado: 2, duracion: '1 a 2 semanas', nivelGrupo: 'Medio', cantidadMicroretos: 3
-    };
-    window.scrollTo({top: 0, behavior: 'smooth'});
-  }
+// Lo que hace «Vaciar»; también al pasar a otra petición de una solicitud del profesorado
+const vaciarGenerador = () => {
+  pasoActual.value = 1;
+  pasoMaxBloqueado.value = 0;
+  // Con una solicitud abierta, el paso 3 se vuelve a rellenar al llegar a él
+  paso3SolicitudAplicado = false;
+  avisosSolicitud.value = [];
+  // Vaciar reinicia también el historial: solo queda el aviso de que se ha vaciado.
+  historialAvisos.value = [];
+  avisosVistos.value = 0;
+  registrarAviso('Formulario vaciado', 'Se ha vaciado el formulario y se han desbloqueado todos los pasos: puedes empezar de nuevo.');
+  buscadorEmpresa.value = '';
+  // Docente/admin: el centro está fijado a su cuenta y no se vacía; superadmin sí lo pierde
+  centroFiltro.value = centroFijadoPorRol.value ? authStore.userCentroNombre : '';
+  empresaDetalle.value = null;
+  microretosGenerados.value = [];
+  crmActualizado.value = false;
+  diagnosticoRecuperado.value = false;
+  editandoDiagnostico.value = false;
+  avisoEmpresaReal.value = false;
+  verDiagnostico.value = false;
+  panelFicticiaIA.value = false; // al desmontarse, el componente descarta su propuesta
+  if (borradorIA.value) descartarBorradorIA();
+  panelCatalogo.value = false;
+  avisoCatalogo.value = '';
+  todosGuardados.value = false;
+  esModoDemo.value = false;
+  mostrarSelectorDemo.value = false;
+  esInfoSimulada.value = false;
+  cargandoSimulacion.value = false;
+  modulosSeleccionados.value = [];
+  modoModulosManual.value = false;
+  mostrarDropdownSector.value = false;
+  filtroTipoEmpresa.value = '';
+  filtroFamiliaEmpresa.value = '';
+  paginaEmpresas.value = 1;
+
+  seleccion.value = {
+    empresaId: '', empresaNombre: '', empresaCentro: '', empresaSector: '',
+    empresaUbicacion: '', empresaTamano: '', empresaWeb: '',
+    diaANormal: '', friccionArea: '', friccionProblema: '', restricciones: [],
+    otraLimitacion: '', loQueNoQuieren: '', consecuencias: [], otraConsecuencia: '', expectativasAlumno: '',
+    familia: '', cicloId: '', cursoSeleccionado: 2, nivelGrupo: 'Medio', cantidadMicroretos: 3,
+    enfoqueReto: '', tareasPracticas: '', entregableDocente: ''
+  };
+  window.scrollTo({top: 0, behavior: 'smooth'});
 };
 
 // --- FUNCIÓN PARA CARGAR DATOS DEMO DESDE API ---
@@ -411,12 +927,15 @@ const cargarDemo = async (familiaProfesional) => {
   if (estaPasoBloqueado(1)) return;
   mostrarSelectorDemo.value = false;
   try {
-    const res = await api.get(`/demos/${encodeURIComponent(familiaProfesional)}`);
+    const res = await getDemoDeFamilia(familiaProfesional);
     const demo = res.data;
 
     esModoDemo.value = true;
     seleccion.value.empresaId = '';
     centroFiltro.value = demo.empresa_centro || '';
+    // Los watch de centroFiltro y empresaId vacían la selección anterior (empresa, familia…):
+    // se espera a que se ejecuten antes de rellenar la demo, o borrarían sus datos
+    await nextTick();
     buscadorEmpresa.value = demo.empresa_nombre;
     empresaDetalle.value = null;
     diagnosticoRecuperado.value = false;
@@ -443,7 +962,6 @@ const cargarDemo = async (familiaProfesional) => {
     familiasFiltradas.value = [demo.familia_profesional];
     seleccion.value.nivelGrupo = (demo.nivel_grupo === 'Básico' ? 'Bajo' : demo.nivel_grupo) || 'Medio';
     seleccion.value.cursoSeleccionado = demo.curso_seleccionado || 2;
-    seleccion.value.duracion = demo.duracion || '1 a 2 semanas';
     seleccion.value.cantidadMicroretos = 1;
 
     autoSelectDemoCycle = true;
@@ -453,7 +971,7 @@ const cargarDemo = async (familiaProfesional) => {
     demoModuloNombre.value = demo.modulo_nombre || '';
   } catch (e) {
     console.error('Error cargando demo:', e);
-    alert('Error al cargar la demo seleccionada.');
+    registrarAviso('Error en la demo', 'No se ha podido cargar la demo seleccionada.', 'error');
   }
 };
 
@@ -465,23 +983,23 @@ const generarRetoDemo = async () => {
     // Simula el tiempo de procesado de la IA
     await new Promise(resolve => setTimeout(resolve, 2800));
 
-    const res = await api.get(`/demos/${encodeURIComponent(demoFamiliaActiva.value)}/microretos`);
+    const res = await getMicroretosDemoDeFamilia(demoFamiliaActiva.value);
 
     if (res.data?.microretos?.length) {
-      res.data.microretos.forEach(reto => {
-        microretosGenerados.value.unshift({
-          ...reto,
-          _ui_guardado: true,   // ya están en BD, no se guardan de nuevo
-          _ui_guardando: false,
-        });
-      });
-      setTimeout(() => { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); }, 300);
+      // Se reemplaza la lista: «Regenerar demo» devuelve siempre los mismos retos de ejemplo
+      // y añadirlos de nuevo los duplicaba. Mismo orden que antes (el último, primero).
+      microretosGenerados.value = res.data.microretos.map(reto => ({
+        ...reto,
+        _ui_guardado: true,   // ya están en BD, no se guardan de nuevo
+        _ui_guardando: false,
+      })).reverse();
+      scrollAGaleriaRetos();
     } else {
-      alert('No hay microretos guardados para esta demo todavía.');
+      registrarAviso('Demo sin retos', 'No hay retos guardados para esta demo todavía.');
     }
   } catch (e) {
     console.error('Error cargando microretos demo:', e);
-    alert('Error al cargar los microretos de la demo.');
+    registrarAviso('Error en la demo', 'No se han podido cargar los retos de la demo.', 'error');
   } finally {
     cargando.value = false;
   }
@@ -499,7 +1017,8 @@ const paso3Valido = computed(() => {
 // Validez del paso actual — única fuente de verdad para habilitar tanto "Siguiente Paso"
 // como el salto hacia delante desde el indicador de progreso.
 const pasoActualValido = computed(() => {
-  if (pasoActual.value === 1) return paso1Valido.value;
+  // Con un panel de IA/catálogo abierto no se avanza con la empresa que quedó oculta debajo.
+  if (pasoActual.value === 1) return paso1Valido.value && !eligiendoOtraVia.value;
   if (pasoActual.value === 2) return paso2Valido.value;
   return true;
 });
@@ -508,16 +1027,26 @@ const pasoActualValido = computed(() => {
 const buscadorRef = ref(null);
 const sectorRef = ref(null);
 const mostrarDropdownSector = ref(false);
-const sectorEsLibre = ref(false);
+
+// El sector es el mismo dato que usa el filtro de búsqueda de empresas (identidad de la
+// empresa, no contexto del reto). Reescribirlo aquí reclasificaría la empresa para
+// siempre, no solo para este reto. Se bloquea en cuanto la empresa ya tiene uno asignado;
+// si a una empresa existente le falta (dato legacy), se deja completar aquí una única vez.
+const sectorBloqueado = computed(() =>
+  !!seleccion.value.empresaId && !!seleccion.value.empresaSector);
+// Tamaño y web de una empresa ya guardada son datos de su ficha: no se cambian en el paso 1
+// (solo afectaría a este reto y desincronizaría la ficha). Se editan con «Modificar datos empresa».
+const datosFichaBloqueados = computed(() => !!seleccion.value.empresaId);
+// Sector/tamaño/web como datos de lectura (dentro de la ficha) en vez de campos: con empresa
+// guardada, en demo o con el paso ya sellado. Solo una empresa nueva escrita a mano los edita.
+const fichaSoloLectura = computed(() => datosFichaBloqueados.value || esModoDemo.value || estaPasoBloqueado(1));
+// «Modificar datos empresa» solo superadmin (EmpresaPolicy::update): los retos ya generados
+// leen la ficha en vivo y cambiarla alteraría cómo se ven.
+const puedeModificarFicha = computed(() => authStore.isSuperAdmin);
 
 const seleccionarSector = (sector) => {
   seleccion.value.empresaSector = sector;
   mostrarDropdownSector.value = false;
-};
-const activarSectorLibre = () => {
-  seleccion.value.empresaSector = '';
-  mostrarDropdownSector.value = false;
-  sectorEsLibre.value = true;
 };
 
 const cerrarDropdownFuera = (e) => {
@@ -530,17 +1059,20 @@ const cerrarDropdownFuera = (e) => {
   if (sectorRef.value && !sectorRef.value.contains(e.target)) {
     mostrarDropdownSector.value = false;
   }
-  estadoDropdownGenAbierto.value = false;
 };
 
 const cargarEmpresas = async () => {
   try {
     const [resEmpresas, resFamilias] = await Promise.all([
-      api.get('/empresas'),
-      api.get('/familias'),
+      getEmpresas(),
+      getFamilias(),
     ]);
     empresas.value = resEmpresas.data;
-    todasLasFamilias.value = resFamilias.data.map(f => f.nombre ?? f).filter(Boolean).sort();
+    // Se conservan los objetos completos {id, nombre} — InsertModifyEmpresa.vue
+    // necesita el id para filtrar las familias por centro educativo.
+    todasLasFamilias.value = resFamilias.data
+      .filter(Boolean)
+      .sort((a, b) => (a.nombre ?? a).localeCompare(b.nombre ?? b));
   } catch (e) {
     console.error(e);
   }
@@ -555,20 +1087,153 @@ const onLoginSuccess = async () => {
   }
 };
 
+// --- SOLICITUD DE RETOS DE UN DOCENTE (?solicitud=ID, desde DuaLab Central) ---
+// Solo superadmin. La empresa asignada en Central se preselecciona al abrir; el paso 3 (familia,
+// ciclo, curso, módulos, RA/CE, nivel y el borrador del enfoque) se rellena al llegar a él, cuando
+// las familias de la empresa ya están cargadas. Todo queda editable y nada se genera solo. Los
+// retos que se guardan quedan enlazados a la solicitud y van a la recámara (ver guardarTodos).
+const solicitudActiva = ref(null);
+const avisosSolicitud = ref([]);
+let paso3SolicitudAplicado = false;
+
+// Espera a que un valor que carga un watch asíncrono esté listo (con tope, por si la API falla)
+const esperarA = (condicion, ms = 8000) => new Promise((resolve) => {
+  if (condicion()) return resolve(true);
+  const parar = watch(condicion, (v) => { if (v) { parar(); clearTimeout(t); resolve(true); } });
+  const t = setTimeout(() => { parar(); resolve(false); }, ms);
+});
+
+const cargarSolicitud = async (id, bloque = 0) => {
+  if (!authStore.isSuperAdmin || !/^\d+$/.test(String(id))) return;
+  try {
+    const { data } = await getDatosGenerador(id, bloque);
+    solicitudActiva.value = data.data;
+    paso3SolicitudAplicado = false;
+    avisosSolicitud.value = [];
+  } catch (e) {
+    registrarAviso('Solicitud no disponible', e.response?.data?.error || 'No se ha podido cargar la solicitud del docente.', 'error');
+    return;
+  }
+  if (estaPasoBloqueado(1)) return;
+  const d = solicitudActiva.value;
+  // Paso 1: sin centro no se puede buscar empresa. Se pone el de la empresa elegida en Central, el del
+  // docente o el de la beta; y el filtro de familia de la petición, para que la lista ya encaje y, al
+  // elegir empresa, la familia del paso 3 se preseleccione sola (cargarFamiliasEmpresa).
+  if (!centroFijadoPorRol.value && d.centro_generador && centroFiltro.value !== d.centro_generador) {
+    centroFiltro.value = d.centro_generador;
+    await nextTick();
+  }
+  filtroFamiliaEmpresa.value = familiasParaFiltroEmpresa.value.includes(d.familia) ? d.familia : '';
+  const emp = empresas.value.find(e => e.id === d.empresa_id);
+  if (emp) {
+    seleccionarEmpresa(emp);
+  } else {
+    mostrarDropdownEmpresas.value = true;
+    if (d.familia && !filtroFamiliaEmpresa.value) {
+      avisosSolicitud.value = [`En ${centroFiltro.value || 'este centro'} no hay empresas de ${d.familia}: crea una ficticia con IA o cógela del catálogo DuaLab.`];
+    }
+  }
+};
+
+const aplicarPaso3Solicitud = async () => {
+  const d = solicitudActiva.value;
+  if (!d || paso3SolicitudAplicado || estaPasoBloqueado(3)) return;
+  paso3SolicitudAplicado = true;
+  const avisos = [];
+
+  if (d.nivelGrupo) seleccion.value.nivelGrupo = d.nivelGrupo;
+  if (d.enfoqueReto) seleccion.value.enfoqueReto = d.enfoqueReto;
+  if (d.tareasPracticas) seleccion.value.tareasPracticas = d.tareasPracticas;
+  if (d.entregableDocente) seleccion.value.entregableDocente = d.entregableDocente;
+  if (d.cursoSeleccionado) seleccion.value.cursoSeleccionado = d.cursoSeleccionado === 'ambos_cursos' ? 'ambos_cursos' : Number(d.cursoSeleccionado);
+
+  if (d.familia && familiasEmpresaCargadas.value && !familiasFiltradas.value.includes(d.familia)) {
+    avisos.push(`La empresa elegida no tiene la familia «${d.familia}»: elige otra empresa o añádele la familia en el paso 1.`);
+  } else if (d.familia) {
+    // Al cambiar de familia, su watch vacía la lista de ciclos en el siguiente tick: sin esperarlo,
+    // la espera daría por buena la lista de la familia anterior
+    if (seleccion.value.familia !== d.familia) { seleccion.value.familia = d.familia; await nextTick(); }
+    await esperarA(() => ciclos.value.length > 0);
+    if (d.cicloId && ciclos.value.some(c => c.id === d.cicloId)) {
+      // El watch del ciclo no vacía los módulos antes de cargar los nuevos: se vacían aquí
+      if (seleccion.value.cicloId !== d.cicloId) { modulos.value = []; seleccion.value.cicloId = d.cicloId; }
+      await esperarA(() => modulos.value.length > 0);
+      const ids = (d.moduloIds || []).filter(idM => modulos.value.some(m => m.id === idM));
+      if (ids.length) {
+        modoModulosManual.value = true;
+        if (esAmbosCursos.value) {
+          modulosSeleccionadosCurso1.value = ids.filter(idM => modulos.value.find(m => m.id === idM)?.curso == 1);
+          modulosSeleccionadosCurso2.value = ids.filter(idM => modulos.value.find(m => m.id === idM)?.curso == 2);
+        } else {
+          modulosSeleccionados.value = ids;
+        }
+        await nextTick();
+        seleccionRaCe.value = Object.fromEntries((d.seleccionRaCe || [])
+          .filter(s => ids.includes(s.modulo_id))
+          .map(s => [s.ra_id, { moduloId: s.modulo_id, ceIds: s.ce_ids }]));
+      }
+    } else if (d.cicloId) {
+      avisos.push('El ciclo de la solicitud no aparece para esta empresa y su centro: elígelo a mano.');
+    }
+  }
+
+  avisosSolicitud.value = avisos;
+  registrarAviso('Datos de la solicitud', avisos.length ? 'Hemos rellenado lo que encaja; revisa los avisos de la banda.' : 'El paso 3 se ha rellenado con lo que pidió el docente. Revísalo antes de generar.');
+};
+
+watch(pasoActual, (paso) => { if (paso === 3) aplicarPaso3Solicitud(); });
+
+// --- «SOLICITUDES DEL PROFESORADO» (solo superadmin) ---
+// Desplegable con las solicitudes respondidas y sus peticiones: elegir una rellena el generador como
+// el enlace «Abrir en el generador» de Central (?solicitud=ID&bloque=N).
+const panelSolicitudes = ref(false);
+const solicitudesProfesorado = ref([]);
+const cargandoSolicitudes = ref(false);
+const errorSolicitudes = ref('');
+const CURSO_TEXTO = { 1: '1.º', 2: '2.º', ambos_cursos: '1.º y 2.º' };
+
+const abrirPanelSolicitudes = async () => {
+  panelSolicitudes.value = !panelSolicitudes.value;
+  if (!panelSolicitudes.value) return;
+  cargandoSolicitudes.value = true;
+  errorSolicitudes.value = '';
+  try {
+    solicitudesProfesorado.value = (await getSolicitudesParaGenerador()).data.data;
+  } catch {
+    errorSolicitudes.value = 'No se han podido cargar las solicitudes. Inténtalo de nuevo.';
+  } finally {
+    cargandoSolicitudes.value = false;
+  }
+};
+
+const elegirPeticion = async (solicitudId, bloque) => {
+  // Con pasos ya sellados o retos sin guardar, los datos nuevos no encajarían: se vacía antes
+  if (pasoMaxBloqueado.value > 0 || microretosGenerados.value.some(r => !r._ui_guardado)) {
+    if (!confirm('Para cargar otra petición se vaciará el generador. Guarda antes los retos que quieras conservar. ¿Continuar?')) return;
+    vaciarGenerador();
+  }
+  panelSolicitudes.value = false;
+  await router.replace({ query: { ...route.query, solicitud: solicitudId, bloque } });
+  await cargarSolicitud(solicitudId, bloque);
+  if (pasoActual.value === 3) aplicarPaso3Solicitud();
+  registrarAviso('Solicitud cargada', 'La empresa (si DuaLab la eligió) ya está en el paso 1; el paso 3 se rellena al llegar a él.');
+};
+
 onMounted(async () => {
   // Guarda de seguridad en componente: el router ya redirige antes de montar,
   // pero este check actúa como barrera extra ante manipulaciones del token en memoria.
   if (!authStore.isAuthenticated) {
-    router.replace({ path: '/', query: { redirect: '/retos/crear' } })
+    router.replace({ path: '/', query: queryRedirect('/retos/crear') })
     return
   }
 
   document.addEventListener('click', cerrarDropdownFuera);
+  window.addEventListener('beforeunload', avisoAntesDeSalir);
   setTimeout(() => { isLoaded.value = true; }, 100);
 
   // Carga pública: lista de demos disponibles (no requiere auth)
   try {
-    const resDemos = await api.get('/demos');
+    const resDemos = await getDemos();
     demosDisponibles.value = resDemos.data;
   } catch (e) {
     console.error('Error cargando demos:', e);
@@ -582,25 +1247,73 @@ onMounted(async () => {
     if (centroFijadoPorRol.value) {
       centroFiltro.value = authStore.userCentroNombre;
     }
+    await comprobarBorradorRecuperable();
+    if (route.query.solicitud) await cargarSolicitud(route.query.solicitud, Number(route.query.bloque) || 0);
     await nextTick();
     pasoGuia.value = 1;
-    // Tour prompt desactivado temporalmente — reactivar poniendo showTourPrompt.value = true cuando se necesite.
-    // showTourPrompt.value = true;
   }
 });
 
-onUnmounted(() => {
+// --- TRABAJO ANTERIOR AL VOLVER AL GENERADOR ---
+// App.vue mantiene el generador en memoria (KeepAlive) al ir a otra pantalla, p. ej. con
+// «Trabajar este reto»: al volver sigue todo como estaba y se pregunta si recuperarlo o
+// empezar de cero. Solo en memoria (nada en el navegador): con una recarga se pierde, y
+// avisoAntesDeSalir avisa antes. Por usuario: App.vue cambia la key al cambiar de sesión.
+defineOptions({ name: 'GeneradorMicroretos' });
+const hayTrabajoAnterior = computed(() =>
+  pasoMaxBloqueado.value > 0 || microretosGenerados.value.length > 0 || !!seleccion.value.empresaId);
+const retosSinGuardar = computed(() => microretosGenerados.value.filter(r => !r._ui_guardado).length);
+const avisoTrabajoAnterior = ref(false);
+let generadorActivado = false;
+
+onActivated(() => {
+  if (!generadorActivado) { generadorActivado = true; return; } // primera vez: es el montaje
+  document.addEventListener('click', cerrarDropdownFuera);
+  const solicitudNueva = route.query.solicitud && String(route.query.solicitud) !== String(solicitudActiva.value?.solicitud_id ?? '');
+  if (hayTrabajoAnterior.value) avisoTrabajoAnterior.value = true;
+  else if (solicitudNueva) cargarSolicitud(route.query.solicitud, Number(route.query.bloque) || 0);
+});
+onDeactivated(() => {
+  // Al volver se ve el paso donde se quedó, sin la ficha abierta ni avisos flotando
+  cerrarReto();
+  toastModulos.value = null;
+  avisoFlotante.value = null;
+  modoGuia.value = false;
   document.removeEventListener('click', cerrarDropdownFuera);
+});
+
+const recuperarTrabajoAnterior = () => {
+  avisoTrabajoAnterior.value = false;
+  if (microretosGenerados.value.length > 0) {
+    pasoActual.value = totalPasos; // los retos generados quedan en el último paso
+    scrollAGaleriaRetos();
+  }
+};
+const empezarDeNuevo = async () => {
+  avisoTrabajoAnterior.value = false;
+  vaciarGenerador();
+  // Con una solicitud del profesorado en la URL, se carga sobre el generador vacío; si no, se suelta la anterior
+  if (route.query.solicitud) await cargarSolicitud(route.query.solicitud, Number(route.query.bloque) || 0);
+  else solicitudActiva.value = null;
+};
+
+onUnmounted(() => {
+  clearTimeout(toastModulosTimer);
+  clearTimeout(avisoFlotanteTimer);
+  document.removeEventListener('click', cerrarDropdownFuera);
+  window.removeEventListener('beforeunload', avisoAntesDeSalir);
   tourActivo.value = false;
   window.removeEventListener('scroll', onScrollGuia);
+  window.removeEventListener('resize', onScrollGuia);
 });
 
 watch(() => seleccion.value.empresaId, async (nuevoId) => {
   seleccion.value.familia = ''; ciclos.value = []; seleccion.value.cicloId = ''; modulos.value = [];
   modulosSeleccionados.value = []; familiasFiltradas.value = [];
+  motivoFamiliaPreseleccionada.value = ''; familiaPreseleccionada.value = ''; familiasEmpresaCargadas.value = false;
   empresaDetalle.value = null; crmActualizado.value = false; diagnosticoRecuperado.value = false;
+  editandoDiagnostico.value = false; avisoEmpresaReal.value = false; verDiagnostico.value = false; diagnosticoOriginal = null;
   microretosGenerados.value = [];
-  sectorEsLibre.value = false;
   mostrarDropdownSector.value = false;
 
   if (!nuevoId) return;
@@ -623,13 +1336,83 @@ watch(() => seleccion.value.empresaId, async (nuevoId) => {
       seleccion.value.loQueNoQuieren = emp.lo_que_no_quieren || '';
       if (emp.consecuencias) seleccion.value.consecuencias = emp.consecuencias.split(',').map(s => s.trim());
       if (emp.restricciones) seleccion.value.restricciones = emp.restricciones.split(',').map(s => s.trim());
+      seleccion.value.expectativasAlumno = emp.expectativas_alumno || '';
     }
   }
-  try {
-    const resFam = await api.get(`/empresas/${nuevoId}/familias`);
-    familiasFiltradas.value = resFam.data;
-  } catch(e) { console.error(e); }
+  await cargarFamiliasEmpresa(nuevoId);
 });
+
+// Carga las familias de la empresa y, si se puede deducir, preselecciona la del paso 3.
+// Se llama al elegir empresa y tras editarla en el paso 1 (p.ej. para asignarle familias).
+async function cargarFamiliasEmpresa(idEmpresa) {
+  try {
+    const resFam = await getFamiliasDeEmpresa(idEmpresa);
+    if (String(seleccion.value.empresaId) !== String(idEmpresa)) return; // se cambió de empresa mientras cargaba
+    familiasFiltradas.value = resFam.data;
+    familiasEmpresaCargadas.value = true;
+    // Tras editar la empresa, la familia elegida puede haber dejado de estar vinculada
+    if (seleccion.value.familia && !resFam.data.includes(seleccion.value.familia)) {
+      seleccion.value.familia = familiaPreseleccionada.value = '';
+      motivoFamiliaPreseleccionada.value = '';
+    }
+    if (seleccion.value.familia) return;
+
+    // Ahorrar volver a elegir la familia cuando ya se puede deducir (nunca una sin módulos/RA/CE)
+    const filtro = filtroFamiliaEmpresa.value;
+    const usables = resFam.data.filter(familiaTieneDatos);
+    if (filtro && usables.includes(filtro)) {
+      seleccion.value.familia = familiaPreseleccionada.value = filtro;
+      motivoFamiliaPreseleccionada.value = 'filtro';
+    } else if (usables.length === 1) {
+      seleccion.value.familia = familiaPreseleccionada.value = usables[0];
+      motivoFamiliaPreseleccionada.value = resFam.data.length === 1 ? 'unica' : 'unica_con_datos';
+    }
+  } catch(e) { console.error(e); }
+}
+
+// Familias/ciclos sin módulos con RA y CE: el reto no se podría completar (la IA los necesita).
+// Mientras /familias no ha cargado, o en modo demo (datos propios), no se bloquea nada.
+const familiasConDatos = computed(() =>
+  new Set(todasLasFamilias.value.filter(f => f.con_datos_retos).map(f => f.nombre)));
+function familiaTieneDatos(nombre) {
+  return esModoDemo.value || !todasLasFamilias.value.length || familiasConDatos.value.has(nombre);
+}
+const cicloTieneDatos = (c) => esModoDemo.value || c.con_datos_retos !== false;
+const empresaSinFamiliasConDatos = computed(() =>
+  !!seleccion.value.empresaId && familiasEmpresaCargadas.value && familiasFiltradas.value.length > 0
+  && !familiasFiltradas.value.some(familiaTieneDatos));
+const ningunCicloConDatos = computed(() => ciclos.value.length > 0 && !ciclos.value.some(cicloTieneDatos));
+// Solo se listan los ciclos con RA y CE: los demás no se pueden usar para generar
+const ciclosVisibles = computed(() => ciclos.value.filter(cicloTieneDatos));
+// Cursos del ciclo elegido con RA y CE (cursos_con_datos, de la API). Sin ciclo o sin el dato, no se limita.
+const cursoTieneDatos = (curso) => {
+  if (esModoDemo.value) return true;
+  const cursos = ciclos.value.find(c => c.id === seleccion.value.cicloId)?.cursos_con_datos;
+  if (!Array.isArray(cursos)) return true;
+  return curso === 'ambos_cursos' ? cursos.includes(1) && cursos.includes(2) : cursos.includes(curso);
+};
+const elegirCurso = (curso) => {
+  if (esModoDemo.value || !cursoTieneDatos(curso)) return;
+  seleccion.value.cursoSeleccionado = curso;
+};
+// Al elegir ciclo, si el curso marcado no tiene RA/CE, se pasa a uno que sí tenga
+watch(() => seleccion.value.cicloId, () => {
+  if (!seleccion.value.cicloId || cursoTieneDatos(seleccion.value.cursoSeleccionado)) return;
+  const curso = [2, 1].find(cursoTieneDatos);
+  if (!curso) return;
+  seleccion.value.cursoSeleccionado = curso;
+  registrarAviso('Curso cambiado', `Este ciclo solo tiene RA y CE cargados de ${curso}º curso: se ha elegido ${curso}º.`);
+});
+
+const empresaSinFamilias = computed(() =>
+  !!seleccion.value.empresaId && familiasEmpresaCargadas.value && familiasFiltradas.value.length === 0);
+
+// El aviso de preselección solo tiene sentido mientras no se cambie la familia a mano
+const familiaSigueSiendoPreseleccionada = computed(() =>
+  !!motivoFamiliaPreseleccionada.value && seleccion.value.familia === familiaPreseleccionada.value);
+// Solo las que se pueden elegir de verdad (con módulos y RA/CE)
+const otrasFamiliasEmpresa = computed(() =>
+  familiasFiltradas.value.filter(f => f !== seleccion.value.familia && familiaTieneDatos(f)));
 
 watch(() => seleccion.value.familia, async (val) => {
   // Limpiar siempre los campos dependientes al cambiar familia, incluso si el nuevo valor es vacío
@@ -640,11 +1423,7 @@ watch(() => seleccion.value.familia, async (val) => {
 
   if (!val) return;
 
-  const url = seleccion.value.empresaCentro
-    ? `/familias/${encodeURIComponent(val)}/ciclos?centro=${encodeURIComponent(seleccion.value.empresaCentro)}`
-    : `/familias/${encodeURIComponent(val)}/ciclos`;
-
-  const res = await api.get(url);
+  const res = await getCiclosDeFamilia(val, seleccion.value.empresaCentro || null);
   ciclos.value = res.data;
 
   if (autoSelectDemoCycle && ciclos.value.length > 0) {
@@ -658,8 +1437,8 @@ watch(() => seleccion.value.familia, async (val) => {
 });
 
 watch(() => seleccion.value.cicloId, async (val) => {
-  if (!val) return;
-  const res = await api.get(`/ciclos/${val}/modulos`);
+  if (!val) { if (!esModoDemo.value) modoModulosManual.value = false; return; }
+  const res = await getModulosDeCiclo(val);
   modulos.value = res.data;
   modulosSeleccionados.value = [];
   modulosSeleccionadosCurso1.value = [];
@@ -684,19 +1463,19 @@ watch(() => seleccion.value.cursoSeleccionado, () => {
 const avanzarPaso = async () => {
   if (pasoActual.value >= totalPasos || !pasoActualValido.value) return;
   const step = pasoActual.value;
-  if (!estaPasoBloqueado(step)) {
-    const confirmado = confirm(
-      'Al continuar, los datos de este paso quedarán bloqueados y no podrás modificarlos. ' +
-      'Si necesitas cambiarlos más adelante, tendrás que pulsar "Vaciar" y empezar de nuevo.\n\n¿Continuar?'
-    );
-    if (!confirmado) return;
-  }
+  const guardaBorrador = step === 2 && !!borradorIA.value;
+  const yaSellado = estaPasoBloqueado(step);
+  if (guardaBorrador && !(await guardarBorradorIA())) return;
   sellarPaso(step);
+  if (!yaSellado) {
+    registrarAviso(`Paso ${step} completado`,
+      (guardaBorrador ? 'La empresa ficticia generada con IA se ha guardado en la base de datos con este diagnóstico. ' : '') +
+      'Los datos de este paso han quedado bloqueados. Si necesitas cambiarlos, pulsa «Vaciar» y empieza de nuevo.');
+  }
   pasoActual.value++;
   window.scrollTo({ top: 0, behavior: 'instant' });
   await nextTick();
   pasoGuia.value = 1;
-  modoGuia.value = true;
 };
 // Única vía para navegar entre pasos: desde el botón "Volver"/"Siguiente Paso" o desde
 // el indicador de progreso. Hacia atrás siempre se permite (solo lectura, ya sellado);
@@ -720,26 +1499,120 @@ const guardarInfoEmpresa = async () => {
   const payload = {
     nombreComercial: seleccion.value.empresaNombre, centroEducativo: seleccion.value.empresaCentro, sector: seleccion.value.empresaSector, tamano: seleccion.value.empresaTamano, web: seleccion.value.empresaWeb,
     diaANormal: seleccion.value.diaANormal, friccionArea: seleccion.value.friccionArea, friccionProblema: seleccion.value.friccionProblema, consecuencias: datosP2.consecuenciasStr, restricciones: datosP2.restriccionesStr, loQueNoQuieren: seleccion.value.loQueNoQuieren,
-    familia: seleccion.value.familia
+    expectativasAlumno: seleccion.value.expectativasAlumno,
   };
+  // La familia del paso 3 es la del reto, no la de la empresa: solo se manda al CREAR
+  // (primera familia de una empresa nueva). Las familias de una empresa existente se
+  // gestionan desde el modal de edición (InsertModifyEmpresa), no desde aquí.
+  if (!seleccion.value.empresaId) payload.familia = seleccion.value.familia;
+  // El diagnóstico de una empresa real solo lo guarda superadmin (EmpresaPolicy): para el
+  // resto no se envía, así se pueden guardar los demás datos sin un 403 por la P5 local.
+  if (seleccion.value.empresaId && !puedeEditarDiagnostico.value) {
+    ['diaANormal', 'friccionArea', 'friccionProblema', 'consecuencias', 'restricciones', 'loQueNoQuieren', 'expectativasAlumno']
+      .forEach(k => delete payload[k]);
+  }
 
   try {
     if (seleccion.value.empresaId) {
-      await api.put(`/empresas/${seleccion.value.empresaId}`, payload);
+      await actualizarEmpresa(seleccion.value.empresaId, payload);
       const emp = empresas.value.find(e => String(e.id) === String(seleccion.value.empresaId));
-      if(emp) Object.assign(emp, { ...payload, centro_educativo: payload.centroEducativo, dia_a_normal: payload.diaANormal, friccion_area: payload.friccionArea, friccion_problema: payload.friccionProblema, lo_que_no_quieren: payload.loQueNoQuieren });
+      if(emp) Object.assign(emp, { ...payload, centro_educativo: payload.centroEducativo, dia_a_normal: payload.diaANormal, friccion_area: payload.friccionArea, friccion_problema: payload.friccionProblema, lo_que_no_quieren: payload.loQueNoQuieren, expectativas_alumno: payload.expectativasAlumno });
     } else {
-      const res = await api.post('/empresas', payload);
+      const res = await crearEmpresa(payload);
       seleccion.value.empresaId = res.data.empresa.id;
       empresas.value.push(res.data.empresa);
     }
     crmActualizado.value = true;
     setTimeout(() => crmActualizado.value = false, 3000); 
-  } catch(e) { alert("Error al procesar la empresa en la BD."); } finally { actualizandoCRM.value = false; }
+  } catch(e) { registrarAviso('Error al guardar la empresa', e.response?.data?.error || e.response?.data?.message || 'Error al procesar la empresa en la BD.', 'error'); } finally { actualizandoCRM.value = false; }
 };
 
-const toggleInfoSimulada = async () => {
+const CAMPOS_DIAGNOSTICO = ['diaANormal', 'friccionArea', 'friccionProblema', 'restricciones',
+  'otraLimitacion', 'loQueNoQuieren', 'consecuencias', 'otraConsecuencia', 'expectativasAlumno'];
+
+const empresaEsFicticia = computed(() => !!empresaDetalle.value?.es_simulada);
+// Mismas reglas que EmpresaPolicy::actualizarDiagnostico: las plantillas del catálogo DUALAB son
+// de solo lectura salvo para superadmin (al docente no le llegan en el listado, pero por si acaso).
+const empresaEsCatalogo = computed(() => !!empresaDetalle.value?.es_catalogo);
+const puedeEditarDiagnostico = computed(() =>
+  authStore.isSuperAdmin || (empresaEsFicticia.value && !empresaEsCatalogo.value));
+// Solo se oculta un diagnóstico COMPLETO (P1, P2 y P2b) ya recogido de una empresa
+// guardada; si falta algo, el formulario sigue a la vista para poder completarlo.
+const diagnosticoOculto = computed(() =>
+  diagnosticoRecuperado.value && !!seleccion.value.empresaId && !!empresaDetalle.value?.dia_a_normal
+  && !editandoDiagnostico.value);
+// «Generar diagnóstico con IA» solo cuando el diagnóstico se puede escribir: sin uno previo
+// completo, o con «Editar empresa» abierto. Nunca sobre el de una real sin permiso.
+const mostrarGenerarDiagnostico = computed(() =>
+  !esModoDemo.value && !estaPasoBloqueado(2) && !diagnosticoOculto.value
+  && !(diagnosticoRecuperado.value && !puedeEditarDiagnostico.value));
+// Campos del diagnóstico de solo lectura: demo, paso sellado, o diagnóstico recogido sin editar.
+const camposDiagnosticoBloqueados = computed(() =>
+  esModoDemo.value || estaPasoBloqueado(2) || diagnosticoOculto.value);
+// La empresa no trae P5 (las reales no la tienen): con el diagnóstico oculto, solo se pide
+// esa pregunta para este reto. Se mira el dato guardado, no lo que se va escribiendo.
+const faltaP5 = computed(() => diagnosticoOculto.value && !empresaDetalle.value?.expectativas_alumno);
+// Mínimo para guardar (= obligatorios de UpdateDiagnosticoEmpresaRequest).
+const diagnosticoGuardable = computed(() =>
+  !!(seleccion.value.diaANormal && seleccion.value.friccionArea && seleccion.value.friccionProblema));
+
+const pulsarEditarEmpresa = () => {
+  if (estaPasoBloqueado(2)) return;
+  if (!puedeEditarDiagnostico.value) { avisoEmpresaReal.value = true; return; }
+  diagnosticoOriginal = JSON.parse(JSON.stringify(
+    Object.fromEntries(CAMPOS_DIAGNOSTICO.map(k => [k, seleccion.value[k]]))));
+  avisoEmpresaReal.value = false;
+  verDiagnostico.value = false;
+  editandoDiagnostico.value = true;
+};
+
+const cancelarEdicionDiagnostico = () => {
+  if (diagnosticoOriginal) Object.assign(seleccion.value, diagnosticoOriginal);
+  editandoDiagnostico.value = false;
+};
+
+const guardarDiagnosticoEmpresa = async () => {
+  if (!seleccion.value.empresaId || guardandoDiagnostico.value) return;
+  if (!confirm('Vas a sobrescribir el diagnóstico de esta empresa en la base de datos. Se usará en los próximos retos que se generen con ella.\n\n¿Guardar los cambios?')) return;
+  guardandoDiagnostico.value = true;
+  const datosP2 = getDatosPaso2Preparados();
+  const payload = {
+    diaANormal: seleccion.value.diaANormal, friccionArea: seleccion.value.friccionArea,
+    friccionProblema: seleccion.value.friccionProblema, loQueNoQuieren: seleccion.value.loQueNoQuieren,
+    consecuencias: datosP2.consecuenciasStr, restricciones: datosP2.restriccionesStr,
+    expectativasAlumno: seleccion.value.expectativasAlumno,
+  };
+  try {
+    await actualizarDiagnosticoEmpresa(seleccion.value.empresaId, payload);
+    const emp = empresas.value.find(e => String(e.id) === String(seleccion.value.empresaId));
+    if (emp) Object.assign(emp, { dia_a_normal: payload.diaANormal, friccion_area: payload.friccionArea, friccion_problema: payload.friccionProblema, lo_que_no_quieren: payload.loQueNoQuieren, consecuencias: payload.consecuencias, restricciones: payload.restricciones, expectativas_alumno: payload.expectativasAlumno });
+    diagnosticoOriginal = null;
+    editandoDiagnostico.value = false;
+    diagnosticoGuardado.value = true;
+    setTimeout(() => { diagnosticoGuardado.value = false; }, 4000);
+  } catch (e) {
+    registrarAviso('Error en el diagnóstico', e.response?.data?.error || e.response?.data?.message || 'Error al guardar el diagnóstico.', 'error');
+  } finally {
+    guardandoDiagnostico.value = false;
+  }
+};
+
+// Aviso antes de generar con IA sobre un diagnóstico ya guardado de la empresa.
+const avisoSobrescribirDiagnostico = ref(false);
+const confirmarGenerarDiagnostico = () => {
+  avisoSobrescribirDiagnostico.value = false;
+  toggleInfoSimulada(true);
+};
+
+const toggleInfoSimulada = async (confirmado = false) => {
   if (esModoDemo.value || cargandoSimulacion.value || estaPasoBloqueado(2)) return;
+  // Un diagnóstico real ya recogido no se puede sobrescribir (ni siquiera en local).
+  if (diagnosticoRecuperado.value && !puedeEditarDiagnostico.value) { avisoEmpresaReal.value = true; return; }
+  // Hay diagnóstico guardado: avisar antes de sustituir sus respuestas en el formulario.
+  if (diagnosticoRecuperado.value && !esInfoSimulada.value && confirmado !== true) {
+    avisoSobrescribirDiagnostico.value = true;
+    return;
+  }
 
   // Si ya está activo, simplemente desactivar
   if (esInfoSimulada.value) {
@@ -748,13 +1621,13 @@ const toggleInfoSimulada = async () => {
   }
 
   if (!seleccion.value.empresaNombre || !seleccion.value.empresaSector) {
-    alert('Selecciona una empresa con nombre y sector antes de generar información simulada.');
+    registrarAviso('Falta la empresa', 'Selecciona una empresa con nombre y sector antes de generar el diagnóstico.', 'error');
     return;
   }
 
   cargandoSimulacion.value = true;
   try {
-    const res = await api.post('/simular-info-empresa', {
+    const res = await simularInfoEmpresa({
       empresaNombre:    seleccion.value.empresaNombre,
       empresaSector:    seleccion.value.empresaSector,
       empresaTamano:    seleccion.value.empresaTamano    || '',
@@ -762,6 +1635,8 @@ const toggleInfoSimulada = async () => {
     });
 
     const d = res.data;
+    // Sobre un diagnóstico ya recogido de una ficticia: abrir la edición (con copia para «Cancelar»).
+    if (diagnosticoRecuperado.value && !editandoDiagnostico.value) pulsarEditarEmpresa();
     seleccion.value.diaANormal         = d.diaANormal         || '';
     seleccion.value.friccionArea       = d.friccionArea       || '';
     seleccion.value.friccionProblema   = d.friccionProblema   || '';
@@ -773,16 +1648,9 @@ const toggleInfoSimulada = async () => {
     seleccion.value.expectativasAlumno = d.expectativasAlumno || '';
 
     esInfoSimulada.value = true;
-
-    // Navegar al paso 2 para que el usuario vea los campos rellenos; al abandonar el paso 1
-    // por esta vía también queda sellado, igual que si se hubiera pulsado "Siguiente Paso".
-    if (pasoActual.value === 1) {
-      sellarPaso(1);
-      pasoActual.value = 2;
-    }
   } catch (e) {
     console.error(e);
-    alert('Error al generar información simulada. Inténtalo de nuevo.');
+    registrarAviso('Error al generar el diagnóstico', 'No se ha podido generar el diagnóstico con IA. Inténtalo de nuevo.', 'error');
   } finally {
     cargandoSimulacion.value = false;
   }
@@ -801,13 +1669,18 @@ const generarReto = async () => {
       : (nombresModulosSeleccionados.length > 0 ? nombresModulosSeleccionados.join(' y ') : `A determinar por IA (${seleccion.value.cursoSeleccionado}º Curso)`);
     const datosP2 = getDatosPaso2Preparados();
 
-    const res = await api.post('/generar-microreto', {
+    const res = await generarMicroretos({
       ...seleccion.value, restricciones: datosP2.restriccionesStr, consecuencias: datosP2.consecuenciasArray,
       ciclo_nombre: ciclos.value.find(c => c.id === seleccion.value.cicloId)?.nombre, modulo_nombre: moduloNombreTxt,
       ciclo_id: seleccion.value.cicloId, modulo_id: moduloIdCombinado.length > 0 ? moduloIdCombinado : null,
       nivelGrupo: seleccion.value.nivelGrupo, expectativasAlumno: seleccion.value.expectativasAlumno,
       cursoSeleccionado: seleccion.value.cursoSeleccionado,
-      cantidad: seleccion.value.cantidadMicroretos
+      cantidad: seleccion.value.cantidadMicroretos,
+      // Solo si se ajustó para este reto; si no, el backend usa el guardado en la empresa
+      interesReto: interesAjustado.value ?? undefined,
+      seleccion_ra_ce: moduloIdCombinado.length > 0 && hayRaCeFijados.value
+        ? Object.entries(seleccionRaCe.value).map(([raId, s]) => ({ ra_id: Number(raId), ce_ids: s.ceIds }))
+        : null
     });
 
     if (res.data && res.data.microretos) {
@@ -823,9 +1696,9 @@ const generarReto = async () => {
                 modulo:       moduloNombreTxt,
                 multimodulo:  !esAmbosCursos.value && esMultimodulo.value,
                 curso:        esAmbosCursos.value ? 'ambos_cursos' : seleccion.value.cursoSeleccionado,
-                duracion:     seleccion.value.duracion,
                 nivel_grupo:  seleccion.value.nivelGrupo,
                 es_simulado:  esInfoSimulada.value || !!(empresaDetalle.value?.es_simulada),
+                empresa_es_simulada: !!(empresaDetalle.value?.es_simulada),
                 _ui_familia:  seleccion.value.familia,
                 _ui_guardado: false,
                 _ui_guardando: false
@@ -833,10 +1706,10 @@ const generarReto = async () => {
         });
     }
 
-    setTimeout(() => { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); }, 300);
+    scrollAGaleriaRetos();
   } catch (e) {
     console.error(e);
-    alert(e.response?.data?.error || "Error al contactar con la IA");
+    registrarAviso('Error al generar el reto', e.response?.data?.error || e.response?.data?.message || 'Error al contactar con la IA.', 'error');
   } finally { cargando.value = false; }
 };
 
@@ -848,15 +1721,15 @@ const guardarTodos = async () => {
       .map(({ _ui_guardado, _ui_guardando, _ui_familia, ...retoLimpio }) => retoLimpio); // Eliminar claves UI; el contexto ya fue snapshotado en cada reto al generarse
 
     if (payload.length > 0) {
-      await api.post('/guardar-microretos-lote', { microretos: payload });
+      await guardarMicroretosLote(payload, solicitudActiva.value?.solicitud_id);
       microretosGenerados.value.forEach(r => r._ui_guardado = true);
       todosGuardados.value = true;
     } else {
-      alert("Todos los retos mostrados ya estaban guardados.");
+      registrarAviso('Retos ya guardados', 'Todos los retos mostrados ya estaban guardados.');
     }
   } catch (e) { 
     console.error("Error al guardar el lote:", e);
-    alert("Error al guardar el lote de retos en BD");
+    registrarAviso('Error al guardar', 'No se ha podido guardar el lote de retos en la BD.', 'error');
   } finally { 
     guardandoTodos.value = false; 
   }
@@ -868,14 +1741,29 @@ const guardar = async (index) => {
   try {
     const { _ui_guardado, _ui_guardando, _ui_familia, ...retoLimpio } = reto; // Eliminar claves UI; el contexto ya fue snapshotado en el reto al generarse
 
-    await api.post('/guardar-microreto-bd', retoLimpio);
+    // De una solicitud: por el lote, que es el que los enlaza a ella y los deja en la recámara
+    if (solicitudActiva.value) await guardarMicroretosLote([retoLimpio], solicitudActiva.value.solicitud_id);
+    else {
+      const { data } = await guardarMicroreto(retoLimpio);
+      reto._ui_uuid = data?.reto?.uuid || null; // para «Trabajar este reto»
+    }
     reto._ui_guardado = true;
-  } catch (e) { 
+  } catch (e) {
     console.error("Error al guardar:", e);
-    alert("Error al guardar este reto");
-  } finally { 
-    reto._ui_guardando = false; 
+    registrarAviso('Error al guardar', 'No se ha podido guardar este reto.', 'error');
+  } finally {
+    reto._ui_guardando = false;
   }
+};
+
+// «Trabajar este reto»: lo guarda en la biblioteca (si no lo estaba) y abre su ajuste.
+// No en la demo ni con una solicitud (esos retos van a la recámara de DuaLab), ni en los
+// guardados con «Guardar todos» (el lote no devuelve los uuid).
+const puedeTrabajar = (reto) => !esModoDemo.value && !solicitudActiva.value && (!reto._ui_guardado || !!reto._ui_uuid);
+const trabajarReto = async (index) => {
+  const reto = microretosGenerados.value[index];
+  if (!reto._ui_guardado) await guardar(index);
+  if (reto._ui_uuid) router.push({ name: 'startup-day-crear', query: { reto: reto._ui_uuid } });
 };
 
 // Computed que indica si hay "contexto de empresa" suficiente
@@ -888,9 +1776,6 @@ const scrollToTop = () => window.scrollTo({ top: 0, behavior: 'smooth' });
 // ─── TOUR GUIADO (tres conjuntos independientes, uno por paso) ────────────
 const { tourActivo } = useUIState()
 const modoGuia = ref(false)
-const showTourPrompt = ref(false)
-function activarTourDesdeModal() { showTourPrompt.value = false; modoGuia.value = true }
-function omitirTourDesdeModal()  { showTourPrompt.value = false }
 const pasoGuia = ref(1)
 
 // Refs paso 1
@@ -917,15 +1802,15 @@ const refBtnGenerar        = ref(null)
 // Tres conjuntos de pasos, cada uno para su paso de formulario
 const guiaPasos1 = [
   { ref: 'refCentroEducativo', seccion: 'busqueda', texto: 'Selecciona primero tu centro educativo. Esto filtra el listado de empresas y ciclos, mostrando únicamente los vinculados a tu centro.' },
-  { ref: 'refBuscadorEmpresa', seccion: 'busqueda', texto: 'Busca y selecciona la empresa con la que vas a generar el microreto. Puedes elegir entre empresas simuladas (creadas para practicar) y empresas reales colaboradoras de tu centro.' },
+  { ref: 'refBuscadorEmpresa', seccion: 'busqueda', texto: 'Busca y selecciona la empresa con la que vas a generar el microreto. Puedes elegir entre empresas ficticias (creadas para practicar) y empresas reales colaboradoras de tu centro.' },
   { ref: 'refBotonesDemo',     seccion: 'acciones', texto: 'Carga una demo preconfigurada para ver cómo funciona el generador de principio a fin. Al elegir una familia profesional del desplegable, se rellenan automáticamente todos los campos de los tres pasos con datos de ejemplo listos para generar.' },
-  { ref: 'refInfoSimulada',    seccion: 'acciones', texto: 'La IA se comporta como la empresa seleccionada en el Paso 1 y rellena automáticamente todos los campos del diagnóstico (Paso 2) simulando lo que esa empresa habría dicho en una reunión real. Muy útil si no has podido hacer la reunión con la empresa. Puedes revisar y editar los datos generados antes de continuar.' },
   { ref: 'refBaseDatos',       seccion: 'acciones', texto: 'Accede a la base de datos completa de la plataforma: empresas, centros, familias profesionales y ciclos formativos disponibles. Desde aquí puedes revisar o añadir empresas que no aparezcan en el buscador.' },
-  { ref: 'refInsertarEmpresa', seccion: 'acciones', texto: 'Registra una nueva empresa en la base de datos o modifica los datos de la empresa actualmente seleccionada. Los cambios quedan guardados para todos los usuarios de tu centro.' },
-  { ref: 'refBtnGuia',         seccion: null,       texto: 'Pulsa este botón en cualquier momento para volver a ver esta guía.' },
+  { ref: 'refInsertarEmpresa', seccion: 'busqueda', texto: 'Añade a mano una empresa nueva a tu centro rellenando su ficha; ideal para empresas reales colaboradoras. Para corregir los datos de la empresa elegida, usa «Modificar datos empresa» junto a su ficha.' },
+  { ref: 'refBtnGuia',         seccion: null,       texto: 'Pulsa «Ayuda» en cualquier momento para volver a ver esta guía.' },
 ]
 const guiaPasos2 = [
-  { ref: 'refEncabezadoProblema', seccion: 'diagnostico', texto: 'Paso 2 — Realidad de la empresa: aquí transcribes lo que la empresa te ha contado en la reunión de diagnóstico. Estos datos son la materia prima con la que la IA construirá el microreto. Si no has hecho la reunión, puedes usar el botón "Información Simulada" del Paso 1.' },
+  { ref: 'refEncabezadoProblema', seccion: 'diagnostico', texto: 'Paso 2 — Realidad de la empresa: aquí transcribes lo que la empresa te ha contado en la reunión de diagnóstico. Estos datos son la materia prima con la que la IA construirá el microreto. Si no has hecho la reunión, usa «Generar diagnóstico con IA».' },
+  { ref: 'refInfoSimulada',       seccion: 'diagnostico', texto: 'La IA se comporta como la empresa seleccionada y rellena todas las preguntas del diagnóstico simulando lo que habría dicho en una reunión real. Muy útil si no has podido reunirte con ella. Puedes revisar y editar las respuestas antes de continuar. Si la empresa ya tiene diagnóstico, el botón aparece al pulsar «Editar empresa».' },
   { ref: 'refPreguntaFriccion',   seccion: 'diagnostico', texto: 'El corazón del microreto: describe el área donde se produce el problema (¿marketing, producción, logística, atención al cliente...?) y explica por qué ocurre. Cuanto más específico y concreto seas aquí, mejor y más relevante será el microreto que genere la IA.' },
   { ref: 'refExpectativas',       seccion: 'diagnostico', texto: 'Indica qué resultado concreto esperas que el alumnado entregue al final del reto: un informe, un prototipo, un plan de acción, una maqueta digital... La IA usará esto para definir el objetivo del reto y los criterios de evaluación.' },
 ]
@@ -934,11 +1819,11 @@ const guiaPasos3 = [
   { ref: 'refNivelExigencia',    seccion: 'match', texto: 'Ajusta el nivel de dificultad según el dominio real del grupo: Básico para grupos en formación inicial, Medio para grupos estándar, Alto para grupos avanzados o de segundo año. La IA calibrará la complejidad del reto en consecuencia.' },
   { ref: 'refCicloGrid',         seccion: 'match', texto: 'Selecciona el ciclo formativo concreto del grupo que resolverá el reto. Aparecen los ciclos vinculados tanto a la empresa seleccionada como a tu centro educativo.' },
   { ref: 'refCursoAlumno',       seccion: 'match', texto: 'Indica si el grupo es de 1º o 2º curso. Este dato, combinado con el nivel de exigencia, permite a la IA ajustar la profundidad y el enfoque competencial del reto.' },
-  { ref: 'refModulosSection',    seccion: 'match', texto: 'Si quieres que el reto se centre en un módulo concreto, selecciónalo aquí. Si lo dejas vacío, la IA cruzará el diagnóstico con todos los módulos del ciclo y elegirá el más relevante automáticamente.' },
+  { ref: 'refModulosSection',    seccion: 'match', texto: 'Por defecto «Elige la IA»: la IA cruzará el diagnóstico con los módulos del ciclo y elegirá los RA/CE más relevantes. Si quieres centrar el reto en módulos concretos, elige primero el ciclo y pasa el interruptor a «Selección manual»; al marcar módulos podrás fijar también sus RA/CE.' },
   { ref: 'refCantidadVariantes', seccion: 'match', texto: 'Elige cuántas variantes del microreto quieres generar. Cada variante presenta un enfoque distinto para el mismo problema de empresa, permitiéndote elegir la que mejor encaje con tu grupo.' },
   { ref: 'refGuardarEmpresa',    seccion: 'match', texto: 'Si has completado o modificado datos de la empresa durante este flujo, guárdalos aquí antes de generar. Así el registro queda actualizado en la base de datos para futuros usos.' },
   { ref: 'refBtnGenerar',        seccion: 'match', texto: '¡Todo listo! Pulsa aquí para que la IA genere el microreto cruzando el diagnóstico de empresa del Paso 2 con el perfil académico del alumnado que has configurado en este paso. El proceso tarda unos segundos.' },
-  { ref: 'refBtnGuia',           seccion: null,    texto: 'Pulsa este botón cuando quieras volver a ver esta guía en cualquier momento.' },
+  { ref: 'refBtnGuia',           seccion: null,    texto: 'Pulsa «Ayuda» cuando quieras volver a ver esta guía.' },
 ]
 
 const guiaPasosActual = computed(() => {
@@ -946,11 +1831,18 @@ const guiaPasosActual = computed(() => {
   if (pasoActual.value === 1) {
     return docente
       ? guiaPasos1.filter(s => !['refBaseDatos', 'refInsertarEmpresa'].includes(s.ref))
-      : guiaPasos1
+      : guiaPasos1.filter(s => (s.ref !== 'refBaseDatos' || authStore.isSuperAdmin)
+          && (s.ref !== 'refInsertarEmpresa' || mostrarViasNueva.value))
   }
-  if (pasoActual.value === 2) return guiaPasos2
+  if (pasoActual.value === 2) {
+    const ocultos = [];
+    if (!mostrarGenerarDiagnostico.value) ocultos.push('refInfoSimulada');
+    if (diagnosticoOculto.value && !verDiagnostico.value) ocultos.push('refPreguntaFriccion');
+    if (diagnosticoOculto.value && !verDiagnostico.value && !faltaP5.value) ocultos.push('refExpectativas');
+    return guiaPasos2.filter(s => !ocultos.includes(s.ref))
+  }
   if (pasoActual.value === 3) {
-    return docente
+    return docente || (!authStore.isSuperAdmin && seleccion.value.empresaId)
       ? guiaPasos3.filter(s => s.ref !== 'refGuardarEmpresa')
       : guiaPasos3
   }
@@ -1061,69 +1953,57 @@ watch(modoGuia, async (v) => {
   tourActivo.value = v
   if (v) {
     window.addEventListener('scroll', onScrollGuia, { passive: true })
+    window.addEventListener('resize', onScrollGuia, { passive: true })
     await nextTick()
     requestAnimationFrame(() => requestAnimationFrame(recalcularBocadillo))
   } else {
     window.removeEventListener('scroll', onScrollGuia)
+    window.removeEventListener('resize', onScrollGuia)
   }
 })
-
-// ── ESTADO DE CONTACTO (editable inline) ──────────────
-const ESTADOS_OPCIONES_GEN = [
-  'Pendiente de llamar',
-  'Llamado - Información obtenida',
-  'Llamado - Negativa',
-  'Llamado - Llamar más tarde',
-  'En colaboración activa',
-  'Descartada',
-]
-const ESTADO_BADGE_GEN = {
-  'Pendiente de llamar':            { bg: 'bg-amber-100',    text: 'text-amber-700',  border: 'border-amber-300',    dot: 'bg-amber-400', pulse: true  },
-  'Llamado - Información obtenida': { bg: 'bg-[#00A859]/10', text: 'text-[#00A859]',  border: 'border-[#00A859]/30', dot: 'bg-[#00A859]', pulse: false },
-  'Llamado - Negativa':             { bg: 'bg-red-50',       text: 'text-red-600',    border: 'border-red-200',      dot: 'bg-red-400',   pulse: false },
-  'Llamado - Llamar más tarde':     { bg: 'bg-blue-50',      text: 'text-blue-600',   border: 'border-blue-200',     dot: 'bg-blue-400',  pulse: false },
-  'En colaboración activa':         { bg: 'bg-gray-100',     text: 'text-gray-700',   border: 'border-gray-300',     dot: 'bg-gray-600',  pulse: false },
-  'Descartada':                     { bg: 'bg-gray-50',      text: 'text-gray-400',   border: 'border-gray-200',     dot: 'bg-gray-300',  pulse: false },
-}
-const estadoBadgeGen = (estado) =>
-  ESTADO_BADGE_GEN[estado] ?? { bg: 'bg-gray-100', text: 'text-gray-500', border: 'border-gray-200', dot: 'bg-gray-300', pulse: false }
-
-const estadoDropdownGenAbierto = ref(false)
-const guardandoEstadoGen       = ref(false)
-
-async function guardarEstadoGen(nuevoEstado) {
-  if (!empresaDetalle.value?.id || guardandoEstadoGen.value) return
-  guardandoEstadoGen.value = true
-  estadoDropdownGenAbierto.value = false
-  try {
-    await api.patch(`/empresas/${empresaDetalle.value.id}/estado`, { estadoContacto: nuevoEstado || null })
-    empresaDetalle.value.estado_contacto = nuevoEstado || null
-    const emp = empresas.value.find(e => String(e.id) === String(empresaDetalle.value.id))
-    if (emp) emp.estado_contacto = nuevoEstado || null
-  } catch (e) {
-    console.error('Error actualizando estado:', e)
-  } finally {
-    guardandoEstadoGen.value = false
-  }
-}
 
 </script>
 
 <template>
-  <div class="min-h-screen p-4 md:p-12 transition-colors duration-500 font-sans text-[#1F2937] overflow-x-hidden pt-12 md:pt-12">
+  <div class="min-h-screen px-4 pb-20 pt-[5.25rem] sm:px-6 lg:px-8 transition-colors duration-500 font-sans text-[#1F2937] overflow-x-hidden">
     
+    <!-- ══════════ TOAST CAMBIO DE MODO DE MÓDULOS (auto ↔ forzado) ═══════ -->
+    <!-- Overlays fijos con Teleport: el contenedor de vistas de App.vue tiene z-index 1 y sin
+         sacarlos a <body> quedarían bajo el SidePanel y la TopBar -->
+    <Teleport to="body">
+    <Transition name="toast-modulos">
+      <div v-if="toastModulos" role="status" aria-live="polite"
+        class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9995] w-[calc(100%-2rem)] max-w-md flex items-start gap-3 rounded-2xl border-2 px-5 py-4 shadow-2xl"
+        :class="toastModulos.tipo.startsWith('forzado') || toastModulos.tipo === 'raCeLimite' ? 'bg-amber-50 border-amber-400 text-amber-900' : 'bg-white border-centros text-azul-noche'">
+        <svg v-if="toastModulos.tipo.startsWith('forzado') || toastModulos.tipo === 'raCeLimite'" class="w-6 h-6 shrink-0 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        <svg v-else class="w-6 h-6 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+        <div class="flex-1 text-xs leading-relaxed">
+          <p class="font-black uppercase tracking-wide text-[11px]">{{ toastModulos.titulo }}</p>
+          <p class="mt-0.5">{{ toastModulos.texto }}</p>
+          <p v-if="toastModulos.destacado" class="toast-modulos-destacado mt-2 px-3 py-1.5 rounded-xl bg-amber-400 text-amber-950 font-black text-[12px]">
+            {{ toastModulos.destacado }}
+          </p>
+        </div>
+        <button type="button" @click="toastModulos = null" aria-label="Cerrar aviso" class="inline-flex items-center justify-center w-9 h-9 -m-2 rounded-full shrink-0 transition-colors text-gray-400 hover:text-gray-600 hover:bg-black/5">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </Transition>
+    </Teleport>
+
     <!-- ══════════ TOUR OVERLAY ════════════════════════════════════════════ -->
+  <Teleport to="body">
   <Transition name="sp-fade">
     <div v-if="modoGuia" class="fixed inset-0 z-[9990] pointer-events-none">
 
       <!-- ── PASO 2: modal explicativo centrado ── -->
       <template v-if="pasoActual === 2">
-        <div class="absolute inset-x-0 top-12 bottom-0 bg-black/50 pointer-events-auto" />
+        <div class="absolute inset-x-0 top-16 bottom-0 bg-black/50 pointer-events-auto" />
         <div class="absolute inset-0 flex items-center justify-center pointer-events-none" style="z-index:9992">
           <div class="pointer-events-auto w-[380px] max-w-[calc(100vw-2rem)] bg-[#1a2332] border border-white/15 rounded-3xl shadow-2xl p-7 text-white" @click.stop>
             <!-- Cabecera -->
             <div class="flex items-center gap-3 mb-5">
-              <div class="w-9 h-9 rounded-2xl bg-[#00A859]/20 flex items-center justify-center text-[#00A859] font-black text-sm shrink-0">
+              <div class="w-9 h-9 rounded-2xl bg-centros/20 flex items-center justify-center text-centros font-black text-sm shrink-0">
                 {{ pasoGuia }}
               </div>
               <div class="flex-1">
@@ -1131,21 +2011,21 @@ async function guardarEstadoGen(nuevoEstado) {
                 <div class="flex gap-1">
                   <span v-for="i in guiaPasosActual.length" :key="i"
                         class="h-[3px] rounded-full transition-all duration-300"
-                        :class="i <= pasoGuia ? 'bg-[#00A859] w-5' : 'bg-white/20 w-3'" />
+                        :class="i <= pasoGuia ? 'bg-centros w-5' : 'bg-white/20 w-3'" />
                 </div>
               </div>
             </div>
             <!-- Texto -->
             <p class="text-[13px] text-white/85 leading-relaxed mb-6">{{ guiaPasosActual[pasoGuia - 1].texto }}</p>
             <!-- Botones -->
-            <div class="flex items-center gap-2">
-              <button @click="avanzarGuia"
-                      class="flex-1 py-2.5 rounded-xl bg-[#00A859] text-white text-[10px] font-black uppercase tracking-widest hover:bg-[#00A859]/90 transition-all">
-                {{ pasoGuia < guiaPasosActual.length ? 'Siguiente →' : 'Finalizar' }}
-              </button>
+            <div class="flex items-center justify-between gap-2">
               <button @click="saltarGuia"
-                      class="px-3 py-2.5 rounded-xl bg-white/5 border border-white/10 text-white/40 text-[10px] font-black uppercase tracking-widest hover:text-white/60 transition-all">
+                      class="min-h-[36px] px-3 py-2.5 rounded-full bg-white/5 border border-white/10 text-white/40 text-[10px] font-black uppercase tracking-widest hover:text-white/60 transition-all">
                 Saltar
+              </button>
+              <button @click="avanzarGuia"
+                      class="ml-auto min-h-[36px] px-5 py-2.5 rounded-full bg-centros text-white text-[10px] font-black uppercase tracking-widest hover:bg-centros/90 transition-all">
+                {{ pasoGuia < guiaPasosActual.length ? 'Siguiente →' : 'Finalizar' }}
               </button>
             </div>
           </div>
@@ -1155,8 +2035,8 @@ async function guardarEstadoGen(nuevoEstado) {
       <!-- ── PASO 1 & 3: bocadillo spotlight ── -->
       <template v-else>
         <!-- Backdrop bloqueante transparente — bloquea interacción sin oscurecer el elemento activo -->
-        <!-- top-12 para no tapar el TopBar (h-12) y que el logo siga siendo clickable -->
-        <div class="absolute inset-x-0 top-12 bottom-0 pointer-events-auto" />
+        <!-- top-16 para no tapar el TopBar (h-16) y que el logo siga siendo clickable -->
+        <div class="absolute inset-x-0 top-16 bottom-0 pointer-events-auto" />
 
         <div class="absolute pointer-events-auto"
              :style="{ top: bocadilloPos.top + 'px', left: bocadilloPos.left + 'px', width: '272px', zIndex: 9992 }">
@@ -1176,19 +2056,19 @@ async function guardarEstadoGen(nuevoEstado) {
               <div class="flex gap-1 items-center">
                 <span v-for="i in guiaPasosActual.length" :key="i"
                       class="h-[3px] rounded-full transition-all duration-300"
-                      :class="i <= pasoGuia ? 'bg-[#00A859] w-5' : 'bg-white/20 w-3'" />
+                      :class="i <= pasoGuia ? 'bg-centros w-5' : 'bg-white/20 w-3'" />
               </div>
               <span class="text-[9px] font-bold text-white/40">{{ pasoGuia }}/{{ guiaPasosActual.length }}</span>
             </div>
             <p class="text-[11px] text-white/85 leading-relaxed mb-3">{{ guiaPasosActual[pasoGuia - 1].texto }}</p>
-            <div class="flex items-center gap-2">
-              <button @click="avanzarGuia"
-                      class="flex-1 py-1.5 rounded-xl bg-[#00A859] text-white text-[9px] font-black uppercase tracking-widest hover:bg-[#00A859]/90 transition-all">
-                {{ pasoGuia < guiaPasosActual.length ? 'Siguiente →' : 'Finalizar' }}
-              </button>
+            <div class="flex items-center justify-between gap-2">
               <button @click="saltarGuia"
-                      class="px-2.5 py-1.5 rounded-xl bg-white/5 border border-white/10 text-white/40 text-[9px] font-black uppercase tracking-widest hover:text-white/60 transition-all">
+                      class="min-h-[36px] px-2.5 py-1.5 rounded-full bg-white/5 border border-white/10 text-white/40 text-[9px] font-black uppercase tracking-widest hover:text-white/60 transition-all">
                 Saltar
+              </button>
+              <button @click="avanzarGuia"
+                      class="ml-auto min-h-[36px] px-4 py-1.5 rounded-full bg-centros text-white text-[9px] font-black uppercase tracking-widest hover:bg-centros/90 transition-all">
+                {{ pasoGuia < guiaPasosActual.length ? 'Siguiente →' : 'Finalizar' }}
               </button>
             </div>
           </div>
@@ -1207,31 +2087,70 @@ async function guardarEstadoGen(nuevoEstado) {
 
     </div>
   </Transition>
+  </Teleport>
 
-  <div class="max-w-6xl mx-auto">
+  <!-- xl:pr-56 reserva el hueco de la columna fija de avisos; el formulario mantiene su ancho -->
+  <div class="xl:pr-56">
+    <div class="max-w-6xl mx-auto">
 
-      <header class="mb-6 md:mb-8 text-center flex flex-col items-center">
-        <div class="inline-flex items-center mb-4 md:mb-5 bg-[#1F2937] py-2 sm:py-2.5 pr-4 sm:pr-6 pl-3 sm:pl-4 rounded-[3rem] shadow-lg border border-[#333333] transition-all duration-1000 ease-out transform"
-             :class="isLoaded ? 'translate-y-0 opacity-100' : '-translate-y-10 opacity-0'">
-          <img src="../assets/logo.png" alt="Logo DuaLab" class="h-12 sm:h-16 md:h-20 w-auto object-contain -mr-2 sm:-mr-3 md:-mr-4 relative z-10" />
-          <span class="font-black text-lg sm:text-2xl md:text-3xl tracking-tighter uppercase text-white italic relative z-20">
-            Dua<span class="text-[#00A859]">Lab</span><span class="text-[#99CC33] not-italic text-[10px] sm:text-sm md:text-base ml-1">Studio Tool</span>
-          </span>
+      <!-- Cabecera de sección (mismo estilo que Retos y proyectos) -->
+      <CabeceraSeccion data-tour="gen-cabecera" titulo="Generador de" destacado="Retos" color="text-centros" volver="/seccion/retos-proyectos"
+                       subtitulo="Convierte problemas empresariales reales en retos educativos clasificados por el currículo oficial."
+                       class="mb-4 md:mb-5">
+        <!-- Superadmin: rellenar el generador con lo que pidió un docente en su solicitud de retos -->
+        <button v-if="authStore.isSuperAdmin" data-tour="gen-solicitudes" type="button" class="accion-secundaria" :aria-expanded="panelSolicitudes"
+                aria-controls="panel-solicitudes" @click="abrirPanelSolicitudes">
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+          Solicitudes del profesorado
+        </button>
+        <!-- Ayuda: mismo botón y sitio en todas las vistas -->
+        <button type="button" ref="refBtnGuia" data-tour="gen-ayuda" @click="modoGuia = true; pasoGuia = 1"
+                :class="tourTargetActivo === 'refBtnGuia' ? 'tour-active' : ''"
+                class="accion-secundaria" title="Guía paso a paso de esta pantalla">
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          Ayuda
+        </button>
+      </CabeceraSeccion>
+
+      <!-- Desplegable «Solicitudes del profesorado» (superadmin) -->
+      <section v-if="panelSolicitudes" id="panel-solicitudes" aria-labelledby="titulo-panel-solicitudes"
+               class="mb-5 rounded-[2rem] border border-gray-100 bg-white p-4 shadow-[0_20px_50px_rgb(0,0,0,0.05)] sm:p-6">
+        <div class="mb-3 flex flex-wrap items-start justify-between gap-2">
+          <div class="min-w-0">
+            <h2 id="titulo-panel-solicitudes" class="font-heading text-lg font-bold text-azul-noche">Solicitudes del profesorado</h2>
+            <p class="text-xs text-gray-500">Lo que han pedido los docentes en el formulario. Elige una petición y el generador se rellena con ella; revisa y genera.</p>
+          </div>
+          <button type="button" class="accion-icono" aria-label="Cerrar" @click="panelSolicitudes = false">
+            <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
         </div>
+        <p v-if="cargandoSolicitudes" class="py-4 text-sm text-gray-500" role="status">Cargando…</p>
+        <p v-else-if="errorSolicitudes" class="rounded-xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">{{ errorSolicitudes }}</p>
+        <p v-else-if="!solicitudesProfesorado.length" class="py-4 text-sm text-gray-500">No hay solicitudes respondidas. Cuando un docente envíe el formulario, aparecerá aquí.</p>
+        <ul v-else class="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+          <li v-for="sol in solicitudesProfesorado" :key="sol.id" class="rounded-2xl border border-gray-100 bg-[#F8FAFC] p-3 sm:p-4">
+            <p class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span class="min-w-0 break-words font-bold text-azul-noche">{{ sol.docente }}</span>
+              <span class="min-w-0 break-words text-sm text-gray-500">{{ sol.centro }}</span>
+              <span v-if="sol.num_retos" class="rounded-full bg-centros/10 px-2.5 py-0.5 text-xs font-bold text-centros">{{ sol.num_retos }} {{ sol.num_retos === 1 ? 'reto' : 'retos' }}</span>
+            </p>
+            <div class="mt-2 flex flex-col gap-2">
+              <button v-for="b in sol.bloques" :key="b.indice" type="button"
+                      class="flex w-full flex-col items-start rounded-xl border-2 px-3 py-2 text-left text-sm transition-colors"
+                      :class="solicitudActiva?.solicitud_id === sol.id && solicitudActiva?.bloque === b.indice ? 'border-centros bg-centros/5' : 'border-gray-200 bg-white hover:border-centros/50'"
+                      @click="elegirPeticion(sol.id, b.indice)">
+                <span class="font-semibold text-azul-noche break-words">{{ sol.bloques.length > 1 ? `Petición ${b.indice + 1} · ` : '' }}{{ b.ciclo }} · {{ CURSO_TEXTO[b.curso] || b.curso }}</span>
+                <span class="text-xs text-gray-500 break-words">{{ b.familia }}<template v-if="b.modulos.length"> · {{ b.modulos.map(nombreModuloVisible).join(' · ') }}</template></span>
+              </button>
+            </div>
+          </li>
+        </ul>
+      </section>
 
-        <h1 class="text-2xl md:text-4xl font-black tracking-tight mb-1.5 md:mb-2 text-[#121212] transition-all duration-1000 delay-150 ease-out transform"
-            :class="isLoaded ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'">
-          Factoría de <span class="text-transparent bg-clip-text bg-gradient-to-r from-[#00A859] to-[#99CC33]">Retos</span>
-        </h1>
-
-        <p class="text-gray-500 max-w-2xl mx-auto text-sm md:text-base leading-relaxed font-medium transition-all duration-1000 delay-300 ease-out transform"
-           :class="isLoaded ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'">
-          Convierte problemas empresariales reales en retos educativos clasificados por el currículo oficial.
-        </p>
-
-      </header>
-
-      <div class="max-w-3xl mx-auto mb-8 md:mb-10 relative transition-all duration-1000 delay-500 ease-out transform"
+      <div data-tour="gen-pasos" class="max-w-3xl mx-auto mb-5 md:mb-6 relative transition-all duration-1000 delay-500 ease-out transform"
            :class="isLoaded ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0'">
         <div class="flex justify-between items-center relative z-10">
           <button type="button" v-for="step in totalPasos" :key="step"
@@ -1241,63 +2160,63 @@ async function guardarEstadoGen(nuevoEstado) {
             class="flex flex-col items-center bg-transparent border-0"
             :class="step < pasoActual || (step === pasoActual + 1 && pasoActualValido) ? 'cursor-pointer' : 'cursor-default'">
             <div class="w-9 h-9 md:w-11 md:h-11 rounded-full flex items-center justify-center font-black transition-all duration-500 shadow-sm"
-              :class="pasoActual >= step ? 'bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white scale-110 shadow-lg' : 'bg-white border-2 border-gray-200 text-gray-400'">
+              :class="pasoActual >= step ? 'bg-gradient-to-r from-centros to-primary-400 text-white scale-110 shadow-lg' : 'bg-white border-2 border-gray-200 text-gray-400'">
               <span v-if="pasoActual > step"><svg class="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg></span>
               <span v-else>{{ step }}</span>
             </div>
-            <span class="text-[9px] md:text-[10px] font-black uppercase mt-1.5 md:mt-2 tracking-widest text-center" :class="pasoActual >= step ? 'text-[#00A859]' : 'text-gray-400'">
+            <span class="text-[9px] md:text-[10px] font-black uppercase mt-1.5 md:mt-2 tracking-widest text-center" :class="pasoActual >= step ? 'text-centros' : 'text-gray-400'">
               {{ step === 1 ? '1. Datos Empresa' : step === 2 ? '2. Diagnóstico de Empresa' : '3. Match Académico' }}
             </span>
           </button>
         </div>
         <div class="absolute top-[18px] md:top-[22px] left-0 w-full h-1 bg-gray-200 -z-0 rounded-full"></div>
-        <div class="absolute top-[18px] md:top-[22px] left-0 h-1 bg-gradient-to-r from-[#00A859] to-[#99CC33] transition-all duration-700 -z-0 rounded-full" :style="{ width: ((pasoActual - 1) / (totalPasos - 1)) * 100 + '%' }"></div>
+        <div class="absolute top-[18px] md:top-[22px] left-0 h-1 bg-gradient-to-r from-centros to-primary-400 transition-all duration-700 -z-0 rounded-full" :style="{ width: ((pasoActual - 1) / (totalPasos - 1)) * 100 + '%' }"></div>
       </div>
 
       <main class="min-h-[400px]">
+        <div v-if="solicitudActiva" class="mb-6 rounded-2xl border border-alumnos/30 bg-alumnos/5 px-4 py-3 sm:px-5" role="status">
+          <p class="text-sm font-bold text-azul-noche break-words">
+            Solicitud de {{ solicitudActiva.docente }} · {{ solicitudActiva.centro }}<template v-if="solicitudActiva.total_bloques > 1"> · petición {{ solicitudActiva.bloque + 1 }} de {{ solicitudActiva.total_bloques }}</template>
+          </p>
+          <p class="mt-0.5 text-xs text-gray-600">
+            {{ seleccion.empresaId ? 'La empresa viene de la solicitud; puedes cambiarla.' : 'Elige la empresa en el paso 1.' }}
+            El paso 3 se rellena con lo que pidió el docente al llegar a él. Los retos que guardes irán a la recámara de la solicitud.
+          </p>
+          <ul v-if="avisosSolicitud.length" class="mt-2 list-disc space-y-1 pl-5 text-xs font-semibold text-alumnos-dark">
+            <li v-for="a in avisosSolicitud" :key="a">{{ a }}</li>
+          </ul>
+          <!-- Un reto por cada petición: se pasa de una a otra sin volver a Central -->
+          <div v-if="solicitudActiva.total_bloques > 1" class="mt-3 flex flex-wrap items-center gap-2">
+            <span class="text-xs font-bold text-gray-600">Peticiones de esta solicitud:</span>
+            <button v-for="n in solicitudActiva.total_bloques" :key="n" type="button"
+                    class="min-h-9 rounded-full border-2 px-4 text-xs font-bold transition-colors"
+                    :class="solicitudActiva.bloque === n - 1 ? 'border-transparent bg-gradient-to-r from-centros to-primary-400 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-centros/50'"
+                    :aria-current="solicitudActiva.bloque === n - 1 ? 'true' : undefined"
+                    @click="solicitudActiva.bloque !== n - 1 && elegirPeticion(solicitudActiva.solicitud_id, n - 1)">Petición {{ n }}</button>
+          </div>
+        </div>
         <transition name="fade" mode="out-in">
-          <div v-if="pasoActual === 1" class="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-            <section class="bg-white rounded-[2.5rem] p-6 md:p-8 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.05)] relative z-10">
+          <div v-if="pasoActual === 1" class="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+            <section class="bg-white rounded-[2.5rem] p-5 md:p-6 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.05)] relative z-10">
               <transition name="fade">
-                <div v-if="seleccion.empresaNombre" class="absolute -top-4 left-8">
-                  <span class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white text-[#1F2937] text-xs font-bold tracking-wide border border-gray-100 border-b-0 shadow-[0_-4px_8px_rgb(0,0,0,0.04)]">
-                    <svg class="w-3.5 h-3.5 shrink-0 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div v-if="seleccion.empresaNombre" class="absolute -top-4 left-6 sm:left-8 max-w-[calc(100%-3rem)] sm:max-w-[55%]">
+                  <span class="max-w-full inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white text-[#1F2937] text-xs font-bold tracking-wide border border-gray-100 border-b-0 shadow-[0_-4px_8px_rgb(0,0,0,0.04)]">
+                    <svg class="w-3.5 h-3.5 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                     </svg>
-                    Empresa: {{ seleccion.empresaNombre }}
+                    <span class="min-w-0 truncate" :title="seleccion.empresaNombre">Empresa: {{ seleccion.empresaNombre }}</span>
                   </span>
                 </div>
               </transition>
 
-              <div class="flex flex-wrap items-center gap-4 mb-6">
-                <div class="w-12 h-12 rounded-2xl bg-[#00A859]/10 flex items-center justify-center text-[#00A859]">
-                  <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+              <div class="flex flex-wrap items-center gap-3 mb-4">
+                <div class="w-10 h-10 rounded-2xl bg-centros/10 flex items-center justify-center text-centros">
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
                 </div>
-                <h2 class="text-2xl font-black uppercase tracking-tight text-[#1F2937]">Buscar en la base de datos de DuaLab</h2>
-
-                <button
-                  ref="refBtnGuia"
-                  @click="modoGuia = true; pasoGuia = 1"
-                  class="flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-2xl border border-blue-100
-                         shadow-sm text-blue-500 text-xs font-black uppercase tracking-wider
-                         hover:bg-blue-100 hover:border-blue-200 transition-all">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                          d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                  </svg>
-                  Activar Guía
-                </button>
+                <h2 class="text-xl font-black uppercase tracking-tight text-azul-noche">Buscar en la base de datos de DUALAB</h2>
               </div>
 
-              <div v-if="esModoDemo"
-                class="mb-6 flex items-center gap-3 bg-[#00A859]/5 border border-[#00A859]/20 rounded-2xl px-5 py-3">
-                <svg class="w-4 h-4 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-                <p class="text-xs font-bold text-[#00A859] uppercase tracking-widest">
-                  Modo Demo activo — los campos están bloqueados. Pulsa "Vaciar" para editarlos.
-                </p>
-              </div>
+              <AvisoModoDemo v-if="esModoDemo" class="mb-6" @salir="limpiarFormulario" />
 
               <div v-else-if="estaPasoBloqueado(1)"
                 class="mb-6 flex items-center gap-3 bg-gray-100 border border-gray-200 rounded-2xl px-5 py-3">
@@ -1309,34 +2228,34 @@ async function guardarEstadoGen(nuevoEstado) {
                 </p>
               </div>
 
-              <!-- FILA 1: Centro educativo, con las acciones generales debajo en horizontal -->
-              <div class="mb-8 flex flex-col gap-4">
+              <!-- FILA 1: Centro educativo + acciones generales (en la misma línea en escritorio) -->
+              <div class="mb-4 flex flex-col xl:flex-row xl:items-end gap-3">
                 <!-- PASO 1: Centro educativo obligatorio -->
-                <div ref="refCentroEducativo"
-                     class="w-full lg:max-w-sm rounded-2xl transition-all duration-300"
+                <div ref="refCentroEducativo" data-tour="gen-centro"
+                     class="w-full min-w-0 xl:max-w-sm rounded-2xl transition-all duration-300"
                      :class="[
                        !centroFiltro && !esModoDemo ? 'step-glow-active' : '',
                        tourTargetActivo === 'refCentroEducativo' ? 'tour-active' : '',
                        modoGuia && seccionActiva !== null && seccionActiva !== 'busqueda' ? 'tour-seccion-blur' : ''
                      ]">
-                  <label class="label-style" :class="!centroFiltro && !esModoDemo ? '!text-[#00A859]' : ''">
+                  <label class="label-style" :class="!centroFiltro && !esModoDemo ? '!text-centros' : ''">
                     {{ !centroFiltro && !esModoDemo ? '① Centro Educativo *' : 'Centro Educativo *' }}
                   </label>
-                  <input v-if="esModoDemo" type="text" value="IES DEMO" disabled class="input-style opacity-70 cursor-not-allowed bg-gray-50" />
+                  <input v-if="esModoDemo" type="text" value="IES DEMO" disabled :title="tituloDemo" class="input-style !py-2.5 opacity-70 cursor-not-allowed bg-gray-50" />
                   <input v-else-if="centroFijadoPorRol"
                     type="text"
                     :value="authStore.userCentroNombre"
                     disabled
-                    class="input-style opacity-80 cursor-not-allowed bg-gray-50"
+                    class="input-style !py-2.5 opacity-80 cursor-not-allowed bg-gray-50"
                     title="Tu centro educativo está fijado según tu cuenta"
                   />
-                  <select v-else v-model="centroFiltro" :disabled="estaPasoBloqueado(1)" class="input-style">
+                  <select v-else v-model="centroFiltro" :disabled="estaPasoBloqueado(1)" class="input-style !py-2.5">
                     <option value="">Selecciona tu centro...</option>
                     <option v-for="centro in centrosDisponibles" :key="centro" :value="centro">{{ centro }}</option>
                   </select>
                 </div>
 
-                <div class="flex flex-wrap items-center gap-2"
+                <div data-tour="gen-demo" class="flex flex-wrap xl:flex-nowrap xl:shrink-0 items-center gap-2"
                      :class="{ 'tour-seccion-blur': modoGuia && seccionActiva !== null && seccionActiva !== 'acciones' }">
                   <!-- Cargar Demo -->
                   <div class="relative" ref="demoSelectorRef"
@@ -1344,10 +2263,10 @@ async function guardarEstadoGen(nuevoEstado) {
                     <button
                       @click="mostrarSelectorDemo = !mostrarSelectorDemo"
                       :disabled="estaPasoBloqueado(1)"
-                      :class="estaPasoBloqueado(1) ? 'opacity-40 cursor-not-allowed bg-white text-gray-400 border-gray-200' : esModoDemo ? 'bg-[#00A859]/10 text-[#00A859] border-[#00A859]/30 hover:bg-[#00A859]/15' : 'bg-white text-[#00A859] hover:bg-gray-50 border-gray-200 hover:border-[#00A859] shadow-sm'"
+                      :class="estaPasoBloqueado(1) ? 'opacity-40 cursor-not-allowed bg-white text-gray-400 border-gray-200' : esModoDemo ? 'bg-centros/10 text-centros border-centros/30 hover:bg-centros/15' : 'bg-white text-centros hover:bg-gray-50 border-gray-200 hover:border-centros shadow-sm'"
                       class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border">
                       <template v-if="esModoDemo">
-                        <svg class="w-3.5 h-3.5 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                        <svg class="w-3.5 h-3.5 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
                         <span>DEMO ACTIVA</span>
                         <svg class="w-3 h-3 transition-transform duration-200" :class="mostrarSelectorDemo ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
@@ -1367,8 +2286,8 @@ async function guardarEstadoGen(nuevoEstado) {
                           v-for="demo in demosDisponibles"
                           :key="demo.id"
                           @click="cargarDemo(demo.familia_profesional)"
-                          class="w-full text-left px-5 py-3 text-sm font-semibold text-[#1F2937] hover:bg-[#00A859]/5 hover:text-[#00A859] transition-colors border-b border-gray-100 last:border-0 flex items-center gap-3">
-                          <svg class="w-4 h-4 shrink-0 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          class="w-full text-left px-5 py-3 text-sm font-semibold text-[#1F2937] hover:bg-centros/5 hover:text-centros transition-colors border-b border-gray-100 last:border-0 flex items-center gap-3">
+                          <svg class="w-4 h-4 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="demosIconos[demo.familia_profesional] || iconoFallback"/>
                           </svg>
                           {{ demo.familia_profesional }}
@@ -1376,22 +2295,6 @@ async function guardarEstadoGen(nuevoEstado) {
                       </div>
                     </Transition>
                   </div>
-
-                  <!-- Información Simulada -->
-                  <button ref="refInfoSimulada"
-                    @click="toggleInfoSimulada()"
-                    :disabled="esModoDemo || cargandoSimulacion || estaPasoBloqueado(2)"
-                    :class="[
-                      esModoDemo || cargandoSimulacion || estaPasoBloqueado(2) ? 'opacity-40 cursor-not-allowed bg-white text-gray-400 border-gray-200' : esInfoSimulada ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-md' : 'bg-white text-gray-500 hover:bg-gray-50 border-gray-200 shadow-sm',
-                      tourTargetActivo === 'refInfoSimulada' ? 'tour-active' : ''
-                    ]"
-                    class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border">
-                    <svg v-if="cargandoSimulacion" class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                    <svg v-else-if="esInfoSimulada" class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
-                    <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <span v-if="cargandoSimulacion">Generando...</span>
-                    <span v-else>Información Simulada</span>
-                  </button>
 
                   <!-- Vaciar -->
                   <button @click="limpiarFormulario" class="px-5 py-2.5 bg-white text-red-500 hover:bg-red-50 hover:border-red-500 border border-gray-200 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 shadow-sm">
@@ -1402,7 +2305,7 @@ async function guardarEstadoGen(nuevoEstado) {
               </div>
 
               <!-- FILA 2: Elige empresa — a lo ancho del grid, coherente con las cards de resultados -->
-              <div class="mb-10 relative z-20 rounded-2xl transition-all duration-300" ref="buscadorRef"
+              <div class="mb-4 relative z-20 rounded-2xl transition-all duration-300" ref="buscadorRef" data-tour="gen-empresa"
                    :class="[
                      centroFiltro && !seleccion.empresaId && !esModoDemo ? 'step-glow-empresa' : '',
                      tourTargetActivo === 'refBuscadorEmpresa' ? 'tour-active' : '',
@@ -1410,16 +2313,15 @@ async function guardarEstadoGen(nuevoEstado) {
                    ]">
                   <div class="flex flex-wrap items-center justify-between gap-3">
                     <label class="label-style !mb-0"
-                      :class="centroFiltro && !seleccion.empresaId && !esModoDemo ? '!text-[#00A859]' : (!centroFiltro && !esModoDemo ? 'opacity-40' : '')">
+                      :class="centroFiltro && !seleccion.empresaId && !esModoDemo ? '!text-centros' : (!centroFiltro && !esModoDemo ? 'opacity-40' : '')">
                       <template v-if="centroFiltro && !seleccion.empresaId && !esModoDemo">② Elige empresa</template>
                       <template v-else-if="!centroFiltro && !esModoDemo">Empresa (elige primero un centro)</template>
                       <template v-else>Buscar empresa</template>
                     </label>
 
-                    <div v-if="!esDocente" class="flex flex-wrap items-center gap-2 mb-2">
-                      <!-- Ver base de datos — solo superadmin (catálogo global, no ligado a un centro) -->
+                    <!-- Ver base de datos — solo superadmin (catálogo global, no ligado a un centro) -->
+                    <div v-if="authStore.isSuperAdmin" class="flex flex-wrap items-center gap-2 mb-2">
                       <RouterLink
-                        v-if="authStore.isSuperAdmin"
                         ref="refBaseDatos"
                         to="/base-datos"
                         class="px-4 py-2 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border bg-white text-gray-600 hover:bg-gray-50 border-gray-200 hover:border-gray-400 shadow-sm"
@@ -1433,54 +2335,195 @@ async function guardarEstadoGen(nuevoEstado) {
                         </svg>
                         Base de datos
                       </RouterLink>
-
-                      <!-- Insertar / Modificar empresa — admin y superadmin, acotado a su propio centro en el backend -->
-                      <button ref="refInsertarEmpresa" @click="abrirModalEmpresa"
-                        :disabled="estaPasoBloqueado(1)"
-                        :class="[
-                          estaPasoBloqueado(1)
-                            ? 'opacity-40 cursor-not-allowed bg-white text-gray-400 border-gray-200'
-                            : seleccion.empresaId
-                              ? 'bg-[#00A859] text-white border-[#00A859] hover:bg-[#007a42] shadow-md'
-                              : 'bg-white text-[#1F2937] hover:bg-gray-50 border-gray-200 shadow-sm',
-                          tourTargetActivo === 'refInsertarEmpresa' ? 'tour-active' : ''
-                        ]"
-                        class="px-4 py-2 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path v-if="seleccion.empresaId" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                          <path v-else stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1v1H9V7zm5 0h1v1h-1V7z"/>
-                        </svg>
-                        {{ seleccion.empresaId ? 'Modificar datos empresa' : 'Insertar nueva empresa' }}
-                      </button>
                     </div>
                   </div>
 
-                  <!-- Filtro simulada/real — visible solo cuando hay centro seleccionado -->
-                  <div v-if="centroFiltro && !esModoDemo && !estaPasoBloqueado(1)" class="flex flex-wrap items-center gap-1.5 mb-2">
+                  <!-- Atajo: empresa ficticia completa con IA (todos los roles, en su centro) -->
+                  <!-- Borrador de empresa con IA que quedó sin guardar (p. ej. tras recargar) -->
+                  <div v-if="recuperableIA && !borradorIA && !esModoDemo && !estaPasoBloqueado(1)" role="alert"
+                       class="mb-3 flex flex-col sm:flex-row sm:items-center gap-3 rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3">
+                    <p class="flex-1 text-xs text-amber-800 leading-relaxed">
+                      Tienes una empresa generada con IA <strong>sin guardar</strong>:
+                      <strong>«{{ recuperableIA.empresa.nombre_comercial }}»</strong> ({{ recuperableIA.destino }}). ¿Quieres recuperarla?
+                    </p>
+                    <div class="flex gap-2 shrink-0">
+                      <button type="button" @click="recuperarBorradorIA()"
+                        class="min-h-[36px] px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase border bg-amber-500 text-white border-amber-500 hover:bg-amber-600">Recuperar</button>
+                      <button type="button" @click="descartarRecuperableIA()"
+                        class="min-h-[36px] px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase border bg-white text-gray-500 border-gray-200 hover:bg-gray-50">Descartar</button>
+                    </div>
+                  </div>
+
+                  <div v-if="centroFiltro && !esModoDemo && !estaPasoBloqueado(1) && !borradorIA" data-tour="gen-nueva-empresa"
+                       class="mb-3 rounded-3xl border border-gray-100 bg-gray-50/60 p-3 sm:p-4">
+                    <!-- Dos vías para AÑADIR una empresa nueva al centro (no son un filtro: lo que se
+                         crea o copia aquí acaba en «Empresas de mi centro» con la etiqueta Ficticia).
+                         Fila compacta; la explicación de cada vía va en tooltip (hover y foco de teclado)
+                         y se repite dentro de su panel al abrirlo, así que en táctil no se pierde. -->
+                    <div v-if="!panelFicticiaIA && !panelCatalogo" class="flex flex-col gap-3">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <h3 class="text-sm font-black uppercase tracking-tight text-azul-noche">
+                          Añadir una empresa nueva a mi centro
+                        </h3>
+                        <span class="group/via relative shrink-0" tabindex="0" aria-describedby="tip-vias-nueva">
+                          <span class="relative w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center cursor-help before:absolute before:-inset-2 before:content-['']">
+                            <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                          </span>
+                          <span id="tip-vias-nueva" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 hidden group-hover/via:block group-focus/via:block w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl right-0 sm:right-auto sm:left-0">
+                            Con IA o desde el catálogo se crea una empresa <strong>ficticia</strong><template v-if="!esDocente">; manualmente puedes registrar una <strong>real</strong></template>. Después la encontrarás en «Empresas de mi centro».
+                          </span>
+                        </span>
+                      </div>
+                      <div class="flex flex-col sm:flex-row sm:flex-wrap gap-2">
+                        <button type="button" @click="abrirPanelFicticiaIA()" aria-describedby="tip-via-ia"
+                          class="group/via relative inline-flex w-full sm:w-auto min-h-[40px] items-center gap-2 rounded-full border-2 border-gray-200 hover:border-[#1F2937]/50 bg-white pl-2 pr-3 py-1.5 text-xs font-black uppercase tracking-widest text-[#1F2937] shadow-sm transition-all hover:shadow-md">
+                          <span class="w-7 h-7 shrink-0 rounded-full bg-[#1F2937] text-white flex items-center justify-center">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                          </span>
+                          <span class="flex-1 text-left">Generar con IA</span>
+                          <svg class="w-4 h-4 shrink-0 transition-transform group-hover/via:translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+                          <span id="tip-via-ia" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 hidden group-hover/via:block group-focus/via:block w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl left-0">Crea una empresa ficticia nueva, a medida de la familia profesional que elijas.</span>
+                        </button>
+                        <!-- Alta manual: solo admin/superadmin (POST /empresas va bajo middleware admin) -->
+                        <button v-if="!esDocente" ref="refInsertarEmpresa" type="button" @click="abrirAltaManual()" aria-describedby="tip-via-manual"
+                          class="group/via relative inline-flex w-full sm:w-auto min-h-[40px] items-center gap-2 rounded-full border-2 border-gray-200 hover:border-gray-400 bg-white pl-2 pr-3 py-1.5 text-xs font-black uppercase tracking-widest text-gray-600 shadow-sm transition-all hover:shadow-md"
+                          :class="{ 'tour-active': tourTargetActivo === 'refInsertarEmpresa' }">
+                          <span class="w-7 h-7 shrink-0 rounded-full bg-gray-500 text-white flex items-center justify-center">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                          </span>
+                          <span class="flex-1 text-left">Añadir manualmente</span>
+                          <svg class="w-4 h-4 shrink-0 transition-transform group-hover/via:translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+                          <span id="tip-via-manual" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 hidden group-hover/via:block group-focus/via:block w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl left-0">Rellena tú la ficha. Ideal para una empresa real con la que colabora tu centro.</span>
+                        </button>
+                        <button type="button" @click="abrirPanelCatalogo()" aria-describedby="tip-via-catalogo"
+                          class="group/via relative inline-flex w-full sm:w-auto min-h-[40px] items-center gap-2 rounded-full border-2 border-centros/30 hover:border-centros bg-white pl-2 pr-3 py-1.5 text-xs font-black uppercase tracking-widest text-centros shadow-sm transition-all hover:shadow-md">
+                          <span class="w-7 h-7 shrink-0 rounded-full bg-centros text-white flex items-center justify-center">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                          </span>
+                          <span class="flex-1 text-left">Catálogo DUALAB</span>
+                          <svg class="w-4 h-4 shrink-0 transition-transform group-hover/via:translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+                          <span id="tip-via-catalogo" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 hidden group-hover/via:block group-focus/via:block w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl left-0 sm:left-auto sm:right-0">Copia para tu centro una empresa ya preparada por DUALAB; podrás adaptarla.</span>
+                        </button>
+                      </div>
+                    </div>
+                    <p v-if="avisoCatalogo && !panelFicticiaIA && !panelCatalogo" role="status"
+                       class="mt-3 flex items-start gap-2 text-xs font-bold text-centros bg-centros/5 border border-centros/20 rounded-xl px-3 py-2 break-words">
+                      <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                      <span class="min-w-0">{{ avisoCatalogo }}</span>
+                    </p>
+
+                    <!-- Catálogo DuaLab: plantillas compartidas; se usan a través de una copia del centro -->
+                    <div v-if="panelCatalogo" class="p-4 sm:p-5 rounded-2xl border-2 border-centros/20 bg-centros/5">
+                      <div class="flex items-start justify-between gap-3 mb-1">
+                        <p class="text-xs font-black uppercase tracking-widest text-centros">Catálogo DUALAB</p>
+                        <button type="button" @click="panelCatalogo = false" class="inline-flex items-center justify-center w-9 h-9 -m-2 rounded-full shrink-0 transition-colors text-gray-400 hover:text-gray-600 hover:bg-black/5" aria-label="Cerrar catálogo">
+                          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                      </div>
+                      <p class="text-xs text-gray-600 leading-relaxed mb-3">
+                        Empresas ficticias preparadas por DUALAB para todos los centros. Al pulsar «Usar en mi centro»
+                        se crea una copia para {{ authStore.isSuperAdmin ? centroFiltro : 'tu centro' }} que podrás adaptar; el original no cambia.
+                      </p>
+                      <p v-if="seleccion.empresaId && seleccion.empresaNombre" class="text-xs text-gray-600 leading-relaxed mb-3 bg-white/70 border border-gray-200 rounded-xl px-3 py-2">
+                        Ahora tienes seleccionada <strong>«{{ seleccion.empresaNombre }}»</strong>. Al usar una del catálogo, la sustituirá; si cierras el catálogo, la recuperas.
+                      </p>
+                      <select v-model="familiaCatalogo" class="input-style !py-2 text-sm mb-3" aria-label="Filtrar el catálogo por familia profesional">
+                        <option value="">Todas las familias</option>
+                        <option v-for="f in familiasCatalogo" :key="f.id" :value="f.id">{{ f.nombre }}</option>
+                      </select>
+                      <p v-if="cargandoCatalogo" class="text-xs text-gray-400 italic">Cargando catálogo…</p>
+                      <p v-else-if="!empresasCatalogo.length && !errorCatalogo" class="text-xs text-gray-400 italic">
+                        No hay empresas del catálogo con las que {{ authStore.isSuperAdmin ? 'este centro' : 'tu centro' }} pueda generar retos
+                        {{ familiaCatalogo ? 'en esta familia' : '' }}: solo se muestran las de familias con módulos y RA/CE en ciclos que imparte el centro.
+                      </p>
+                      <ul v-else class="space-y-2 max-h-72 overflow-y-auto pr-1">
+                        <li v-for="p in empresasCatalogo" :key="p.id" class="flex flex-col sm:flex-row sm:items-center gap-2 bg-white rounded-xl border border-gray-100 px-4 py-3">
+                          <div class="flex-1 min-w-0">
+                            <p class="text-sm font-bold text-[#1F2937] break-words">{{ p.nombre_comercial }}</p>
+                            <!-- Sector (a qué se dedica) y familias (para qué alumnado sirve) en líneas con
+                                 etiqueta propia: juntos con «·» parecían una misma cosa -->
+                            <p v-if="p.sector" class="mt-0.5 text-[11px] text-gray-500 break-words">
+                              <span class="font-bold uppercase tracking-wide text-gray-400">Sector:</span> {{ p.sector }}
+                            </p>
+                            <div v-if="p.familias?.length" class="mt-1 flex flex-wrap items-center gap-1">
+                              <span class="text-[11px] font-bold uppercase tracking-wide text-gray-400">{{ p.familias.length === 1 ? 'Familia:' : 'Familias:' }}</span>
+                              <span v-for="f in p.familias" :key="f.id ?? f.nombre"
+                                class="max-w-full px-2 py-0.5 rounded-full bg-centros/10 text-centros text-[11px] font-bold break-words">{{ f.nombre }}</span>
+                            </div>
+                          </div>
+                          <button type="button" @click="usarDelCatalogo(p)" :disabled="!!usandoCatalogoId"
+                            class="shrink-0 px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase transition-all border shadow-sm"
+                            :class="usandoCatalogoId ? 'opacity-50 cursor-not-allowed bg-white text-gray-400 border-gray-200' : 'bg-centros text-white border-centros hover:bg-centros/90'">
+                            {{ usandoCatalogoId === p.id ? 'Copiando…' : 'Usar en mi centro' }}
+                          </button>
+                        </li>
+                      </ul>
+                      <p v-if="errorCatalogo" role="alert" class="mt-2 text-xs font-bold text-red-500">{{ errorCatalogo }}</p>
+                    </div>
+
+                    <CrearEmpresaFicticiaIA v-if="panelFicticiaIA"
+                      modo="borrador"
+                      @borrador="onFicticiaIABorrador"
+                      :familias="todasLasFamilias"
+                      :familia-inicial-id="familiaInicialFicticiaIA"
+                      :centro-fijo="authStore.isSuperAdmin ? centroFiltro : ''"
+                      :empresa-seleccionada="seleccion.empresaId ? seleccion.empresaNombre : ''"
+                      @guardada="onFicticiaIAGuardada"
+                      @cerrar="panelFicticiaIA = false" />
+                  </div>
+
+                  <!-- Separación entre las vías alternativas (IA / catálogo) y las empresas del centro -->
+                  <div v-if="centroFiltro && !esModoDemo && !estaPasoBloqueado(1) && !ocultarEmpresasCentro"
+                       class="flex items-center gap-3 my-3" role="separator">
+                    <span class="flex-1 h-px bg-gray-200"></span>
+                    <span class="text-[10px] font-black uppercase tracking-widest text-gray-400">o elige una que ya esté en tu centro</span>
+                    <span class="flex-1 h-px bg-gray-200"></span>
+                  </div>
+
+                  <!-- Empresas del centro: ocultas mientras se crea con IA, se elige del catálogo o hay borrador -->
+                  <template v-if="!ocultarEmpresasCentro">
+                  <div data-tour="gen-empresas-centro" :class="centroFiltro && !esModoDemo && !estaPasoBloqueado(1) ? 'rounded-3xl border border-gray-100 bg-gray-50/60 p-4 sm:p-6' : ''">
+                  <div v-if="centroFiltro && !esModoDemo && !estaPasoBloqueado(1)" class="flex items-center gap-2 min-w-0 mb-3">
+                    <h3 class="text-sm font-black uppercase tracking-tight text-azul-noche">
+                      Empresas de mi centro educativo
+                    </h3>
+                    <span class="group/via relative shrink-0" tabindex="0" aria-describedby="tip-empresas-centro">
+                      <span class="relative w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center cursor-help before:absolute before:-inset-2 before:content-['']">
+                        <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                      </span>
+                      <span id="tip-empresas-centro" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 hidden group-hover/via:block group-focus/via:block w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl right-0 sm:right-auto sm:left-0">
+                        Las empresas que ya tiene {{ authStore.isSuperAdmin ? 'el centro elegido' : 'tu centro' }}: <strong>reales</strong> (colaboradoras) y <strong>ficticias</strong> (creadas con IA, copiadas del catálogo o a mano para practicar). Filtra por tipo y familia, o busca por nombre, y elige una para generar el reto.
+                      </span>
+                    </span>
+                  </div>
+                  <!-- Filtros + buscador: una sola fila en escritorio (xl: con el SidePanel fijo, en lg no caben) -->
+                  <div class="flex flex-col xl:flex-row xl:items-center gap-2">
+                  <!-- Filtro ficticia/real (valor interno «simulada» = es_simulada) — visible solo con centro -->
+                  <div v-if="centroFiltro && !esModoDemo && !estaPasoBloqueado(1)" class="flex flex-wrap items-center gap-1.5 shrink-0">
                     <button
-                      v-for="(label, val) in { '': 'Todas', 'simulada': 'Simuladas', 'real': 'Verídicas' }"
+                      v-for="(label, val) in { '': 'Todas', 'simulada': 'Ficticias', 'real': 'Reales' }"
                       :key="val"
                       @click="filtroTipoEmpresa = val; mostrarDropdownEmpresas = true"
                       :class="filtroTipoEmpresa === val
-                        ? (val === 'simulada' ? 'bg-[#1F2937] text-white border-[#1F2937]' : val === 'real' ? 'bg-[#00A859] text-white border-[#00A859]' : 'bg-gray-200 text-gray-700 border-gray-300')
+                        ? (val === 'simulada' ? 'bg-[#1F2937] text-white border-[#1F2937]' : val === 'real' ? 'bg-centros text-white border-centros' : 'bg-gray-200 text-gray-700 border-gray-300')
                         : 'bg-white text-gray-400 border-gray-200 hover:border-gray-400'"
-                      class="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all"
+                      class="min-h-[36px] px-4 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all"
                     >{{ label }}</button>
                   </div>
 
-                  <!-- Filtro por sector — solo sectores presentes entre las empresas del centro -->
-                  <div v-if="centroFiltro && !esModoDemo && !estaPasoBloqueado(1) && sectoresParaFiltroEmpresa.length > 0" class="mb-3">
+                  <!-- Filtro por familia profesional — solo familias presentes entre las empresas del centro -->
+                  <div v-if="centroFiltro && !esModoDemo && !estaPasoBloqueado(1) && familiasParaFiltroEmpresa.length > 0" class="xl:w-48 shrink-0">
                     <select
-                      v-model="filtroSectorEmpresa"
+                      v-model="filtroFamiliaEmpresa"
                       @change="mostrarDropdownEmpresas = true"
                       class="input-style !py-2 text-sm"
                     >
-                      <option value="">Todos los sectores</option>
-                      <option v-for="sector in sectoresParaFiltroEmpresa" :key="sector" :value="sector">{{ sector }}</option>
+                      <option value="">Todas las familias</option>
+                      <option v-for="familia in familiasParaFiltroEmpresa" :key="familia" :value="familia">{{ familia }}</option>
                     </select>
                   </div>
 
-                  <div class="relative">
+                  <div class="relative flex-1">
                     <div class="absolute inset-y-0 left-5 flex items-center pointer-events-none">
                       <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
@@ -1495,52 +2538,70 @@ async function guardarEstadoGen(nuevoEstado) {
                       autocomplete="new-password"
                       name="buscar-empresa-dualab"
                       type="search"
-                      class="input-style !pl-14 text-lg"
+                      class="input-style !pl-14 !py-2.5"
                       :placeholder="!centroFiltro && !esModoDemo ? 'Selecciona primero un centro...' : 'Ej: Fundación Sergio Alonso...'"
                     />
                   </div>
+                  </div>
 
+                  <!-- Resultados desplegados por defecto (filtro "Todas") mientras no haya empresa elegida -->
                   <Transition name="dropdown">
-                    <div v-if="mostrarDropdownEmpresas && centroFiltro && !esModoDemo && !estaPasoBloqueado(1)" class="mt-3">
+                    <div v-if="(mostrarDropdownEmpresas || !seleccion.empresaId) && centroFiltro && !esModoDemo && !estaPasoBloqueado(1)" class="mt-3">
                       <div v-if="empresasFiltradasBusqueda.length > 0">
-                        <span class="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-2">
+                        <span class="block text-[10px] font-black uppercase tracking-widest text-gray-400 mb-1.5">
                           {{ empresasFiltradasBusqueda.length }} resultado(s)
                         </span>
 
-                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
                           <button
                             v-for="emp in empresasPaginadas"
                             :key="emp.id"
                             @click="seleccionarEmpresa(emp)"
-                            class="text-left px-5 py-4 bg-white border border-gray-200 rounded-2xl shadow-sm hover:border-[#00A859] hover:shadow-md transition-all"
+                            class="text-left px-4 py-2.5 bg-white border border-gray-200 rounded-2xl shadow-sm hover:border-centros hover:shadow-md transition-all"
                           >
-                            <span class="font-bold text-[#1F2937] block truncate">{{ emp.nombre_comercial }}</span>
-                            <span class="text-xs text-gray-400 uppercase tracking-widest block truncate mt-0.5">
+                            <span class="font-bold text-sm text-[#1F2937] block truncate">{{ emp.nombre_comercial }}</span>
+                            <span class="text-[10px] text-gray-400 uppercase tracking-widest block truncate mt-0.5">
                               {{ emp.sector || 'Sin sector especificado' }}
                             </span>
-                            <span v-if="emp.es_simulada" class="inline-block mt-2 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-gray-100 text-gray-500">
-                              Simulada
+                            <span v-if="emp.es_simulada" class="inline-block mt-1 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-gray-100 text-gray-500">
+                              Ficticia
+                            </span>
+                            <!-- Una sola tarjeta por empresa: si trabaja con varias familias se indica aquí
+                                 y en el paso 3 se elige para cuál es el reto -->
+                            <span v-if="emp.familias?.length > 1"
+                              :title="emp.familias.map(f => f.nombre).join(' · ')"
+                              class="inline-block mt-1 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-centros/10 text-centros">
+                              {{ emp.familias.length }} familias
                             </span>
                           </button>
                         </div>
 
-                        <!-- Paginación: EMPRESAS_POR_PAGINA es múltiplo de 1/2/3 columnas → siempre filas completas -->
-                        <div v-if="totalPaginasEmpresas > 1" class="flex items-center justify-between mt-3">
+                        <!-- Paginación: EMPRESAS_POR_PAGINA es múltiplo de 1/2/3/4 columnas → siempre filas completas -->
+                        <div v-if="totalPaginasEmpresas > 1" class="flex flex-wrap items-center justify-between gap-2 mt-2">
                           <button
                             type="button"
                             @click="paginaEmpresas -= 1"
                             :disabled="paginaEmpresas === 1"
-                            class="px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-white text-gray-500 border-gray-200 hover:border-gray-400"
+                            class="min-h-[36px] px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-white text-gray-500 border-gray-200 hover:border-gray-400"
                           >← Anterior</button>
-                          <span class="text-[10px] font-black uppercase tracking-widest text-gray-400">
+                          <span class="hidden sm:inline text-[10px] font-black uppercase tracking-widest text-gray-400">
                             Página {{ paginaEmpresas }} de {{ totalPaginasEmpresas }}
                           </span>
                           <button
                             type="button"
+                            :key="`siguiente-${filtroTipoEmpresa}-${filtroFamiliaEmpresa}-${centroFiltro}`"
                             @click="paginaEmpresas += 1"
                             :disabled="paginaEmpresas === totalPaginasEmpresas"
-                            class="px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all disabled:opacity-30 disabled:cursor-not-allowed bg-white text-gray-500 border-gray-200 hover:border-gray-400"
-                          >Siguiente →</button>
+                            :class="destacarSiguienteEmpresas
+                              ? 'bg-centros text-white border-centros shadow-md hover:bg-centros/90 siguiente-empresas-glow'
+                              : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'"
+                            class="min-h-[36px] px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            Siguiente →
+                            <span v-if="destacarSiguienteEmpresas" class="hidden sm:inline ml-1 px-1.5 py-0.5 rounded-full bg-white/20 normal-case tracking-normal">
+                              +{{ empresasRestantes }} empresas
+                            </span>
+                          </button>
                         </div>
                       </div>
 
@@ -1550,178 +2611,232 @@ async function guardarEstadoGen(nuevoEstado) {
                       </div>
                     </div>
                   </Transition>
+                  </div>
+                  </template>
                 </div>
 
-            <div v-if="empresaDetalle" class="bg-white rounded-3xl p-8 border border-gray-100 mb-8 animate-in fade-in duration-500">
-
-            <!-- Cabecera empresa -->
-            <div class="mb-8">
-              <div class="flex items-center gap-3 mb-4">
-                <div class="w-2 h-6 bg-[#00A859] rounded-full shrink-0"></div>
-                <h3 class="font-black text-[#1F2937] uppercase tracking-widest text-sm">Ficha de Empresa</h3>
+            <!-- Ficha de la empresa generada con IA (borrador sin guardar): mismo diseño que la ficha
+                 de una empresa seleccionada. Su diagnóstico se revisa en el paso 2 y se guarda allí. -->
+            <div v-if="borradorIA && !eligiendoOtraVia" class="bg-white rounded-3xl p-4 sm:p-6 border border-gray-100 mb-6 animate-in fade-in duration-500">
+              <div class="mb-4 flex flex-col sm:flex-row sm:items-center gap-3 rounded-2xl border-2 border-[#1F2937]/15 bg-[#1F2937]/5 px-4 py-3">
+                <p class="flex-1 text-xs text-gray-700 leading-relaxed">
+                  <span class="inline-block mb-1 px-2 py-0.5 rounded-full bg-[#1F2937] text-white text-[9px] font-black uppercase tracking-widest">Generada con IA · aún no guardada</span><br>
+                  Revisa su ficha. En el <strong>paso 2</strong> verás y podrás ajustar su diagnóstico; se guardará en la base de datos
+                  como ficticia de <strong>{{ borradorIA.destino }}</strong> al terminar ese paso.
+                </p>
+                <div v-if="!estaPasoBloqueado(1)" class="flex flex-wrap gap-2 shrink-0">
+                  <button type="button" @click="generarOtraDesdeBorrador()"
+                    class="min-h-[36px] px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase border bg-white text-[#1F2937] border-gray-200 hover:bg-gray-50">Generar otra</button>
+                  <button type="button" @click="descartarBorradorIA()"
+                    class="min-h-[36px] px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase border bg-white text-red-500 border-gray-200 hover:bg-red-50">Descartar</button>
+                </div>
               </div>
 
-              <!-- Nombre + razón social -->
-              <p class="font-black text-[#1F2937] text-xl leading-tight ml-5">{{ empresaDetalle.nombre_comercial }}</p>
-              <p v-if="empresaDetalle.razon_social && empresaDetalle.razon_social !== empresaDetalle.nombre_comercial"
-                class="text-sm text-gray-400 ml-5 mt-0.5">{{ empresaDetalle.razon_social }}</p>
+              <div class="mb-4">
+                <div class="flex items-center gap-2 mb-2">
+                  <div class="w-2 h-5 bg-centros rounded-full shrink-0"></div>
+                  <h3 class="font-black text-azul-noche uppercase tracking-widest text-xs">Ficha de empresa</h3>
+                </div>
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1 ml-4">
+                  <p class="font-black text-[#1F2937] text-lg sm:text-xl leading-tight break-words min-w-0">{{ borradorIA.empresa.nombre_comercial }}</p>
+                  <span v-if="borradorIA.empresa.cif" class="text-[10px] font-black uppercase tracking-widest bg-gray-100 text-gray-500 px-2.5 py-1 rounded-full">CIF: {{ borradorIA.empresa.cif }}</span>
+                  <span class="text-[10px] font-black uppercase tracking-widest bg-gray-100 text-gray-500 px-2.5 py-1 rounded-full">{{ borradorIA.familia }}</span>
+                </div>
+                <p v-if="borradorIA.empresa.razon_social && borradorIA.empresa.razon_social !== borradorIA.empresa.nombre_comercial"
+                  class="text-sm text-gray-400 ml-4 mt-0.5 break-words">{{ borradorIA.empresa.razon_social }}</p>
+              </div>
 
-              <!-- Chips: sector, tamaño, CIF -->
-              <div class="flex flex-wrap gap-2 ml-5 mt-3">
-                <span v-if="empresaDetalle.sector"
-                  class="text-[10px] font-black uppercase tracking-widest bg-[#00A859]/10 text-[#00A859] px-2.5 py-1 rounded-full">
-                  {{ empresaDetalle.sector }}
+              <!-- Cuerpo: datos generales | ubicación + actividad (dos columnas en escritorio) -->
+              <div class="pt-4 border-t-2 border-gray-100 grid grid-cols-1 gap-5" :class="{ 'lg:grid-cols-2': (borradorIA.empresa.actividad || borradorIA.empresa.direccion || borradorIA.empresa.municipio || borradorIA.empresa.codigo_postal) }">
+                <!-- Datos generales: lista de lectura (línea lateral, no tarjetas, para que no parezcan botones) -->
+                <section class="min-w-0">
+                  <h4 class="flex items-center gap-2 mb-3 text-xs font-black uppercase tracking-widest text-azul-noche">
+                    <span class="w-1.5 h-4 bg-centros/60 rounded-full shrink-0"></span>Datos generales
+                  </h4>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3" :class="{ 'lg:grid-cols-3': !(borradorIA.empresa.actividad || borradorIA.empresa.direccion || borradorIA.empresa.municipio || borradorIA.empresa.codigo_postal) }">
+                    <div class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Sector de actividad</p>
+                      <p class="text-sm font-semibold text-[#1F2937] break-words">{{ borradorIA.empresa.sector || '—' }}</p>
+                    </div>
+                    <div class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Tamaño de la empresa</p>
+                      <p class="text-sm font-semibold text-[#1F2937]">{{ borradorIA.empresa.tamano || '—' }}</p>
+                    </div>
+                    <div v-if="borradorIA.empresa.web" class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Web</p>
+                      <p class="text-sm text-gray-600 break-all">{{ borradorIA.empresa.web.replace(/^https?:\/\//, '') }}</p>
+                    </div>
+                    <div v-if="borradorIA.empresa.persona_contacto || borradorIA.empresa.telefono || borradorIA.empresa.email_general" class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Contacto directo</p>
+                      <p v-if="borradorIA.empresa.persona_contacto" class="font-semibold text-[#1F2937] text-sm break-words">{{ borradorIA.empresa.persona_contacto }}</p>
+                      <p v-if="borradorIA.empresa.telefono" class="text-gray-600 text-sm flex items-center gap-2 mt-1">
+                        <svg class="w-4 h-4 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg> {{ borradorIA.empresa.telefono }}
+                      </p>
+                      <p v-if="borradorIA.empresa.email_general" class="text-gray-600 text-sm flex items-center gap-2 mt-1 min-w-0">
+                        <svg class="w-4 h-4 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg> <span class="truncate" :title="borradorIA.empresa.email_general">{{ borradorIA.empresa.email_general }}</span>
+                      </p>
+                    </div>
+                  </div>
+                </section>
+                <!-- Columna derecha: ubicación arriba (dato general, alineada con la lista de la
+                     izquierda) y debajo la actividad como apartado propio -->
+                <div v-if="(borradorIA.empresa.actividad || borradorIA.empresa.direccion || borradorIA.empresa.municipio || borradorIA.empresa.codigo_postal)" class="min-w-0 lg:pl-6 lg:border-l-2 lg:border-gray-100"
+                     :class="(borradorIA.empresa.direccion || borradorIA.empresa.municipio || borradorIA.empresa.codigo_postal) ? '-mt-2 lg:mt-0 lg:pt-7' : 'pt-5 border-t-2 border-gray-100 lg:pt-0 lg:border-t-0'">
+                  <div v-if="borradorIA.empresa.direccion || borradorIA.empresa.municipio || borradorIA.empresa.codigo_postal" class="min-w-0 border-l-2 border-centros/30 pl-3">
+                    <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Ubicación</p>
+                    <p class="text-sm text-gray-600 leading-snug break-words">
+                      {{ borradorIA.empresa.direccion }} <br>
+                      {{ borradorIA.empresa.codigo_postal }} - {{ borradorIA.empresa.municipio }} <span v-if="borradorIA.empresa.provincia">({{ borradorIA.empresa.provincia }})</span>
+                    </p>
+                  </div>
+                  <section v-if="borradorIA.empresa.actividad" class="min-w-0" :class="{ 'mt-4 pt-4 border-t-2 border-gray-100': borradorIA.empresa.direccion || borradorIA.empresa.municipio || borradorIA.empresa.codigo_postal }">
+                    <h4 class="flex items-center gap-2 mb-3 text-xs font-black uppercase tracking-widest text-azul-noche">
+                      <span class="w-1.5 h-4 bg-centros/60 rounded-full shrink-0"></span>Actividad de la empresa
+                    </h4>
+                    <p class="text-sm text-gray-700 leading-relaxed whitespace-pre-line break-words border-l-2 border-centros/30 pl-3">{{ borradorIA.empresa.actividad }}</p>
+                  </section>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="empresaDetalle && !eligiendoOtraVia" class="bg-white rounded-3xl p-4 sm:p-6 border border-gray-100 mb-6 animate-in fade-in duration-500">
+
+            <!-- Sin familias: avisar aquí, porque al avanzar el paso 1 se bloquea y en el paso 3 ya no habría arreglo -->
+            <div v-if="empresaSinFamilias && !esModoDemo && !estaPasoBloqueado(1)"
+              class="modulos-estado mb-4 flex items-start gap-3 rounded-2xl border-2 border-red-400 bg-red-50 px-4 py-3 text-xs leading-relaxed text-red-800">
+              <svg class="w-5 h-5 mt-0.5 shrink-0 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+              <div>
+                <p class="font-black uppercase tracking-wide text-[11px]">Esta empresa no tiene familias profesionales</p>
+                <!-- El docente no ve «Modificar datos empresa»: no prometerle una acción que no tiene -->
+                <p v-if="esDocente" class="mt-0.5">
+                  No se puede generar un reto con ella. <strong>Elige otra empresa</strong> o pide a un administrador que la complete.
+                </p>
+                <p v-else class="mt-0.5">
+                  Asígnale al menos una con <strong>«Modificar datos empresa»</strong> antes de continuar.
+                  Al avanzar, este paso se bloquea y en el paso 3 no podrás elegir familia ni ciclo.
+                </p>
+              </div>
+            </div>
+
+            <!-- Cabecera empresa: compacta (nombre + CIF en una línea; el aviso de solo lectura en ⓘ) -->
+            <div class="mb-4">
+              <div class="flex items-center gap-2 mb-2 min-w-0">
+                <div class="w-2 h-5 bg-centros rounded-full shrink-0"></div>
+                <h3 class="font-black text-azul-noche uppercase tracking-widest text-xs">Ficha de empresa</h3>
+                <span v-if="!esModoDemo" class="group/via relative shrink-0" tabindex="0" aria-describedby="tip-ficha-lectura">
+                  <span class="relative w-5 h-5 rounded-full bg-gray-100 flex items-center justify-center cursor-help before:absolute before:-inset-2 before:content-['']">
+                    <svg class="w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                  </span>
+                  <span id="tip-ficha-lectura" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 left-1/2 -translate-x-1/2 sm:left-0 sm:translate-x-0 hidden group-hover/via:block group-focus/via:block w-[min(18rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl">
+                    Estos son los datos de la ficha de la empresa y no se cambian desde el generador<template v-if="puedeModificarFicha && !estaPasoBloqueado(1)">: para corregirlos usa «Modificar datos empresa»</template><template v-else-if="!puedeModificarFicha">. Si ves algún error, ponte en contacto con DUALAB</template>.
+                  </span>
                 </span>
-                <span v-if="empresaDetalle.tamano"
-                  class="text-[10px] font-black uppercase tracking-widest bg-blue-50 text-blue-500 px-2.5 py-1 rounded-full">
-                  {{ empresaDetalle.tamano }}
-                </span>
+                <!-- Modificar datos: solo superadmin (EmpresaPolicy::update) -->
+                <button v-if="puedeModificarFicha && !estaPasoBloqueado(1) && !esModoDemo" type="button" @click="abrirEditarEmpresa()"
+                  class="ml-auto shrink-0 inline-flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-full border border-centros/30 bg-white text-centros text-[10px] sm:text-[11px] font-black uppercase tracking-widest shadow-sm transition-all hover:bg-centros hover:text-white">
+                  <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                  <span class="hidden sm:inline">Modificar datos empresa</span><span class="sm:hidden">Modificar</span>
+                </button>
+              </div>
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1 ml-4">
+                <p class="font-black text-[#1F2937] text-lg sm:text-xl leading-tight break-words min-w-0">{{ empresaDetalle.nombre_comercial }}</p>
                 <span v-if="empresaDetalle.cif"
                   class="text-[10px] font-black uppercase tracking-widest bg-gray-100 text-gray-500 px-2.5 py-1 rounded-full">
                   CIF: {{ empresaDetalle.cif }}
                 </span>
               </div>
+              <p v-if="empresaDetalle.razon_social && empresaDetalle.razon_social !== empresaDetalle.nombre_comercial"
+                class="text-sm text-gray-400 ml-4 mt-0.5 break-words">{{ empresaDetalle.razon_social }}</p>
             </div>
-              
-              <!-- Estado de contacto (editable inline) — solo admin -->
-              <div v-if="!esModoDemo && !esDocente" class="mb-6">
-                <div class="flex items-center gap-3 mb-3 flex-wrap">
-                  <h3 class="font-black text-[#1F2937] uppercase tracking-widest text-sm">Estado de Contacto</h3>
 
-                  <!-- Dropdown editable -->
-                  <div class="relative inline-block" @click.stop>
-                    <button
-                      @click="estadoDropdownGenAbierto = !estadoDropdownGenAbierto"
-                      :disabled="guardandoEstadoGen"
-                      :class="empresaDetalle.estado_contacto
-                        ? [estadoBadgeGen(empresaDetalle.estado_contacto).bg, estadoBadgeGen(empresaDetalle.estado_contacto).text, estadoBadgeGen(empresaDetalle.estado_contacto).border]
-                        : 'bg-gray-100 text-gray-400 border-gray-200'"
-                      class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border cursor-pointer hover:opacity-80 transition-opacity disabled:opacity-40"
-                    >
-                      <span v-if="empresaDetalle.estado_contacto"
-                        :class="[estadoBadgeGen(empresaDetalle.estado_contacto).dot, estadoBadgeGen(empresaDetalle.estado_contacto).pulse ? 'animate-pulse' : '']"
-                        class="w-1.5 h-1.5 rounded-full shrink-0"></span>
-                      <svg v-if="guardandoEstadoGen" class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-                      </svg>
-                      {{ guardandoEstadoGen ? 'Guardando...' : (empresaDetalle.estado_contacto || 'Sin estado') }}
-                      <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/>
-                      </svg>
-                    </button>
-                    <Transition name="dropdown">
-                      <div v-if="estadoDropdownGenAbierto"
-                        class="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-2xl shadow-xl overflow-hidden min-w-[240px]">
-                        <button
-                          v-for="opcion in ESTADOS_OPCIONES_GEN" :key="opcion"
-                          @click="guardarEstadoGen(opcion)"
-                          :class="[estadoBadgeGen(opcion).bg, estadoBadgeGen(opcion).text, 'hover:opacity-80']"
-                          class="w-full text-left px-4 py-2.5 flex items-center gap-2 text-[11px] font-black uppercase tracking-widest border-b border-white/40 last:border-0 transition-opacity"
-                        >
-                          <span :class="[estadoBadgeGen(opcion).dot, estadoBadgeGen(opcion).pulse ? 'animate-pulse' : '']" class="w-2 h-2 rounded-full shrink-0"></span>
-                          {{ opcion }}
-                        </button>
-                        <button
-                          @click="guardarEstadoGen('')"
-                          class="w-full text-left px-4 py-2.5 flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest text-gray-400 hover:bg-gray-50 border-t border-gray-100 transition-colors"
-                        >
-                          <span class="w-2 h-2 rounded-full shrink-0 bg-gray-300"></span>
-                          Sin estado
-                        </button>
+              <!-- Cuerpo: datos generales | ubicación + actividad (dos columnas en escritorio) -->
+              <div class="pt-4 border-t-2 border-gray-100 grid grid-cols-1 gap-5" :class="{ 'lg:grid-cols-2': (empresaDetalle.actividad || empresaDetalle.direccion || empresaDetalle.municipio || empresaDetalle.codigo_postal) }">
+                <!-- Datos generales: lista de lectura (línea lateral, no tarjetas, para que no parezcan botones) -->
+                <section class="min-w-0">
+                  <h4 class="flex items-center gap-2 mb-3 text-xs font-black uppercase tracking-widest text-azul-noche">
+                    <span class="w-1.5 h-4 bg-centros/60 rounded-full shrink-0"></span>Datos generales
+                  </h4>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3" :class="{ 'lg:grid-cols-3': !(empresaDetalle.actividad || empresaDetalle.direccion || empresaDetalle.municipio || empresaDetalle.codigo_postal) }">
+                    <div class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Sector de actividad</p>
+                      <p class="text-sm font-semibold text-[#1F2937] break-words">{{ empresaDetalle.sector || '—' }}</p>
+                    </div>
+                    <div class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Tamaño de la empresa</p>
+                      <p class="text-sm font-semibold text-[#1F2937]">{{ empresaDetalle.tamano || '—' }}</p>
+                    </div>
+                    <!-- Familias vinculadas (las de la ficha; tras editarla, las recargadas). Sin familias
+                         ya hay un aviso propio encima de la ficha. -->
+                    <div v-if="familiasEmpresaCargadas && familiasFiltradas.length" class="min-w-0 border-l-2 border-centros/30 pl-3 sm:col-span-2">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Familias para esta empresa</p>
+                      <div class="flex flex-wrap gap-1.5">
+                        <span v-for="f in familiasFiltradas" :key="f"
+                          class="max-w-full px-2.5 py-1 rounded-full bg-centros/10 text-centros text-xs font-bold break-words">{{ f }}</span>
                       </div>
-                    </Transition>
+                    </div>
+                    <div v-if="empresaDetalle.web" class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Web</p>
+                      <a :href="safeUrl(empresaDetalle.web)" target="_blank" rel="noopener noreferrer"
+                         class="text-centros hover:underline font-bold text-sm break-all">{{ empresaDetalle.web.replace(/^https?:\/\//, '') }}</a>
+                    </div>
+                    <div v-if="empresaDetalle.persona_contacto || empresaDetalle.telefono || empresaDetalle.email_general" class="min-w-0 border-l-2 border-centros/30 pl-3">
+                      <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Contacto directo</p>
+                      <p v-if="empresaDetalle.persona_contacto" class="font-semibold text-[#1F2937] text-sm break-words">{{ empresaDetalle.persona_contacto }}</p>
+                      <p v-if="empresaDetalle.telefono" class="text-gray-600 text-sm flex items-center gap-2 mt-1">
+                        <svg class="w-4 h-4 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg> {{ empresaDetalle.telefono }}
+                      </p>
+                      <p v-if="empresaDetalle.email_general" class="text-gray-600 text-sm flex items-center gap-2 mt-1 min-w-0">
+                        <svg class="w-4 h-4 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg> <span class="truncate" :title="empresaDetalle.email_general">{{ empresaDetalle.email_general }}</span>
+                      </p>
+                    </div>
                   </div>
-                </div>
-
-                <!-- Banner para pendiente de llamar -->
-                <Transition name="fade">
-                  <div v-if="empresaDetalle.estado_contacto === 'Pendiente de llamar'"
-                    class="flex items-center gap-3 bg-amber-50 border border-amber-300 rounded-2xl px-4 py-3">
-                    <svg class="w-4 h-4 text-amber-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
-                    </svg>
-                    <p class="text-xs font-bold text-amber-700">
-                      Empresa <span class="uppercase tracking-wider">pendiente de llamar</span> — contacta con ella antes de generar retos con su información.
+                </section>
+                <!-- Columna derecha: ubicación arriba (dato general, alineada con la lista de la
+                     izquierda) y debajo la actividad como apartado propio -->
+                <div v-if="(empresaDetalle.actividad || empresaDetalle.direccion || empresaDetalle.municipio || empresaDetalle.codigo_postal)" class="min-w-0 lg:pl-6 lg:border-l-2 lg:border-gray-100"
+                     :class="(empresaDetalle.direccion || empresaDetalle.municipio || empresaDetalle.codigo_postal) ? '-mt-2 lg:mt-0 lg:pt-7' : 'pt-5 border-t-2 border-gray-100 lg:pt-0 lg:border-t-0'">
+                  <div v-if="empresaDetalle.direccion || empresaDetalle.municipio || empresaDetalle.codigo_postal" class="min-w-0 border-l-2 border-centros/30 pl-3">
+                    <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Ubicación</p>
+                    <p class="text-sm text-gray-600 leading-snug break-words">
+                      {{ empresaDetalle.direccion }} {{ empresaDetalle.numero }} <br>
+                      {{ empresaDetalle.codigo_postal }} - {{ empresaDetalle.municipio }} <span v-if="empresaDetalle.provincia">({{ empresaDetalle.provincia }})</span>
                     </p>
                   </div>
-                </Transition>
-              </div>
-
-              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pt-6 border-t border-gray-200/60">
-                <div v-if="empresaDetalle.persona_contacto || empresaDetalle.telefono || empresaDetalle.email_general">
-                  <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Contacto Directo</p>
-                  <p v-if="empresaDetalle.persona_contacto" class="font-semibold text-[#1F2937] text-sm">{{ empresaDetalle.persona_contacto }}</p>
-                  <p v-if="empresaDetalle.telefono" class="text-gray-600 text-sm flex items-center gap-2 mt-1">
-                    <svg class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/></svg> {{ empresaDetalle.telefono }}
-                  </p>
-                  <p v-if="empresaDetalle.email_general" class="text-gray-600 text-sm flex items-center gap-2 mt-1 truncate">
-                    <svg class="w-4 h-4 shrink-0 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg> {{ empresaDetalle.email_general }}
-                  </p>
-                </div>
-
-                <div v-if="empresaDetalle.direccion || empresaDetalle.municipio || empresaDetalle.codigo_postal">
-                  <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Ubicación</p>
-                  <p class="text-sm text-gray-600 leading-tight">
-                    {{ empresaDetalle.direccion }} {{ empresaDetalle.numero }} <br>
-                    {{ empresaDetalle.codigo_postal }} - {{ empresaDetalle.municipio }} <span v-if="empresaDetalle.provincia">({{ empresaDetalle.provincia }})</span>
-                  </p>
-                </div>
-
-                <div v-if="empresaDetalle.actividad || empresaDetalle.web">
-                  <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Actividad / Web</p>
-                  <p v-if="empresaDetalle.actividad" class="text-sm text-gray-600 line-clamp-2" :title="empresaDetalle.actividad">{{ empresaDetalle.actividad }}</p>
-                  <a v-if="empresaDetalle.web"
-                     :href="safeUrl(empresaDetalle.web)"
-                     target="_blank"
-                     rel="noopener noreferrer"
-                     class="text-[#00A859] hover:underline font-bold text-sm truncate flex items-center gap-1 mt-1">
-                    {{ empresaDetalle.web.replace(/^https?:\/\//, '') }}
-                  </a>
+                  <section v-if="empresaDetalle.actividad" class="min-w-0" :class="{ 'mt-4 pt-4 border-t-2 border-gray-100': empresaDetalle.direccion || empresaDetalle.municipio || empresaDetalle.codigo_postal }">
+                    <h4 class="flex items-center gap-2 mb-3 text-xs font-black uppercase tracking-widest text-azul-noche">
+                      <span class="w-1.5 h-4 bg-centros/60 rounded-full shrink-0"></span>Actividad de la empresa
+                    </h4>
+                    <p class="text-sm text-gray-700 leading-relaxed whitespace-pre-line break-words border-l-2 border-centros/30 pl-3">{{ empresaDetalle.actividad }}</p>
+                  </section>
                 </div>
               </div>
             </div>
 
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-8 relative">
-
-                <div v-if="!tieneContextoEmpresa" class="absolute inset-0 bg-white/70 z-10 rounded-2xl flex items-center justify-center backdrop-blur-sm">
-                  <div class="bg-[#1F2937] text-white px-5 py-4 rounded-2xl shadow-xl flex flex-col sm:flex-row items-center gap-3 mx-4">
-                    <div class="flex items-center gap-2">
-                      <span class="bg-[#00A859] text-white rounded-full w-5 h-5 flex items-center justify-center text-[9px] font-black shrink-0">1</span>
-                      <span class="text-[10px] font-black uppercase tracking-widest">Elige tu centro</span>
-                    </div>
-                    <span class="text-gray-500 text-xs hidden sm:block">·</span>
-                    <div class="flex items-center gap-2">
-                      <span class="bg-[#00A859] text-white rounded-full w-5 h-5 flex items-center justify-center text-[9px] font-black shrink-0">2</span>
-                      <span class="text-[10px] font-black uppercase tracking-widest">Elige empresa</span>
-                    </div>
-                    <span class="text-gray-500 text-xs hidden sm:block">·</span>
-                    <div class="flex items-center gap-2">
-                      <span class="bg-gray-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-[9px] font-black shrink-0">3</span>
-                      <span class="text-[10px] font-black uppercase tracking-widest">o usa la Demo 👆</span>
-                    </div>
-                  </div>
+              <!-- Demo (sin ficha de empresa guardada): sector, tamaño y web como datos de lectura -->
+              <div v-if="tieneContextoEmpresa && !ocultarEmpresasCentro && fichaSoloLectura && !empresaDetalle"
+                   class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 border-t border-gray-200/60">
+                <div>
+                  <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Sector de actividad</p>
+                  <p class="text-sm font-semibold text-[#1F2937]">{{ seleccion.empresaSector || '—' }}</p>
                 </div>
-                
+                <div>
+                  <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Tamaño de la empresa</p>
+                  <p class="text-sm font-semibold text-[#1F2937]">{{ seleccion.empresaTamano || '—' }}</p>
+                </div>
+                <div>
+                  <p class="text-[10px] uppercase font-bold text-gray-400 tracking-widest mb-1">Web</p>
+                  <p class="text-sm text-gray-600 truncate">{{ seleccion.empresaWeb ? seleccion.empresaWeb.replace(/^https?:\/\//, '') : '—' }}</p>
+                </div>
+              </div>
+
+              <!-- Datos de la empresa seleccionada: solo con empresa elegida; ocultos (no borrados) con un panel de otra vía abierto -->
+              <div v-show="tieneContextoEmpresa && !ocultarEmpresasCentro && !fichaSoloLectura" class="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8 relative">
+
                 <div>
                   <label class="label-style" :class="!seleccion.empresaSector && (seleccion.empresaId || seleccion.empresaNombre) ? 'text-red-500' : ''">Sector de Actividad *</label>
 
-                  <!-- Modo demo o paso bloqueado: input de solo lectura -->
-                  <input v-if="esModoDemo || estaPasoBloqueado(1)" :value="seleccion.empresaSector" disabled class="input-style opacity-70 cursor-not-allowed bg-gray-50" />
-
-                  <!-- Modo libre: campo de texto con vuelta al listado -->
-                  <div v-else-if="sectorEsLibre" class="flex gap-2">
-                    <input
-                      v-model="seleccion.empresaSector"
-                      class="input-style flex-1"
-                      placeholder="Escribe el sector de actividad..."
-                      autofocus
-                    />
-                    <button
-                      type="button"
-                      @click="sectorEsLibre = false"
-                      class="px-4 py-2 rounded-xl border border-gray-200 text-gray-500 text-xs font-bold hover:bg-gray-50 transition-all whitespace-nowrap"
-                    >← Lista</button>
-                  </div>
+                  <!-- Modo demo, paso bloqueado o empresa ya clasificada: input de solo lectura -->
+                  <input v-if="esModoDemo || estaPasoBloqueado(1) || sectorBloqueado" :value="seleccion.empresaSector" disabled :title="tituloDemo" class="input-style opacity-70 cursor-not-allowed bg-gray-50" />
 
                   <!-- Modo dropdown -->
                   <div v-else class="relative" ref="sectorRef">
@@ -1751,19 +2866,9 @@ async function guardarEstadoGen(nuevoEstado) {
                           :class="sector === seleccion.empresaSector ? 'bg-[#374151]' : ''"
                         >
                           <span class="font-semibold text-white text-sm">{{ sector }}</span>
-                          <svg v-if="sector === seleccion.empresaSector" class="w-4 h-4 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <svg v-if="sector === seleccion.empresaSector" class="w-4 h-4 text-centros shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
                           </svg>
-                        </button>
-                        <button
-                          type="button"
-                          @mousedown.prevent="activarSectorLibre"
-                          class="w-full text-left px-6 py-3 hover:bg-[#374151] transition-colors flex items-center gap-2 border-t border-[#374151]"
-                        >
-                          <svg class="w-4 h-4 text-[#99CC33] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                          </svg>
-                          <span class="text-[#99CC33] text-sm font-bold uppercase tracking-widest">Escribir</span>
                         </button>
                       </div>
                     </Transition>
@@ -1772,22 +2877,19 @@ async function guardarEstadoGen(nuevoEstado) {
 
                 <div>
                   <label class="label-style" :class="!seleccion.empresaTamano && (seleccion.empresaId || seleccion.empresaNombre) ? 'text-red-500' : ''">Tamaño de la Empresa *</label>
-                  <select v-model="seleccion.empresaTamano" :disabled="esModoDemo || estaPasoBloqueado(1)" class="input-style" :class="!seleccion.empresaTamano && (seleccion.empresaId || seleccion.empresaNombre) ? 'border-red-500 bg-red-900/30 text-red-400 focus:border-red-500 focus:bg-red-900/40' : ''">
+                  <select v-model="seleccion.empresaTamano" :disabled="esModoDemo || estaPasoBloqueado(1) || datosFichaBloqueados" :title="tituloDemo" class="input-style" :class="!seleccion.empresaTamano && (seleccion.empresaId || seleccion.empresaNombre) ? 'border-red-500 bg-red-900/30 text-red-400 focus:border-red-500 focus:bg-red-900/40' : ''">
                     <option value="" disabled selected>¡FALTA INFO! Selecciona...</option>
-                    <option value="Micropyme (1-10)">Micropyme (1 a 10 empleados)</option>
-                    <option value="Pequeña (10-50)">Pequeña (10 a 50 empleados)</option>
-                    <option value="Mediana (50-250)">Mediana (50 a 250 empleados)</option>
-                    <option value="Grande (+250)">Grande (Más de 250 empleados)</option>
+                    <option v-for="t in TAMANOS_EMPRESA" :key="t.valor" :value="t.valor">{{ t.texto }}</option>
                   </select>
                 </div>
 
-                <div class="col-span-2">
+                <div class="md:col-span-2">
                   <label class="label-style" :class="seleccion.empresaWeb && !empresaWebEsValida ? 'text-red-500' : ''">
                     Web (Opcional)
                   </label>
                   <input
                     v-model="seleccion.empresaWeb"
-                    :disabled="esModoDemo || estaPasoBloqueado(1)"
+                    :disabled="esModoDemo || estaPasoBloqueado(1) || datosFichaBloqueados" :title="tituloDemo"
                     class="input-style"
                     :class="seleccion.empresaWeb && !empresaWebEsValida ? 'border-red-500 focus:border-red-500' : ''"
                     placeholder="https://..."
@@ -1803,50 +2905,57 @@ async function guardarEstadoGen(nuevoEstado) {
 
         <transition name="fade" mode="out-in">
           <div v-if="pasoActual === 2" class="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-             <section class="bg-white rounded-[2.5rem] p-8 md:p-10 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.05)] relative z-10">
+             <section class="bg-white rounded-[2.5rem] p-5 sm:p-8 md:p-10 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.05)] relative z-10">
               <transition name="fade">
-                <div v-if="seleccion.empresaNombre" class="absolute -top-4 left-8">
-                  <span class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white text-[#1F2937] text-xs font-bold tracking-wide border border-gray-100 border-b-0 shadow-[0_-4px_8px_rgb(0,0,0,0.04)]">
-                    <svg class="w-3.5 h-3.5 shrink-0 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div v-if="seleccion.empresaNombre" class="absolute -top-4 left-6 sm:left-8 max-w-[calc(100%-3rem)] sm:max-w-[55%]">
+                  <span class="max-w-full inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white text-[#1F2937] text-xs font-bold tracking-wide border border-gray-100 border-b-0 shadow-[0_-4px_8px_rgb(0,0,0,0.04)]">
+                    <svg class="w-3.5 h-3.5 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                     </svg>
-                    Empresa: {{ seleccion.empresaNombre }}
+                    <span class="min-w-0 truncate" :title="seleccion.empresaNombre">Empresa: {{ seleccion.empresaNombre }}</span>
                   </span>
                 </div>
               </transition>
-              <div class="absolute top-0 right-0 bg-gray-50 text-[#1F2937] px-6 py-2 text-[10px] font-black uppercase tracking-widest rounded-bl-3xl border-b border-l border-gray-100">
+              <div class="hidden sm:block absolute top-0 right-0 bg-gray-50 text-[#1F2937] px-6 py-2 text-[10px] font-black uppercase tracking-widest rounded-bl-3xl border-b border-l border-gray-100">
                 Entrevista de Diagnóstico
               </div>
               
-              <div ref="refEncabezadoProblema" class="flex flex-col xl:flex-row xl:items-center justify-between gap-6 mb-8 mt-4 xl:mt-0"
+              <div ref="refEncabezadoProblema" data-tour="gen-diagnostico" class="flex flex-col xl:flex-row xl:items-center justify-between gap-6 mb-8 mt-4 xl:mt-0"
                    :class="{ 'tour-active': tourTargetActivo === 'refEncabezadoProblema' }">
                 <div class="flex items-center gap-4">
-                  <div class="w-12 h-12 rounded-2xl bg-[#99CC33]/15 flex items-center justify-center text-[#00A859]">
+                  <div class="w-12 h-12 rounded-2xl bg-primary-400/15 flex items-center justify-center text-centros">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/></svg>
                   </div>
-                  <h2 class="text-2xl font-black uppercase tracking-tight text-[#1F2937]">Realidad de la Empresa</h2>
+                  <h2 class="text-2xl font-black uppercase tracking-tight text-azul-noche">Realidad de la Empresa</h2>
                 </div>
 
                 <div class="flex flex-wrap items-center gap-2">
-                  <button @click="toggleInfoSimulada()"
-                    :disabled="esModoDemo || cargandoSimulacion || estaPasoBloqueado(2)"
-                    :class="esModoDemo || cargandoSimulacion || estaPasoBloqueado(2) ? 'opacity-40 cursor-not-allowed bg-white text-gray-400 border-gray-200' : esInfoSimulada ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-md' : 'bg-white text-gray-500 hover:bg-gray-50 border-gray-200 shadow-sm'"
+                  <!-- Generar diagnóstico con IA: solo con el diagnóstico editable (no hay uno previo
+                       completo, o se ha abierto con «Editar empresa»). Rellena P1–P5 simulando la reunión. -->
+                  <button v-if="mostrarGenerarDiagnostico" ref="refInfoSimulada" data-tour="gen-diag-ia" type="button"
+                    @click="toggleInfoSimulada()"
+                    :disabled="cargandoSimulacion"
+                    :class="[
+                      cargandoSimulacion ? 'opacity-60 cursor-wait bg-white text-gray-400 border-gray-200' : esInfoSimulada ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-md' : 'bg-white text-[#1F2937] hover:bg-gray-50 border-gray-200 hover:border-[#1F2937]/40 shadow-sm',
+                      tourTargetActivo === 'refInfoSimulada' ? 'tour-active' : ''
+                    ]"
                     class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border">
                     <svg v-if="cargandoSimulacion" class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                    <svg v-else-if="esInfoSimulada" class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
-                    <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <span v-if="cargandoSimulacion">Generando...</span>
-                    <span v-else>Información Simulada</span>
+                    <svg v-else-if="esInfoSimulada" class="w-4 h-4 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
+                    <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                    <span v-if="cargandoSimulacion">Generando diagnóstico…</span>
+                    <span v-else-if="esInfoSimulada">Diagnóstico generado con IA</span>
+                    <span v-else>Generar diagnóstico con IA</span>
                   </button>
 
                   <span v-if="esModoDemo"
-                    class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase flex items-center gap-2 border bg-[#00A859]/10 text-[#00A859] border-[#00A859]/20 cursor-default">
+                    class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase flex items-center gap-2 border bg-centros/10 text-centros border-centros/20 cursor-default">
                     ✓ DEMO ACTIVA
                   </span>
 
                   <!--
-                  <button @click="cargarDemo" :disabled="esModoDemo" 
-                    :class="esModoDemo ? 'bg-[#00A859]/10 text-[#00A859] border-[#00A859]/20 cursor-default' : 'bg-white text-[#00A859] hover:bg-gray-50 border-gray-200 hover:border-[#00A859] shadow-sm'"
+                  <button @click="cargarDemo" :disabled="esModoDemo" :title="tituloDemo" 
+                    :class="esModoDemo ? 'bg-centros/10 text-centros border-centros/20 cursor-default' : 'bg-white text-centros hover:bg-gray-50 border-gray-200 hover:border-centros shadow-sm'"
                     class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border">
                     <span v-if="esModoDemo">✓ DEMO ACTIVA</span>
                     <span v-else> Cargar Demo</span>
@@ -1859,15 +2968,7 @@ async function guardarEstadoGen(nuevoEstado) {
                 </div>
               </div>
 
-              <div v-if="esModoDemo" 
-                class="mb-6 flex items-center gap-3 bg-[#00A859]/5 border border-[#00A859]/20 rounded-2xl px-5 py-3">
-                <svg class="w-4 h-4 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-                <p class="text-xs font-bold text-[#00A859] uppercase tracking-widest">
-                  Modo Demo activo — los campos están bloqueados. Pulsa "Vaciar" para editarlos.
-                </p>
-              </div>
+              <AvisoModoDemo v-if="esModoDemo" class="mb-6" @salir="limpiarFormulario" />
 
               <div v-else-if="estaPasoBloqueado(2)"
                 class="mb-6 flex items-center gap-3 bg-gray-100 border border-gray-200 rounded-2xl px-5 py-3">
@@ -1879,29 +2980,106 @@ async function guardarEstadoGen(nuevoEstado) {
                 </p>
               </div>
 
-              <div v-if="diagnosticoRecuperado" class="mb-10 p-5 md:p-6 bg-[#00A859]/5 border border-[#00A859]/20 rounded-3xl flex gap-4 md:gap-5 items-start">
-                <div class="bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white p-2.5 rounded-2xl shrink-0 mt-1 shadow-md">
-                  <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <!-- Empresa generada con IA aún sin guardar: su diagnóstico se revisa aquí y se guarda al avanzar -->
+              <div v-if="borradorIA" class="mb-8 flex flex-col md:flex-row md:items-center gap-4 rounded-2xl border-2 border-[#1F2937]/20 bg-[#1F2937]/5 px-5 py-4">
+                <p class="flex-1 text-sm text-gray-700 leading-relaxed">
+                  <strong class="font-bold">Empresa ficticia generada con IA — aún no guardada.</strong>
+                  Revisa y ajusta su diagnóstico. Se guardará en la base de datos con estos datos al pulsar «Siguiente paso».
+                </p>
+                <button type="button" @click="descartarBorradorYVolver()" :disabled="guardandoBorradorIA"
+                  class="shrink-0 min-h-[40px] px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase border bg-white text-red-500 border-gray-200 hover:bg-red-50">
+                  Descartar y volver al paso 1
+                </button>
+              </div>
+
+              <!-- Diagnóstico ya recogido: oculto por defecto, se abre con «Editar empresa» -->
+              <div v-if="diagnosticoOculto" class="mb-6 p-5 md:p-6 bg-centros/5 border border-centros/20 rounded-3xl flex flex-col md:flex-row gap-4 md:gap-5 md:items-center">
+                <div class="bg-gradient-to-r from-centros to-primary-400 text-white p-2.5 rounded-2xl shrink-0 shadow-md self-start md:self-center">
+                  <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
                 </div>
-                <div>
-                  <h4 class="font-black text-[#00A859] uppercase tracking-widest text-xs mb-1">Información Previa Detectada</h4>
+                <div class="flex-1">
+                  <h4 class="font-black text-centros uppercase tracking-widest text-xs mb-1">Diagnóstico de la empresa recogido</h4>
                   <p class="text-sm text-gray-600 leading-relaxed font-medium">
-                    Hemos recuperado las respuestas de una sesión anterior. Puedes mantenerlas para generar nuevas variantes del reto o editarlas si la situación ha cambiado.
+                    Hemos recogido el diagnóstico de las necesidades de esta empresa para elaborar un reto con coherencia profesional.
+                    Si quieres editarlo o volver a generarlo con IA, pulsa «Editar empresa».
                   </p>
+                  <p class="text-xs text-gray-500 leading-relaxed mt-2">
+                    Algunas de las preguntas son: «{{ PREGUNTA.diaANormal.pregunta }}»,
+                    «{{ PREGUNTA.friccionArea.pregunta }}» y «{{ PREGUNTA.loQueNoQuieren.pregunta }}».
+                  </p>
+                  <button type="button" @click="verDiagnostico = !verDiagnostico" :aria-expanded="verDiagnostico"
+                    class="mt-1 min-h-[36px] py-2 inline-flex items-center gap-1 text-xs font-bold text-centros hover:underline">
+                    {{ verDiagnostico ? 'Ver menos' : 'Ver más' }}
+                    <svg class="w-3.5 h-3.5 transition-transform" :class="verDiagnostico ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                  </button>
+                </div>
+                <button type="button" @click="pulsarEditarEmpresa()" :disabled="estaPasoBloqueado(2)"
+                  class="shrink-0 px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border shadow-sm"
+                  :class="estaPasoBloqueado(2) ? 'opacity-40 cursor-not-allowed bg-white text-gray-400 border-gray-200' : 'bg-white text-centros border-centros/30 hover:bg-centros hover:text-white'">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                  Editar empresa
+                </button>
+              </div>
+
+              <!-- Empresa real: no editable desde aquí -->
+              <div v-if="diagnosticoOculto && avisoEmpresaReal" role="alert" class="mb-6 flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4">
+                <svg class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 10-8 0v4h8z"/></svg>
+                <p class="flex-1 text-sm text-amber-800 leading-relaxed">
+                  <strong class="font-bold">Esta es una empresa real y no puede modificarse</strong> porque su diagnóstico contiene datos sensibles.
+                  Si necesitas cambiar algo, ponte en contacto con DUALAB.
+                </p>
+                <button type="button" @click="avisoEmpresaReal = false" class="inline-flex items-center justify-center w-9 h-9 -m-2 rounded-full shrink-0 transition-colors text-amber-500 hover:text-amber-700 hover:bg-amber-100" aria-label="Cerrar aviso">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+              </div>
+
+              <!-- Editando el diagnóstico (ficticia, o real si eres superadmin) -->
+              <div v-if="editandoDiagnostico" class="mb-8 flex flex-col gap-3 bg-amber-50 border-2 border-amber-300 rounded-2xl px-4 sm:px-5 py-4">
+                <div class="flex items-start gap-3">
+                  <svg class="w-5 h-5 mt-0.5 text-amber-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                  <p class="flex-1 min-w-0 text-sm text-amber-800 leading-relaxed">
+                    <strong class="font-bold">Estás editando el diagnóstico de una empresa {{ empresaEsFicticia ? 'ficticia' : 'real (permiso DUALAB)' }}.</strong>
+                    Si pulsas «Guardar en la base de datos», estos datos se sobrescribirán en la base de datos y se usarán en los próximos retos de esta empresa.
+                    Si no guardas, los cambios solo se usarán para este reto.
+                  </p>
+                </div>
+                <div class="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:pl-8">
+                  <button type="button" @click="guardarDiagnosticoEmpresa()" :disabled="guardandoDiagnostico || !diagnosticoGuardable"
+                    class="min-h-[40px] px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase transition-all border shadow-sm"
+                    :class="guardandoDiagnostico || !diagnosticoGuardable ? 'opacity-50 cursor-not-allowed bg-white text-gray-400 border-gray-200' : 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'">
+                    {{ guardandoDiagnostico ? 'Guardando…' : 'Guardar en la base de datos' }}
+                  </button>
+                  <button type="button" @click="cancelarEdicionDiagnostico()" :disabled="guardandoDiagnostico"
+                    class="min-h-[40px] px-4 py-2 rounded-full font-bold text-[11px] tracking-widest uppercase transition-all border bg-white text-gray-500 border-gray-200 hover:bg-gray-50">
+                    Cancelar
+                  </button>
                 </div>
               </div>
 
+              <p v-if="diagnosticoGuardado" class="mb-6 text-sm font-bold text-centros flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                Diagnóstico guardado en la base de datos.
+              </p>
+
               <div class="space-y-10">
+                <!-- P1–P4: ocultas con el diagnóstico recogido; «Ver más» las muestra en solo lectura -->
+                <div v-if="diagnosticoOculto && verDiagnostico" class="flex items-start gap-2 bg-gray-100 border border-gray-200 rounded-2xl px-4 py-3">
+                  <svg class="w-4 h-4 text-gray-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 10-8 0v4h8z"/></svg>
+                  <p class="text-xs font-bold text-gray-500 leading-relaxed">
+                    Solo lectura — pulsa «Editar empresa» para modificarlo.
+                  </p>
+                </div>
+                <template v-if="!diagnosticoOculto || verDiagnostico">
                 <div>
                   <div class="flex items-center gap-2 mb-3">
                     <label class="label-style !mb-0 flex items-center gap-2">
                       <span class="bg-[#1F2937] text-white w-5 h-5 flex items-center justify-center rounded-full text-[10px]">1</span>
-                      ¿Qué ofrece su empresa y qué hace en su día a día?
+                      {{ PREGUNTA.diaANormal.pregunta }}
                     </label>
-                    <button @click="abrirPopup('info', 1)" class="text-gray-400 hover:text-[#00A859] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
-                    <button @click="abrirPopup('ejemplo', 1)" class="text-gray-400 hover:text-[#99CC33] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
+                    <button type="button" @click="abrirPopup('info', 1)" aria-label="Ayuda" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-centros hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
+                    <button type="button" @click="abrirPopup('ejemplo', 1)" aria-label="Ejemplo" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-primary-400 hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
                   </div>
-                  <textarea v-model="seleccion.diaANormal" :disabled="esModoDemo || estaPasoBloqueado(2)" :maxlength="CHAR_LIMITS.diaANormal.max" class="input-style h-24" placeholder="Ej: Somos una empresa de servicios informáticos..."></textarea>
+                  <textarea v-model="seleccion.diaANormal" :disabled="camposDiagnosticoBloqueados" :title="tituloDemo" :maxlength="CHAR_LIMITS.diaANormal.max" class="input-style h-24" placeholder="Ej: Somos una empresa de servicios informáticos..."></textarea>
                   <div class="flex items-center justify-end gap-2 mt-1 h-4">
                     <span v-if="charInfo('diaANormal').isWarning && !charInfo('diaANormal').isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
                     <span class="text-[10px] transition-colors" :class="charInfo('diaANormal').isOver ? 'text-red-400 font-bold' : charInfo('diaANormal').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('diaANormal').len }}/{{ CHAR_LIMITS.diaANormal.max }}</span>
@@ -1914,12 +3092,12 @@ async function guardarEstadoGen(nuevoEstado) {
                     <div class="flex items-center gap-2 mb-3">
                       <label class="label-style !mb-0 flex items-center gap-2">
                         <span class="bg-[#1F2937] text-white w-5 h-5 flex items-center justify-center rounded-full text-[10px]">2</span>
-                        ¿Qué tarea da más trabajo del que debería?
+                        {{ PREGUNTA.friccionArea.pregunta }}
                       </label>
-                      <button @click="abrirPopup('info', 2)" class="text-gray-400 hover:text-[#00A859] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
-                      <button @click="abrirPopup('ejemplo', 2)" class="text-gray-400 hover:text-[#99CC33] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
+                      <button type="button" @click="abrirPopup('info', 2)" aria-label="Ayuda" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-centros hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
+                      <button type="button" @click="abrirPopup('ejemplo', 2)" aria-label="Ejemplo" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-primary-400 hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
                     </div>
-                    <textarea v-model="seleccion.friccionArea" :disabled="esModoDemo || estaPasoBloqueado(2)" :maxlength="CHAR_LIMITS.friccionArea.max" class="input-style h-16" placeholder="Ej: Registro manual de albaranes..."></textarea>
+                    <textarea v-model="seleccion.friccionArea" :disabled="camposDiagnosticoBloqueados" :title="tituloDemo" :maxlength="CHAR_LIMITS.friccionArea.max" class="input-style h-16" placeholder="Ej: Registro manual de albaranes..."></textarea>
                     <div class="flex items-center justify-end gap-2 mt-1 h-4">
                       <span v-if="charInfo('friccionArea').isWarning && !charInfo('friccionArea').isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
                       <span class="text-[10px] transition-colors" :class="charInfo('friccionArea').isOver ? 'text-red-400 font-bold' : charInfo('friccionArea').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('friccionArea').len }}/{{ CHAR_LIMITS.friccionArea.max }}</span>
@@ -1928,9 +3106,9 @@ async function guardarEstadoGen(nuevoEstado) {
                   <div>
                     <label class="label-style flex items-center gap-2 mb-3">
                       <span class="bg-[#1F2937] text-white w-5 h-5 flex items-center justify-center rounded-full text-[10px]">2b</span>
-                      ¿Por qué? Cuéntanos qué ocurre hoy
+                      {{ PREGUNTA.friccionProblema.pregunta }}
                     </label>
-                    <textarea v-model="seleccion.friccionProblema" :disabled="esModoDemo || estaPasoBloqueado(2)" :maxlength="CHAR_LIMITS.friccionProblema.max" class="input-style h-24" placeholder="Se pierde mucho tiempo porque... hay errores cuando..."></textarea>
+                    <textarea v-model="seleccion.friccionProblema" :disabled="camposDiagnosticoBloqueados" :title="tituloDemo" :maxlength="CHAR_LIMITS.friccionProblema.max" class="input-style h-24" placeholder="Se pierde mucho tiempo porque... hay errores cuando..."></textarea>
                     <div class="flex items-center justify-end gap-2 mt-1 h-4">
                       <span v-if="charInfo('friccionProblema').isWarning && !charInfo('friccionProblema').isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
                       <span class="text-[10px] transition-colors" :class="charInfo('friccionProblema').isOver ? 'text-red-400 font-bold' : charInfo('friccionProblema').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('friccionProblema').len }}/{{ CHAR_LIMITS.friccionProblema.max }}</span>
@@ -1942,22 +3120,22 @@ async function guardarEstadoGen(nuevoEstado) {
                   <div class="flex items-center gap-2 mb-4">
                     <label class="label-style !mb-0 flex items-center gap-2">
                       <span class="bg-[#1F2937] text-white w-5 h-5 flex items-center justify-center rounded-full text-[10px]">3</span>
-                      ¿Han probado solucionarlo? ¿Qué limitaciones tienen?
+                      {{ PREGUNTA.restricciones.pregunta }}
                     </label>
-                    <button @click="abrirPopup('info', 3)" class="text-gray-400 hover:text-[#00A859] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
-                    <button @click="abrirPopup('ejemplo', 3)" class="text-gray-400 hover:text-[#99CC33] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
+                    <button type="button" @click="abrirPopup('info', 3)" aria-label="Ayuda" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-centros hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
+                    <button type="button" @click="abrirPopup('ejemplo', 3)" aria-label="Ejemplo" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-primary-400 hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
                   </div>
                   
                   <div class="flex flex-wrap gap-2 mb-4">
                     <button v-for="opt in limitacionesOpciones" :key="opt"
-                      @click="!esModoDemo && !estaPasoBloqueado(2) && (seleccion.restricciones.includes(opt) ? seleccion.restricciones = seleccion.restricciones.filter(c => c !== opt) : seleccion.restricciones.push(opt))"
-                      :disabled="esModoDemo || estaPasoBloqueado(2)"
-                      :class="seleccion.restricciones.includes(opt) ? 'bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-[#00A859]/50'"
-                      class="px-5 py-2.5 rounded-2xl border-2 text-[10px] font-black uppercase transition-all shadow-sm">
+                      @click="!camposDiagnosticoBloqueados && (seleccion.restricciones.includes(opt) ? seleccion.restricciones = seleccion.restricciones.filter(c => c !== opt) : seleccion.restricciones.push(opt))"
+                      :disabled="camposDiagnosticoBloqueados" :title="tituloDemo"
+                      :class="seleccion.restricciones.includes(opt) ? 'bg-gradient-to-r from-centros to-primary-400 text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-centros/50'"
+                      class="px-5 py-2.5 rounded-full border-2 text-[10px] font-black uppercase transition-all shadow-sm">
                       {{ opt }}
                     </button>
                   </div>
-                  <textarea v-model="seleccion.otraLimitacion" :disabled="esModoDemo || estaPasoBloqueado(2)" :maxlength="CHAR_LIMITS.otraLimitacion.max" class="input-style h-20" placeholder="Describe aquí otros intentos de solución o detalles de las limitaciones..."></textarea>
+                  <textarea v-model="seleccion.otraLimitacion" :disabled="camposDiagnosticoBloqueados" :title="tituloDemo" :maxlength="CHAR_LIMITS.otraLimitacion.max" class="input-style h-20" placeholder="Describe aquí otros intentos de solución o detalles de las limitaciones..."></textarea>
                   <div class="flex items-center justify-end gap-2 mt-1 h-4">
                     <span v-if="charInfo('otraLimitacion').isWarning && !charInfo('otraLimitacion').isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
                     <span class="text-[10px] transition-colors" :class="charInfo('otraLimitacion').isOver ? 'text-red-400 font-bold' : charInfo('otraLimitacion').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('otraLimitacion').len }}/{{ CHAR_LIMITS.otraLimitacion.max }}</span>
@@ -1967,9 +3145,9 @@ async function guardarEstadoGen(nuevoEstado) {
                 <div>
                   <label class="label-style flex items-center gap-2 mb-3">
                     <span class="bg-[#1F2937] text-white w-5 h-5 flex items-center justify-center rounded-full text-[10px]">3b</span>
-                    ¿Qué NO quieren bajo ningún concepto?
+                    {{ PREGUNTA.loQueNoQuieren.pregunta }}
                   </label>
-                  <textarea v-model="seleccion.loQueNoQuieren" :disabled="esModoDemo || estaPasoBloqueado(2)" :maxlength="CHAR_LIMITS.loQueNoQuieren.max" class="input-style h-16" placeholder="Ej: Nada que requiera suscripción mensual..."></textarea>
+                  <textarea v-model="seleccion.loQueNoQuieren" :disabled="camposDiagnosticoBloqueados" :title="tituloDemo" :maxlength="CHAR_LIMITS.loQueNoQuieren.max" class="input-style h-16" placeholder="Ej: Nada que requiera suscripción mensual..."></textarea>
                   <div class="flex items-center justify-end gap-2 mt-1 h-4">
                     <span v-if="charInfo('loQueNoQuieren').isWarning && !charInfo('loQueNoQuieren').isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
                     <span class="text-[10px] transition-colors" :class="charInfo('loQueNoQuieren').isOver ? 'text-red-400 font-bold' : charInfo('loQueNoQuieren').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('loQueNoQuieren').len }}/{{ CHAR_LIMITS.loQueNoQuieren.max }}</span>
@@ -1980,39 +3158,48 @@ async function guardarEstadoGen(nuevoEstado) {
                   <div class="flex items-center gap-2 mb-4">
                     <label class="label-style !mb-0 flex items-center gap-2">
                       <span class="bg-[#1F2937] text-white w-5 h-5 flex items-center justify-center rounded-full text-[10px]">4</span>
-                      Si pudieran mejorar algo YA mismo...
+                      {{ PREGUNTA.consecuencias.pregunta }}
                     </label>
-                    <button @click="abrirPopup('info', 4)" class="text-gray-400 hover:text-[#00A859] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
-                    <button @click="abrirPopup('ejemplo', 4)" class="text-gray-400 hover:text-[#99CC33] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
+                    <button type="button" @click="abrirPopup('info', 4)" aria-label="Ayuda" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-centros hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
+                    <button type="button" @click="abrirPopup('ejemplo', 4)" aria-label="Ejemplo" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-primary-400 hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
                   </div>
                   
                   <div class="flex flex-wrap gap-2 mb-4">
                     <button v-for="opt in consecuenciasOpciones" :key="opt"
-                      @click="!esModoDemo && !estaPasoBloqueado(2) && (seleccion.consecuencias.includes(opt) ? seleccion.consecuencias = seleccion.consecuencias.filter(c => c !== opt) : seleccion.consecuencias.push(opt))"
-                      :disabled="esModoDemo || estaPasoBloqueado(2)"
-                      :class="seleccion.consecuencias.includes(opt) ? 'bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-[#99CC33]/50'"
-                      class="px-5 py-2.5 rounded-2xl border-2 text-[10px] font-black uppercase transition-all shadow-sm">
+                      @click="!camposDiagnosticoBloqueados && (seleccion.consecuencias.includes(opt) ? seleccion.consecuencias = seleccion.consecuencias.filter(c => c !== opt) : seleccion.consecuencias.push(opt))"
+                      :disabled="camposDiagnosticoBloqueados" :title="tituloDemo"
+                      :class="seleccion.consecuencias.includes(opt) ? 'bg-gradient-to-r from-centros to-primary-400 text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-primary-400/50'"
+                      class="px-5 py-2.5 rounded-full border-2 text-[10px] font-black uppercase transition-all shadow-sm">
                       {{ opt }}
                     </button>
                   </div>
-                  <input v-model="seleccion.otraConsecuencia" :disabled="esModoDemo || estaPasoBloqueado(2)" :maxlength="CHAR_LIMITS.otraConsecuencia.max" class="input-style" placeholder="Otra mejora específica (Opcional)..." />
+                  <input v-model="seleccion.otraConsecuencia" :disabled="camposDiagnosticoBloqueados" :title="tituloDemo" :maxlength="CHAR_LIMITS.otraConsecuencia.max" class="input-style" placeholder="Otra mejora específica (Opcional)..." />
                   <div class="flex items-center justify-end gap-2 mt-1 h-4">
                     <span v-if="charInfo('otraConsecuencia').isWarning && !charInfo('otraConsecuencia').isOver" class="text-amber-400 text-[10px]">Cerca del límite</span>
                     <span class="text-[10px] transition-colors" :class="charInfo('otraConsecuencia').isOver ? 'text-red-400 font-bold' : charInfo('otraConsecuencia').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('otraConsecuencia').len }}/{{ CHAR_LIMITS.otraConsecuencia.max }}</span>
                   </div>
                 </div>
 
-                <div ref="refExpectativas" class="bg-gray-50 p-6 rounded-3xl border"
+                </template>
+
+                <!-- P5: obligatoria. Con el diagnóstico oculto se muestra si la empresa no la
+                     tiene recogida (editable solo para este reto) o con «Ver más» (solo lectura). -->
+                <div v-if="!diagnosticoOculto || verDiagnostico || faltaP5"
+                     ref="refExpectativas" data-tour="gen-p5" class="bg-gray-50 p-6 rounded-3xl border"
                      :class="[!seleccion.expectativasAlumno && !esModoDemo ? 'border-red-200' : 'border-gray-100', tourTargetActivo === 'refExpectativas' ? 'tour-active' : '']">
+                  <p v-if="faltaP5" class="text-xs text-gray-500 mb-3">
+                    Esta empresa no tiene recogida esta pregunta. Complétala para este reto
+                    <template v-if="!puedeEditarDiagnostico">(no se guardará en la empresa)</template>.
+                  </p>
                   <div class="flex items-center gap-2 mb-3">
                     <label class="label-style !mb-0 flex items-center gap-2" :class="!seleccion.expectativasAlumno && !esModoDemo ? 'text-red-500' : ''">
                       <span class="bg-[#1F2937] text-white w-5 h-5 flex items-center justify-center rounded-full text-[10px]">5</span>
-                      Si tuvieras a un alumno aquí, ¿qué esperas que realice? *
+                      {{ PREGUNTA.expectativasAlumno.pregunta }} *
                     </label>
-                    <button @click="abrirPopup('info', 5)" class="text-gray-400 hover:text-[#00A859] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
-                    <button @click="abrirPopup('ejemplo', 5)" class="text-gray-400 hover:text-[#99CC33] transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
+                    <button type="button" @click="abrirPopup('info', 5)" aria-label="Ayuda" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-centros hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg></button>
+                    <button type="button" @click="abrirPopup('ejemplo', 5)" aria-label="Ejemplo" class="w-9 h-9 -my-2 inline-flex items-center justify-center rounded-full shrink-0 text-gray-400 hover:text-primary-400 hover:bg-gray-100 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg></button>
                   </div>
-                  <textarea v-model="seleccion.expectativasAlumno" :disabled="esModoDemo || estaPasoBloqueado(2)" :maxlength="CHAR_LIMITS.expectativasAlumno.max" class="input-style h-24" placeholder="Ej: Que investigue herramientas gratuitas y proponga un prototipo sencillo..."></textarea>
+                  <textarea v-model="seleccion.expectativasAlumno" :disabled="esModoDemo || estaPasoBloqueado(2) || (diagnosticoOculto && !faltaP5)" :title="tituloDemo" :maxlength="CHAR_LIMITS.expectativasAlumno.max" class="input-style h-24" placeholder="Ej: Que investigue herramientas gratuitas y proponga un prototipo sencillo..."></textarea>
                   <div class="flex items-center justify-end gap-2 mt-1 h-4">
                     <span v-if="charInfo('expectativasAlumno').isWarning && !charInfo('expectativasAlumno').isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
                     <span class="text-[10px] transition-colors" :class="charInfo('expectativasAlumno').isOver ? 'text-red-400 font-bold' : charInfo('expectativasAlumno').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('expectativasAlumno').len }}/{{ CHAR_LIMITS.expectativasAlumno.max }}</span>
@@ -2026,45 +3213,34 @@ async function guardarEstadoGen(nuevoEstado) {
 
         <transition name="fade" mode="out-in">
           <div v-if="pasoActual === 3" class="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-            <section class="bg-white rounded-[2.5rem] p-8 md:p-10 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.05)] relative z-10">
+            <section class="bg-white rounded-[2.5rem] p-5 sm:p-8 md:p-10 border border-gray-100 shadow-[0_20px_50px_rgb(0,0,0,0.05)] relative z-10">
               <transition name="fade">
-                <div v-if="seleccion.empresaNombre" class="absolute -top-4 left-8">
-                  <span class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white text-[#1F2937] text-xs font-bold tracking-wide border border-gray-100 border-b-0 shadow-[0_-4px_8px_rgb(0,0,0,0.04)]">
-                    <svg class="w-3.5 h-3.5 shrink-0 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div v-if="seleccion.empresaNombre" class="absolute -top-4 left-6 sm:left-8 max-w-[calc(100%-3rem)] sm:max-w-[55%]">
+                  <span class="max-w-full inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white text-[#1F2937] text-xs font-bold tracking-wide border border-gray-100 border-b-0 shadow-[0_-4px_8px_rgb(0,0,0,0.04)]">
+                    <svg class="w-3.5 h-3.5 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                     </svg>
-                    Empresa: {{ seleccion.empresaNombre }}
+                    <span class="min-w-0 truncate" :title="seleccion.empresaNombre">Empresa: {{ seleccion.empresaNombre }}</span>
                   </span>
                 </div>
               </transition>
               <div class="flex flex-col xl:flex-row xl:items-center justify-between gap-6 mb-8 mt-4 xl:mt-0">
                 <div class="flex items-center gap-4">
-                  <div class="w-12 h-12 rounded-2xl bg-[#00A859]/10 flex items-center justify-center text-[#00A859]">
+                  <div class="w-12 h-12 rounded-2xl bg-centros/10 flex items-center justify-center text-centros">
                      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5z"/><path d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/></svg>
                   </div>
-                  <h2 class="text-2xl font-black uppercase tracking-tight text-[#1F2937]">Match Académico</h2>
+                  <h2 class="text-2xl font-black uppercase tracking-tight text-azul-noche">Match Académico</h2>
                 </div>
 
                 <div class="flex flex-wrap items-center gap-2">
-                  <button @click="toggleInfoSimulada()"
-                    :disabled="esModoDemo || cargandoSimulacion || estaPasoBloqueado(2)"
-                    :class="esModoDemo || cargandoSimulacion || estaPasoBloqueado(2) ? 'opacity-40 cursor-not-allowed bg-white text-gray-400 border-gray-200' : esInfoSimulada ? 'bg-[#1F2937] text-white border-[#1F2937] shadow-md' : 'bg-white text-gray-500 hover:bg-gray-50 border-gray-200 shadow-sm'"
-                    class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border">
-                    <svg v-if="cargandoSimulacion" class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-                    <svg v-else-if="esInfoSimulada" class="w-4 h-4 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
-                    <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                    <span v-if="cargandoSimulacion">Generando...</span>
-                    <span v-else>Información Simulada</span>
-                  </button>
-
                   <span v-if="esModoDemo"
-                    class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase flex items-center gap-2 border bg-[#00A859]/10 text-[#00A859] border-[#00A859]/20 cursor-default">
+                    class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase flex items-center gap-2 border bg-centros/10 text-centros border-centros/20 cursor-default">
                     ✓ DEMO ACTIVA
                   </span>
 
                   <!--
-                  <button @click="cargarDemo" :disabled="esModoDemo" 
-                    :class="esModoDemo ? 'bg-[#00A859]/10 text-[#00A859] border-[#00A859]/20 cursor-default' : 'bg-white text-[#00A859] hover:bg-gray-50 border-gray-200 hover:border-[#00A859] shadow-sm'"
+                  <button @click="cargarDemo" :disabled="esModoDemo" :title="tituloDemo" 
+                    :class="esModoDemo ? 'bg-centros/10 text-centros border-centros/20 cursor-default' : 'bg-white text-centros hover:bg-gray-50 border-gray-200 hover:border-centros shadow-sm'"
                     class="px-5 py-2.5 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 border">
                     <span v-if="esModoDemo">✓ DEMO ACTIVA</span>
                     <span v-else> Cargar Demo</span>
@@ -2077,181 +3253,422 @@ async function guardarEstadoGen(nuevoEstado) {
                 </div>
               </div>
               
-              <div v-if="esModoDemo" 
-                class="mb-6 flex items-center gap-3 bg-[#00A859]/5 border border-[#00A859]/20 rounded-2xl px-5 py-3">
-                <svg class="w-4 h-4 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-                <p class="text-xs font-bold text-[#00A859] uppercase tracking-widest">
-                  Modo Demo activo — los campos están bloqueados. Pulsa "Vaciar" para editarlos.
-                </p>
-              </div>
+              <AvisoModoDemo v-if="esModoDemo" class="mb-6" @salir="limpiarFormulario" />
 
               <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div ref="refFamiliaSelect" class="col-span-2 md:col-span-1"
+                <div ref="refFamiliaSelect" data-tour="gen-familia" class="min-w-0"
                      :class="{ 'tour-active': tourTargetActivo === 'refFamiliaSelect' }">
                   <label class="label-style">Familia Profesional Asociada *</label>
-                  <select v-model="seleccion.familia" :disabled="esModoDemo" class="input-style">
+                  <select v-model="seleccion.familia" :disabled="esModoDemo" :title="tituloDemo" class="input-style">
                     <option value="">Selecciona Familia...</option>
-                    <option v-for="f in familiasFiltradas" :key="f" :value="f">{{ f }}</option>
+                    <option v-for="f in familiasFiltradas" :key="f" :value="f" :disabled="!familiaTieneDatos(f)">
+                      {{ f }}{{ familiaTieneDatos(f) ? '' : ' — sin módulos ni RA/CE' }}
+                    </option>
                   </select>
+
+                  <!-- Nota bajo el desplegable: por qué viene ya elegida (texto, no caja, para que no parezca otro campo) -->
+                  <div v-if="!esModoDemo && seleccion.empresaId && familiasEmpresaCargadas && familiaSigueSiendoPreseleccionada"
+                    class="mt-2 flex items-start gap-1.5 px-1 text-[11px] leading-relaxed text-gray-600">
+                    <svg class="w-3.5 h-3.5 mt-0.5 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                    <p class="min-w-0 break-words">
+                      <template v-if="motivoFamiliaPreseleccionada === 'filtro'">
+                        <strong class="text-centros">Preseleccionada</strong> porque filtraste por «{{ familiaPreseleccionada }}» en el paso 1.
+                      </template>
+                      <template v-else-if="motivoFamiliaPreseleccionada === 'unica_con_datos'">
+                        <strong class="text-centros">Preseleccionada:</strong> es la única familia de {{ seleccion.empresaNombre }} con módulos y RA/CE cargados.
+                      </template>
+                      <template v-else><strong class="text-centros">Preseleccionada:</strong> es la única familia vinculada a {{ seleccion.empresaNombre }}.</template>
+                      <template v-if="otrasFamiliasEmpresa.length">
+                        También está vinculada a <strong>{{ otrasFamiliasEmpresa.join(', ') }}</strong>; cámbiala si el reto es para otra familia.
+                      </template>
+                    </p>
+                  </div>
+
+                  <!-- Interés de la empresa en esta familia: se ve, se ajusta solo para este reto o se
+                       guarda en la empresa (ficticias de tu centro o DUALAB, como el diagnóstico) -->
+                  <div v-if="!esModoDemo && seleccion.empresaId && seleccion.familia"
+                    class="relative mt-3 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-relaxed text-gray-700">
+                    <div class="flex flex-wrap items-center gap-1.5 mb-1">
+                      <strong class="text-azul-noche">Qué busca la empresa con esta familia</strong>
+                      <span class="group/via sm:relative shrink-0" tabindex="0" aria-describedby="tip-interes-reto">
+                        <span class="relative w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center cursor-help before:absolute before:-inset-2 before:content-['']">
+                          <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </span>
+                        <span id="tip-interes-reto" role="tooltip" class="pointer-events-none absolute z-30 top-10 sm:top-full sm:mt-2 hidden group-hover/via:block group-focus/via:block sm:w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl left-3 right-3 sm:right-auto sm:left-0">
+                          Son datos que enriquecen la generación del reto: la IA lo planteará desde este departamento o necesidad de la empresa.
+                          Es lo que dice la empresa; tu propia orientación como docente va en «Enfoque del reto».
+                        </span>
+                      </span>
+                      <span v-if="interesAjustado" class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[9px] font-black uppercase tracking-widest">Ajustado para este reto</span>
+                    </div>
+
+                    <template v-if="!editandoInteres">
+                      <p v-if="interesParaReto" class="break-words">{{ interesParaReto }}</p>
+                      <p v-else class="text-gray-500 italic">La empresa no ha indicado para qué quiere a este alumnado. Añadirlo ayuda a la IA a plantear un reto más concreto.</p>
+                      <div class="mt-2 flex flex-wrap gap-2">
+                        <button type="button" @click="abrirEdicionInteres()"
+                          class="min-h-[36px] px-3 py-1.5 rounded-full font-bold text-[10px] tracking-widest uppercase border transition-all bg-white text-centros border-centros/30 hover:bg-centros hover:text-white">
+                          {{ interesParaReto ? 'Ajustar' : 'Añadir' }}
+                        </button>
+                        <button v-if="interesAjustado" type="button" @click="interesAjustado = null"
+                          class="min-h-[36px] px-3 py-1.5 rounded-full font-bold text-[10px] tracking-widest uppercase border transition-all bg-white text-gray-500 border-gray-200 hover:bg-gray-100">
+                          Volver al de la empresa
+                        </button>
+                      </div>
+                    </template>
+
+                    <template v-else>
+                      <textarea v-model="borradorInteres" rows="2" maxlength="500" class="input-style !py-2 text-sm mt-1"
+                        aria-label="Para qué quiere la empresa a este alumnado"
+                        :placeholder="`Ej: ${ejemploInteres(seleccion.familia)}`" :title="`Ej: ${ejemploInteres(seleccion.familia)}`"></textarea>
+                      <p class="mt-1 text-[11px] text-gray-500">
+                        «Usar solo en este reto» no cambia la empresa.
+                        <template v-if="authStore.isSuperAdmin">«Guardar en la empresa» lo usará también en sus próximos retos con esta familia.</template>
+                        <template v-else>Solo DUALAB puede guardarlo en la empresa.</template>
+                      </p>
+                      <div class="mt-2 flex flex-col sm:flex-row sm:flex-wrap gap-2">
+                        <button type="button" @click="usarInteresSoloEnReto()" :disabled="guardandoInteres"
+                          class="min-h-[36px] px-3 py-1.5 rounded-full font-bold text-[10px] tracking-widest uppercase border transition-all bg-[#1F2937] text-white border-[#1F2937] hover:bg-[#1F2937]/90">
+                          Usar solo en este reto
+                        </button>
+                        <!-- Interés guardado en la empresa: dato sensible, solo superadmin (EmpresaPolicy::actualizarInteres) -->
+                        <button v-if="authStore.isSuperAdmin" type="button" @click="guardarInteresEnEmpresa()" :disabled="guardandoInteres"
+                          class="min-h-[36px] px-3 py-1.5 rounded-full font-bold text-[10px] tracking-widest uppercase border transition-all bg-amber-500 text-white border-amber-500 hover:bg-amber-600 disabled:opacity-50">
+                          {{ guardandoInteres ? 'Guardando…' : 'Guardar en la empresa' }}
+                        </button>
+                        <button type="button" @click="editandoInteres = false" :disabled="guardandoInteres"
+                          class="min-h-[36px] px-3 py-1.5 rounded-full font-bold text-[10px] tracking-widest uppercase border transition-all bg-white text-gray-500 border-gray-200 hover:bg-gray-100">
+                          Cancelar
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+
+                  <!-- Aviso: por qué la familia se elige aquí aunque ya se filtrara en el paso 1 -->
+                  <template v-if="!esModoDemo && seleccion.empresaId && familiasEmpresaCargadas">
+                    <div v-if="familiasFiltradas.length > 1 && !seleccion.familia"
+                      class="modulos-estado mt-3 flex items-start gap-2 rounded-2xl border-2 border-amber-400 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-900">
+                      <svg class="w-4 h-4 mt-0.5 shrink-0 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                      <div>
+                        <p class="font-black uppercase tracking-wide text-[11px]">¿Por qué hay que elegirla otra vez?</p>
+                        <p class="mt-0.5">
+                          {{ seleccion.empresaNombre }} está vinculada a <strong>{{ familiasFiltradas.length }} familias profesionales</strong>
+                          (así se acordó al darla de alta). El filtro del paso 1 solo servía para encontrar la empresa;
+                          aquí decides <strong>para qué familia es este reto</strong>.
+                        </p>
+                      </div>
+                    </div>
+
+                    <p v-else-if="empresaSinFamiliasConDatos" class="mt-3 text-xs text-red-500 font-bold">
+                      Ninguna familia de esta empresa tiene módulos con RA y CE cargados, así que todavía no se puede generar un reto con ella.
+                      Pulsa «Vaciar» para elegir otra empresa.
+                    </p>
+
+                    <p v-else-if="empresaSinFamilias" class="mt-3 text-xs text-red-500 font-bold">
+                      Esta empresa no tiene familias profesionales vinculadas, así que no se puede generar el reto.
+                      Pulsa «Vaciar» para empezar de nuevo con otra empresa o después de asignarle familias.
+                    </p>
+                  </template>
                 </div>
 
-                <div ref="refNivelExigencia" class="col-span-2 md:col-span-1"
+                <div ref="refNivelExigencia" data-tour="gen-nivel" class="min-w-0"
                      :class="{ 'tour-active': tourTargetActivo === 'refNivelExigencia' }">
                   <label class="label-style">Nivel de exigencia del reto *</label>
-                  <select v-model="seleccion.nivelGrupo" :disabled="esModoDemo" class="input-style">
+                  <select v-model="seleccion.nivelGrupo" :disabled="esModoDemo" :title="tituloDemo" class="input-style">
                     <option value="Bajo">Básico — El grupo tiene un nivel de comprensión inicial; el reto debe ser sencillo y guiado</option>
                     <option value="Medio">Medio — El grupo maneja conceptos con soltura; el reto puede tener cierta complejidad y autonomía</option>
                     <option value="Alto">Alto — El grupo domina la materia; el reto es exigente, abierto y requiere criterio propio</option>
                   </select>
+
+                  <!-- Enfoque del reto (opcional): la intención del docente, distinta del interés y la P5
+                       (lo que dice la empresa). Bajo el nivel, a la par que familia + interés. -->
+                  <div class="mt-4">
+                    <div class="flex items-center gap-1.5 mb-1.5">
+                      <label for="enfoque-reto" class="label-style !mb-0 text-[#1F2937]">
+                        ¿Qué tipo de reto quieres trabajar? <span class="text-gray-400 normal-case font-medium">(opcional)</span>
+                      </label>
+                      <span class="group/via relative shrink-0" tabindex="0" aria-describedby="tip-enfoque-reto">
+                        <span class="relative w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center cursor-help before:absolute before:-inset-2 before:content-['']">
+                          <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </span>
+                        <span id="tip-enfoque-reto" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 hidden group-hover/via:block group-focus/via:block w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl right-0">
+                          Orienta el reto hacia el tipo de trabajo que te interesa con tu alumnado. La IA lo usará como enfoque, sin darle la solución.
+                        </span>
+                      </span>
+                    </div>
+                    <textarea id="enfoque-reto" v-model="seleccion.enfoqueReto" :disabled="esModoDemo" :title="tituloDemo" :maxlength="CHAR_LIMITS.enfoqueReto.max"
+                      rows="3" class="input-style !py-2 text-sm"
+                      placeholder="Ej: que diseñen un sistema para mejorar la gestión del stock, o una campaña para captar clientes jóvenes…"></textarea>
+                    <div class="flex items-center justify-end gap-2 mt-1 h-4">
+                      <span v-if="charInfo('enfoqueReto').isWarning && !charInfo('enfoqueReto').isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
+                      <span class="text-[10px] transition-colors" :class="charInfo('enfoqueReto').isOver ? 'text-red-400 font-bold' : charInfo('enfoqueReto').isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo('enfoqueReto').len }}/{{ CHAR_LIMITS.enfoqueReto.max }}</span>
+                    </div>
+                  </div>
+
+                  <!-- También del docente (opcionales; los rellena la solicitud de retos): la IA los usa para
+                       que el reto practique lo que harán en la empresa y termine en el entregable que espera -->
+                  <div v-for="campo in [
+                    { k: 'tareasPracticas', t: '¿Qué tareas reales harán en la empresa durante las prácticas?', p: 'Ej: registrar la correspondencia que entra y sale y elegir cómo enviar cada documento…',
+                      tip: 'Si sabes qué hará el alumnado en la empresa durante las prácticas, la IA lo usará para que el reto le haga practicar esas mismas tareas, dentro del problema de la empresa.' },
+                    { k: 'entregableDocente', t: '¿Qué te gustaría que entregara el alumnado?', p: 'Ej: un libro de registro, un informe corto, una presentación…',
+                      tip: 'La IA lo usará para que lo que entregue el alumnado al terminar el reto sea esto o algo equivalente.' },
+                  ]" :key="campo.k" class="mt-4">
+                    <div class="flex items-center gap-1.5 mb-1.5">
+                      <label :for="'gen-' + campo.k" class="label-style !mb-0 min-w-0 text-[#1F2937]">
+                        {{ campo.t }} <span class="text-gray-400 normal-case font-medium">(opcional)</span>
+                      </label>
+                      <span class="group/via relative shrink-0" tabindex="0" :aria-describedby="'tip-' + campo.k">
+                        <span class="relative w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center cursor-help before:absolute before:-inset-2 before:content-['']">
+                          <svg class="w-3 h-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        </span>
+                        <span :id="'tip-' + campo.k" role="tooltip" class="pointer-events-none absolute z-30 top-full mt-2 hidden group-hover/via:block group-focus/via:block w-[min(16rem,calc(100vw-3rem))] rounded-xl bg-[#1a2332] p-3 text-[11px] font-medium normal-case tracking-normal leading-relaxed text-white shadow-2xl right-0">
+                          {{ campo.tip }}
+                        </span>
+                      </span>
+                    </div>
+                    <textarea :id="'gen-' + campo.k" v-model="seleccion[campo.k]" :disabled="esModoDemo" :title="tituloDemo" :maxlength="CHAR_LIMITS[campo.k].max"
+                      rows="2" class="input-style !py-2 text-sm" :placeholder="campo.p"></textarea>
+                    <div class="flex items-center justify-end gap-2 mt-1 h-4">
+                      <span v-if="charInfo(campo.k).isWarning && !charInfo(campo.k).isOver" class="text-amber-400 text-[10px]">Cerca del límite — sé conciso</span>
+                      <span class="text-[10px] transition-colors" :class="charInfo(campo.k).isOver ? 'text-red-400 font-bold' : charInfo(campo.k).isWarning ? 'text-amber-400' : 'text-gray-600'">{{ charInfo(campo.k).len }}/{{ CHAR_LIMITS[campo.k].max }}</span>
+                    </div>
+                  </div>
                 </div>
 
-                <div ref="refCicloGrid" class="col-span-2 mt-4"
+                <div ref="refCicloGrid" data-tour="gen-ciclo" class="md:col-span-2 min-w-0 mt-4"
                      :class="{ 'tour-active': tourTargetActivo === 'refCicloGrid' }">
                   <label class="label-style !mb-4">Ciclo Formativo Implicado *</label>
 
                   <!-- Ciclos de BD -->
-                  <div v-if="ciclos.length > 0" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                     <button v-for="c in ciclos" :key="c.id"
-                        @click="!esModoDemo && (seleccion.cicloId = c.id)"
-                        :disabled="esModoDemo"
+                  <div v-if="ciclosVisibles.length > 0" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                     <button v-for="c in ciclosVisibles" :key="c.id"
+                        @click="!esModoDemo && cicloTieneDatos(c) && (seleccion.cicloId = c.id)"
+                        :disabled="esModoDemo || !cicloTieneDatos(c)"
+                        :title="cicloTieneDatos(c) ? '' : 'Este ciclo no tiene módulos con RA y CE cargados: no se puede generar un reto con él'"
                         :class="seleccion.cicloId === c.id
-                            ? 'bg-gradient-to-r from-[#00A859] to-[#99CC33] border-transparent text-white'
-                            : 'bg-[#1F2937] border-transparent text-gray-300 hover:border-[#00A859]/40'"
+                            ? 'bg-gradient-to-r from-centros to-primary-400 border-transparent text-white'
+                            : cicloTieneDatos(c)
+                              ? 'bg-[#1F2937] border-transparent text-gray-300 hover:border-centros/40'
+                              : 'bg-gray-100 border-dashed border-gray-300 text-gray-400 cursor-not-allowed'"
                         class="text-left px-5 py-4 rounded-2xl border-2 transition-all duration-200 flex items-center gap-3 relative overflow-hidden group shadow-sm">
                         <div class="shrink-0 transition-transform" :class="seleccion.cicloId === c.id ? 'scale-100' : 'scale-0 opacity-0 hidden'">
                             <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
                         </div>
-                        <div class="flex-1">
+                        <div class="flex-1 min-w-0 break-words">
                             <span class="text-sm font-bold leading-tight">{{ c.nombre }}</span>
+                            <p v-if="!cicloTieneDatos(c)" class="text-[10px] uppercase tracking-wide mt-0.5">Sin módulos ni RA/CE</p>
                         </div>
                      </button>
                   </div>
                   <!-- Tarjeta virtual cuando la familia no está en BD pero hay demo activa -->
                   <div v-else-if="esModoDemo && demoCicloNombre" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    <div class="text-left px-5 py-4 rounded-2xl border-2 border-transparent bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white flex items-center gap-3 shadow-sm">
+                    <div class="text-left px-5 py-4 rounded-2xl border-2 border-transparent bg-gradient-to-r from-centros to-primary-400 text-white flex items-center gap-3 shadow-sm">
                       <div class="shrink-0">
                         <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
                       </div>
-                      <div class="flex-1">
+                      <div class="flex-1 min-w-0 break-words">
                         <span class="text-sm font-bold leading-tight">{{ demoCicloNombre }}</span>
                         <p class="text-[10px] text-white/70 mt-0.5 uppercase tracking-wide">Ciclo de demo</p>
                       </div>
                     </div>
                   </div>
-                  <!-- Estado vacío estándar -->
-                  <div v-else class="bg-gray-50 border border-dashed border-gray-200 rounded-3xl p-6 text-center">
+                  <!-- Estado vacío: solo mientras no hay familia elegida -->
+                  <div v-else-if="!seleccion.familia" class="bg-gray-50 border border-dashed border-gray-200 rounded-3xl p-6 text-center">
                       <p class="text-gray-500 text-sm">Selecciona una Familia Profesional para ver sus ciclos.</p>
                   </div>
+                  <p v-if="ningunCicloConDatos" class="mt-3 text-xs text-red-500 font-bold">
+                    Ningún ciclo de esta familia{{ seleccion.empresaCentro ? ` en ${seleccion.empresaCentro}` : '' }} tiene módulos con RA y CE cargados:
+                    todavía no se puede generar un reto. Elige otra familia si la empresa tiene más.
+                  </p>
                 </div>
 
-                <div ref="refCursoAlumno" class="col-span-2 mt-6"
+                <div ref="refCursoAlumno" class="md:col-span-2 min-w-0 mt-6"
                      :class="{ 'tour-active': tourTargetActivo === 'refCursoAlumno' }">
                   <label class="label-style !mb-3">Curso del Alumnado *</label>
-                  <div class="flex bg-[#1F2937] p-1.5 rounded-2xl w-full md:w-1/2 shadow-inner">
-                    <button @click="!esModoDemo && (seleccion.cursoSeleccionado = 1)" 
-                      :disabled="esModoDemo"
-                      :class="seleccion.cursoSeleccionado === 1 ? 'bg-[#374151] text-white shadow font-black' : 'text-gray-400 hover:text-white'" 
-                      class="flex-1 py-3 rounded-xl text-sm transition-all">
+                  <div class="flex bg-[#1F2937] p-1.5 rounded-full w-full sm:max-w-md shadow-inner">
+                    <button @click="elegirCurso(1)"
+                      :disabled="esModoDemo || !cursoTieneDatos(1)" :title="tituloDemo || (cursoTieneDatos(1) ? undefined : 'Este ciclo no tiene RA y CE cargados de 1º')"
+                      :class="seleccion.cursoSeleccionado === 1 ? 'bg-[#374151] text-white shadow font-black' : cursoTieneDatos(1) ? 'text-gray-400 hover:text-white' : 'text-gray-600 line-through cursor-not-allowed'"
+                      class="flex-1 px-2 py-3 rounded-full text-xs sm:text-sm whitespace-nowrap transition-all">
                       1º Curso
                     </button>
-                    <button @click="!esModoDemo && (seleccion.cursoSeleccionado = 2)"
-                      :disabled="esModoDemo"
-                      :class="seleccion.cursoSeleccionado === 2 ? 'bg-[#374151] text-white shadow font-black' : 'text-gray-400 hover:text-white'"
-                      class="flex-1 py-3 rounded-xl text-sm transition-all">
+                    <button @click="elegirCurso(2)"
+                      :disabled="esModoDemo || !cursoTieneDatos(2)" :title="tituloDemo || (cursoTieneDatos(2) ? undefined : 'Este ciclo no tiene RA y CE cargados de 2º')"
+                      :class="seleccion.cursoSeleccionado === 2 ? 'bg-[#374151] text-white shadow font-black' : cursoTieneDatos(2) ? 'text-gray-400 hover:text-white' : 'text-gray-600 line-through cursor-not-allowed'"
+                      class="flex-1 px-2 py-3 rounded-full text-xs sm:text-sm whitespace-nowrap transition-all">
                       2º Curso
                     </button>
-                    <button @click="!esModoDemo && (seleccion.cursoSeleccionado = 'ambos_cursos')"
-                      :disabled="esModoDemo"
-                      :class="seleccion.cursoSeleccionado === 'ambos_cursos' ? 'bg-[#374151] text-white shadow font-black' : 'text-gray-400 hover:text-white'"
-                      class="flex-1 py-3 rounded-xl text-sm transition-all">
-                      Ambos Cursos
+                    <button @click="elegirAmbosCursos()"
+                      :disabled="esModoDemo || !cursoTieneDatos('ambos_cursos')" :title="tituloDemo || (cursoTieneDatos('ambos_cursos') ? undefined : 'Este ciclo no tiene RA y CE cargados de los dos cursos')"
+                      :class="seleccion.cursoSeleccionado === 'ambos_cursos' ? 'bg-[#374151] text-white shadow font-black' : cursoTieneDatos('ambos_cursos') ? 'text-gray-400 hover:text-white' : 'text-gray-600 line-through cursor-not-allowed'"
+                      class="flex-1 px-2 py-3 rounded-full text-xs sm:text-sm whitespace-nowrap transition-all">
+                      <span class="sm:hidden">Ambos</span><span class="hidden sm:inline">Ambos Cursos</span>
                     </button>
                   </div>
+                  <p v-if="seleccion.cicloId && !esModoDemo && !cursoTieneDatos('ambos_cursos')" class="mt-2 text-xs text-gray-500">
+                    <template v-if="cursoTieneDatos(1) !== cursoTieneDatos(2)">
+                      Este ciclo solo tiene RA y CE de {{ cursoTieneDatos(1) ? '1º' : '2º' }} curso: no hay de {{ cursoTieneDatos(1) ? '2º' : '1º' }}, así que no se puede elegir ese curso ni «Ambos cursos».
+                    </template>
+                    <template v-else>Este ciclo no tiene RA y CE cargados en ningún curso.</template>
+                  </p>
                 </div>
 
-                <div ref="refModulosSection" class="col-span-2 mt-2 pt-6 border-t border-gray-100"
+                <div ref="refModulosSection" data-tour="gen-modulos" class="md:col-span-2 min-w-0 mt-2 pt-6 border-t border-gray-100"
                      :class="{ 'tour-active': tourTargetActivo === 'refModulosSection' }">
-                  <div v-if="esAmbosCursos" class="w-full bg-gray-50 p-6 rounded-3xl border border-gray-200 relative">
-                    <div class="flex items-center justify-between mb-3">
-                      <label class="label-style !mb-0 !ml-0">Forzar Módulos de 1º y 2º (Opcional)</label>
-                      <button type="button" @click="!esModoDemo && limpiarModulosAmbos()"
-                        :disabled="esModoDemo"
-                        class="px-5 py-2.5 bg-white text-red-500 hover:bg-red-50 hover:border-red-500 border border-gray-200 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 shadow-sm">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-                        Vaciar
-                      </button>
-                    </div>
-                    <span class="text-xs text-gray-400 italic block mb-3">Sin módulos seleccionados, la IA cruzará RA/CE de todos los módulos de 1º y 2º, cubriendo un mínimo de 3 módulos distintos con al menos uno de cada curso. Si eliges módulos, elige al menos uno de cada curso — la IA se ceñirá a los que fuerces.</span>
-
-                    <div class="grid grid-cols-2 gap-4">
-                      <div>
-                        <label class="text-[10px] font-bold text-gray-500 uppercase tracking-wide block mb-2">Módulos de 1º</label>
-                        <div class="flex flex-wrap gap-2">
-                          <button v-for="m in modulosCurso1DelCiclo" :key="m.id" type="button"
-                            @click="!esModoDemo && toggleEnArray(modulosSeleccionadosCurso1, m.id)"
-                            :disabled="esModoDemo"
-                            :class="modulosSeleccionadosCurso1.includes(m.id) ? 'bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-[#00A859]/50'"
-                            class="px-4 py-2 rounded-2xl border-2 text-[11px] font-black uppercase text-left transition-all shadow-sm">
-                            {{ m.nombre }}
-                          </button>
-                          <p v-if="modulosCurso1DelCiclo.length === 0" class="text-xs text-red-500 italic">No hay módulos de 1º cargados para este ciclo.</p>
-                        </div>
-                      </div>
-                      <div>
-                        <label class="text-[10px] font-bold text-gray-500 uppercase tracking-wide block mb-2">Módulos de 2º</label>
-                        <div class="flex flex-wrap gap-2">
-                          <button v-for="m in modulosCurso2DelCiclo" :key="m.id" type="button"
-                            @click="!esModoDemo && toggleEnArray(modulosSeleccionadosCurso2, m.id)"
-                            :disabled="esModoDemo"
-                            :class="modulosSeleccionadosCurso2.includes(m.id) ? 'bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-[#00A859]/50'"
-                            class="px-4 py-2 rounded-2xl border-2 text-[11px] font-black uppercase text-left transition-all shadow-sm">
-                            {{ m.nombre }}
-                          </button>
-                          <p v-if="modulosCurso2DelCiclo.length === 0" class="text-xs text-red-500 italic">No hay módulos de 2º cargados para este ciclo.</p>
-                        </div>
+                  <div class="w-full bg-gray-50 p-4 sm:p-6 rounded-3xl border border-gray-200 relative">
+                    <!-- Cabecera: switch "Elige la IA" ↔ "Manual" (por defecto, la IA) -->
+                    <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
+                      <label class="label-style !mb-0 !ml-0">Módulos y RA/CE {{ esAmbosCursos ? 'de 1º y 2º' : 'del curso' }}</label>
+                      <div class="flex flex-wrap items-center gap-3">
+                        <button v-if="modoModulosManual && !esModoDemo" type="button" @click="esAmbosCursos ? limpiarModulosAmbos() : limpiarModulos()"
+                          class="min-h-[36px] px-4 py-2 bg-white text-red-500 hover:bg-red-50 hover:border-red-500 border border-gray-200 rounded-full font-bold text-[10px] tracking-widest uppercase transition-all shadow-sm">
+                          Vaciar
+                        </button>
+                        <!-- Switch de dos lados: bola a la izquierda = "Elige la IA" (por defecto),
+                             a la derecha = "Selección manual". La etiqueta activa se resalta. -->
+                        <button type="button" role="switch" :aria-checked="modulosEnManual"
+                          aria-label="Seleccionar módulos manualmente"
+                          :disabled="!puedeElegirModulosManual"
+                          @click="toggleModoModulosManual()"
+                          class="flex flex-nowrap items-center gap-2 sm:gap-2.5 min-h-[36px] select-none"
+                          :class="puedeElegirModulosManual ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'">
+                          <span class="whitespace-nowrap text-[10px] font-black uppercase tracking-wide transition-colors"
+                            :class="modulosEnManual ? 'text-gray-400' : 'text-centros'">Elige la IA</span>
+                          <span class="relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors duration-200"
+                            :class="modulosEnManual ? 'bg-amber-400' : 'bg-centros'">
+                            <span class="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-200"
+                              :class="modulosEnManual ? 'translate-x-5' : 'translate-x-0'" />
+                          </span>
+                          <span class="whitespace-nowrap text-[10px] font-black uppercase tracking-wide transition-colors"
+                            :class="modulosEnManual ? 'text-amber-600' : 'text-gray-400'">Selección manual</span>
+                        </button>
                       </div>
                     </div>
-                    <p v-if="!ambosCursosModulosValidos" class="text-xs text-red-500 mt-2 italic">Si eliges módulos en modo "Ambos Cursos", debes elegir al menos uno de 1º y uno de 2º.</p>
-                  </div>
-                  <div v-else class="w-full bg-gray-50 p-6 rounded-3xl border border-gray-200 relative">
-                    <div class="flex items-center justify-between mb-3">
-                      <label class="label-style !mb-0 !ml-0">Forzar Módulo Específico (Opcional)</label>
-                      <button type="button" @click="!esModoDemo && (modulosSeleccionados = [])"
-                        :disabled="esModoDemo"
-                        class="px-5 py-2.5 bg-white text-red-500 hover:bg-red-50 hover:border-red-500 border border-gray-200 rounded-full font-bold text-xs tracking-widest uppercase transition-all flex items-center gap-2 shadow-sm">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-                        Vaciar
-                      </button>
-                    </div>
-                    <span class="text-xs text-gray-400 italic block mb-3">Sin módulo seleccionado, la IA cruzará RA/CE de todos los módulos del curso, cubriendo un mínimo de 3 módulos distintos si el ciclo tiene suficientes. Si fuerzas un módulo, la IA se ceñirá a ese módulo.</span>
 
-                    <!-- Módulo virtual cuando la demo no tiene ciclo en BD -->
-                    <div v-if="esModoDemo && modulosDelCurso.length === 0 && demoModuloNombre"
-                      class="input-style min-h-[60px] flex items-center gap-2 bg-[#00A859]/5 border-[#00A859]/20 text-[#1F2937] cursor-default">
-                      <svg class="w-4 h-4 text-[#00A859] shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
-                      <span class="text-sm font-semibold">{{ demoModuloNombre }}</span>
-                      <span class="ml-auto text-[10px] text-gray-400 uppercase tracking-wide">Módulo de demo</span>
-                    </div>
-                    <div v-else class="flex flex-wrap gap-2">
-                      <button v-for="m in modulosDelCurso" :key="m.id" type="button"
-                        @click="!esModoDemo && toggleEnArray(modulosSeleccionados, m.id)"
-                        :disabled="esModoDemo"
-                        :class="modulosSeleccionados.includes(m.id) ? 'bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-[#00A859]/50'"
-                        class="px-5 py-2.5 rounded-2xl border-2 text-[11px] font-black uppercase text-left transition-all shadow-sm">
-                        {{ m.nombre }}
-                      </button>
-                    </div>
-                    <p v-if="!esModoDemo && modulosDelCurso.length === 0 && seleccion.cicloId" class="text-xs text-red-500 mt-2 italic">No hay módulos cargados para este curso.</p>
+                    <p v-if="!seleccion.cicloId && !esModoDemo" class="text-xs text-gray-500 italic mb-3">
+                      Selecciona primero un ciclo formativo para poder elegir los módulos manualmente.
+                    </p>
+
+                    <!-- Modo automático (por defecto): la IA elige módulos y RA/CE -->
+                    <template v-if="!modulosEnManual">
+                      <div class="flex items-start gap-3 rounded-2xl border-2 px-4 py-3 border-centros bg-centros/5 text-azul-noche">
+                        <svg class="w-5 h-5 mt-0.5 shrink-0 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                        <div class="text-xs leading-relaxed">
+                          <p class="font-black uppercase tracking-wide text-[11px]">Elige la IA · módulos y RA/CE automáticos <span class="ml-1 px-2 py-0.5 rounded-full bg-centros text-white text-[9px]">Recomendado</span></p>
+                          <p v-if="esAmbosCursos" class="mt-0.5">La IA cruzará RA/CE de módulos de 1º y 2º (mínimo 3 módulos, al menos uno de cada curso), con RA/CE distintos en cada variante.</p>
+                          <p v-else class="mt-0.5">La IA cruzará RA/CE de los módulos del curso (mínimo 3 módulos distintos si el ciclo tiene suficientes), con RA/CE distintos en cada variante.</p>
+                        </div>
+                      </div>
+                      <!-- Aviso visible de que los RA/CE también se pueden elegir (primero módulos, después RA/CE) -->
+                      <div v-if="!esModoDemo" class="mt-3 flex flex-col sm:flex-row sm:items-center gap-3 rounded-2xl border-2 border-dashed border-amber-300 bg-white px-4 py-3">
+                        <p class="flex-1 min-w-0 text-xs leading-relaxed text-gray-600">
+                          <strong class="text-azul-noche">¿Quieres elegir tú los RA y CE?</strong>
+                          Primero elige los módulos y después marca sus RA y CE. Si no eliges nada, lo decide la IA.
+                        </p>
+                        <button type="button" @click="toggleModoModulosManual()" :disabled="!puedeElegirModulosManual"
+                          class="self-start sm:self-auto shrink-0 min-h-[36px] px-4 py-2 rounded-full border-2 border-amber-400 text-amber-700 hover:bg-amber-50 text-[11px] font-black uppercase tracking-wide transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                          Elegir módulos y RA/CE
+                        </button>
+                      </div>
+                    </template>
+
+                    <!-- Modo manual: módulos + RA/CE opcionales -->
+                    <template v-else>
+                      <div v-if="!esModoDemo" :key="hayModulosForzados ? 'forzado' : 'auto'"
+                        class="modulos-estado flex items-start gap-3 rounded-2xl border-2 px-4 py-3 mb-4"
+                        :class="hayModulosForzados ? 'border-amber-400 bg-amber-50 text-amber-900' : 'border-gray-200 bg-white text-gray-600'">
+                        <svg class="w-5 h-5 mt-0.5 shrink-0" :class="hayModulosForzados ? 'text-amber-500' : 'text-gray-400'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                        <div class="text-xs leading-relaxed">
+                          <template v-if="!hayModulosForzados">
+                            <p class="font-black uppercase tracking-wide text-[11px]">Modo manual · marca los módulos</p>
+                            <p class="mt-0.5"><strong>1.</strong> Marca los módulos.<template v-if="esAmbosCursos"> Elige al menos uno de 1º y uno de 2º.</template> <strong>2.</strong> Debajo aparecerán sus RA y CE para elegirlos (opcional).</p>
+                            <p class="mt-0.5">Mientras no marques ningún módulo, módulos y RA/CE los sigue eligiendo la IA.</p>
+                          </template>
+                          <template v-else>
+                            <p class="font-black uppercase tracking-wide text-[11px]">Módulos forzados a mano · la IA NO elegirá los módulos</p>
+                            <p class="mt-0.5">El reto se limitará a: <strong>{{ nombresModulosForzados.join(', ') }}</strong>.</p>
+                            <p class="mt-0.5">Más abajo puedes elegir sus RA y CE; si no lo haces, los elegirá la IA dentro de estos módulos.</p>
+                          </template>
+                        </div>
+                      </div>
+
+                      <!-- Ambos cursos: una columna por curso -->
+                      <template v-if="esAmbosCursos">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div>
+                            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-wide block mb-2">Módulos de 1º</label>
+                            <div class="flex flex-wrap gap-2">
+                              <button v-for="m in modulosCurso1DelCiclo" :key="m.id" type="button"
+                                @click="!esModoDemo && toggleEnArray(modulosSeleccionadosCurso1, m.id)"
+                                :disabled="esModoDemo" :title="tituloDemo"
+                                :class="modulosSeleccionadosCurso1.includes(m.id) ? 'bg-gradient-to-r from-centros to-primary-400 text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-centros/50'"
+                                class="px-4 py-2 rounded-full border-2 text-[11px] font-black uppercase text-left transition-all shadow-sm">
+                                {{ nombreModuloVisible(m.nombre) }}
+                              </button>
+                              <p v-if="modulosCurso1DelCiclo.length === 0" class="text-xs text-red-500 italic">No hay módulos de 1º cargados para este ciclo.</p>
+                            </div>
+                          </div>
+                          <div>
+                            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-wide block mb-2">Módulos de 2º</label>
+                            <div class="flex flex-wrap gap-2">
+                              <button v-for="m in modulosCurso2DelCiclo" :key="m.id" type="button"
+                                @click="!esModoDemo && toggleEnArray(modulosSeleccionadosCurso2, m.id)"
+                                :disabled="esModoDemo" :title="tituloDemo"
+                                :class="modulosSeleccionadosCurso2.includes(m.id) ? 'bg-gradient-to-r from-centros to-primary-400 text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-centros/50'"
+                                class="px-4 py-2 rounded-full border-2 text-[11px] font-black uppercase text-left transition-all shadow-sm">
+                                {{ nombreModuloVisible(m.nombre) }}
+                              </button>
+                              <p v-if="modulosCurso2DelCiclo.length === 0" class="text-xs text-red-500 italic">No hay módulos de 2º cargados para este ciclo.</p>
+                            </div>
+                          </div>
+                        </div>
+                        <p v-if="!ambosCursosModulosValidos" class="text-xs text-red-500 mt-3 font-bold">
+                          Falta al menos un módulo de {{ modulosSeleccionadosCurso1.length === 0 ? '1º' : '2º' }} curso.
+                        </p>
+                      </template>
+
+                      <!-- Un único curso -->
+                      <template v-else>
+                        <!-- Módulo virtual cuando la demo no tiene ciclo en BD -->
+                        <div v-if="esModoDemo && modulosDelCurso.length === 0 && demoModuloNombre"
+                          class="input-style min-h-[60px] flex items-center gap-2 bg-centros/5 border-centros/20 text-[#1F2937] cursor-default">
+                          <svg class="w-4 h-4 text-centros shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                          <span class="text-sm font-semibold">{{ demoModuloNombre }}</span>
+                          <span class="ml-auto text-[10px] text-gray-400 uppercase tracking-wide">Módulo de demo</span>
+                        </div>
+                        <div v-else class="flex flex-wrap gap-2">
+                          <button v-for="m in modulosDelCurso" :key="m.id" type="button"
+                            @click="!esModoDemo && toggleEnArray(modulosSeleccionados, m.id)"
+                            :disabled="esModoDemo" :title="tituloDemo"
+                            :class="modulosSeleccionados.includes(m.id) ? 'bg-gradient-to-r from-centros to-primary-400 text-white border-transparent shadow-md' : 'bg-[#1F2937] text-gray-300 border-transparent hover:border-centros/50'"
+                            class="px-5 py-2.5 rounded-full border-2 text-[11px] font-black uppercase text-left transition-all shadow-sm">
+                            {{ nombreModuloVisible(m.nombre) }}
+                          </button>
+                        </div>
+                        <p v-if="!esModoDemo && modulosDelCurso.length === 0 && seleccion.cicloId" class="text-xs text-red-500 mt-2 italic">No hay módulos cargados para este curso.</p>
+                      </template>
+
+                      <div v-if="hayModulosForzados && !esModoDemo" class="rounded-2xl transition-shadow"
+                        :class="{ 'ra-ce-senalado': toastModulos?.tipo.startsWith('raCe') }">
+                        <SelectorRaCeModulos v-model="seleccionRaCe" :modulos="modulosForzadosParaRaCe"
+                          @limite="(texto) => mostrarToastModulos('raCeLimite', 0, texto)" />
+                      </div>
+                      <!-- Hueco visible del paso 2 mientras no hay módulos: los RA/CE cuelgan de los módulos -->
+                      <div v-else-if="!esModoDemo" class="mt-5 pt-5 border-t border-gray-200">
+                        <p class="label-style !mb-1 !ml-0">Fijar RA y CE (Opcional)</p>
+                        <div class="rounded-2xl border-2 border-dashed border-gray-200 bg-white px-4 py-3 text-xs text-gray-500 leading-relaxed">
+                          Marca al menos un módulo arriba y aquí aparecerán sus RA y CE para elegirlos.
+                        </div>
+                      </div>
+                    </template>
                   </div>
                 </div>
 
-                <div ref="refCantidadVariantes" class="col-span-2 mt-2 pt-6 border-t border-gray-100"
+                <div ref="refCantidadVariantes" data-tour="gen-cantidad" class="md:col-span-2 min-w-0 mt-2 pt-6 border-t border-gray-100"
                      :class="{ 'tour-active': tourTargetActivo === 'refCantidadVariantes' }">
                   <div class="w-full md:w-1/3">
                     <label class="label-style !mb-3 text-[#1F2937]">Cantidad de Variantes a Generar *</label>
-                    <select v-model="seleccion.cantidadMicroretos" :disabled="esModoDemo" class="input-style focus:!border-[#00A859]">
+                    <select v-model="seleccion.cantidadMicroretos" :disabled="esModoDemo" :title="tituloDemo" class="input-style focus:!border-centros">
                       <option v-for="n in [1, 2, 3, 4, 5]" :key="n" :value="n">
                         Generar {{ n }} Variante{{ n > 1 ? 's' : '' }}
                       </option>
@@ -2269,38 +3686,30 @@ async function guardarEstadoGen(nuevoEstado) {
 
       <div class="mt-16 flex flex-col items-center gap-6">
         
-        <!-- Aviso de guardar empresa — solo admin (docentes no pueden editar empresas) -->
-        <div v-if="!esDocente && pasoActual === totalPasos && !crmActualizado" class="bg-yellow-50 border border-yellow-200 shadow-sm rounded-2xl p-5 flex items-start md:items-center gap-4 w-full max-w-4xl animate-in slide-in-from-bottom-2">
+        <!-- Aviso de guardar empresa — solo admin (docentes no pueden editar empresas). Nunca en la demo:
+             su empresa es de ejemplo y guardarla crearía una empresa con datos de demo -->
+        <div v-if="!esModoDemo && !esDocente && pasoActual === totalPasos && !crmActualizado" class="bg-yellow-50 border border-yellow-200 shadow-sm rounded-2xl p-5 flex items-start md:items-center gap-4 w-full max-w-4xl animate-in slide-in-from-bottom-2">
           <div class="bg-yellow-400 text-white p-2 rounded-full shrink-0">
             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
           </div>
           <div class="flex-1">
             <h4 class="text-yellow-800 font-black text-sm uppercase tracking-widest mb-1">¡No pierdas tu trabajo!</h4>
-            <p class="text-yellow-900 text-sm font-medium">Si has modificado el Sector, el Tamaño o el contexto del Problema, haz clic en <strong class="font-black">Actualizar Empresa</strong> antes de generar el reto para guardarlo en la base de datos.</p>
+            <p class="text-yellow-900 text-sm font-medium">Si has completado o cambiado el diagnóstico de la empresa (paso 2), haz clic en <strong class="font-black">Actualizar Empresa</strong> antes de generar el reto para guardarlo en la base de datos.</p>
           </div>
         </div>
 
-        <div class="flex flex-wrap md:flex-nowrap gap-4 w-full max-w-4xl">
-          <button v-if="pasoActual > 1" @click="irAPaso(pasoActual - 1)" class="flex-1 min-w-[150px] px-10 py-6 bg-white text-[#1F2937] border-2 border-gray-200 rounded-full font-black text-xs tracking-widest transition-all hover:bg-gray-50 hover:border-gray-300 active:scale-95">
-            VOLVER
-          </button>
-          
-          <button v-if="pasoActual < totalPasos" @click="avanzarPaso"
-            :disabled="!pasoActualValido"
-            class="flex-[2] min-w-[200px] px-10 py-6 bg-gradient-to-r from-[#00A859] to-[#99CC33] text-white rounded-full font-black text-xs tracking-widest shadow-md hover:shadow-lg disabled:opacity-30 transition-all hover:scale-105 active:scale-95">
-            SIGUIENTE PASO
-          </button>
-
-          <!-- Guardar/Actualizar empresa — solo admin -->
-          <button ref="refGuardarEmpresa" v-if="pasoActual === totalPasos && !esDocente" @click="guardarInfoEmpresa" :disabled="actualizandoCRM || crmActualizado"
-            class="flex-1 min-w-[200px] px-6 py-6 border-2 text-[#1F2937] bg-white border-gray-200 hover:border-[#00A859] hover:text-[#00A859] rounded-full font-black text-xs tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2"
-            :class="[crmActualizado ? '!border-[#00A859] !bg-[#00A859]/5 !text-[#00A859]' : '', tourTargetActivo === 'refGuardarEmpresa' ? 'tour-active' : '']">
+        <!-- Guardar empresa — admin solo al crear; actualizar una existente es solo superadmin (EmpresaPolicy::update).
+             Fuera de la fila de pasos: no es un botón de paso y así Volver / Procesar caben en una fila en móvil. -->
+        <div v-if="!esModoDemo && pasoActual === totalPasos && !esDocente && (!seleccion.empresaId || authStore.isSuperAdmin)" class="flex w-full max-w-4xl justify-end">
+          <button ref="refGuardarEmpresa" @click="guardarInfoEmpresa" :disabled="actualizandoCRM || crmActualizado"
+            class="min-w-[200px] px-6 py-6 border-2 text-[#1F2937] bg-white border-gray-200 hover:border-centros hover:text-centros rounded-full font-black text-xs tracking-widest transition-all active:scale-95 flex items-center justify-center gap-2"
+            :class="[crmActualizado ? '!border-centros !bg-centros/5 !text-centros' : '', tourTargetActivo === 'refGuardarEmpresa' ? 'tour-active' : '']">
             <template v-if="actualizandoCRM">
               <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/></svg>
               GUARDANDO...
             </template>
             <template v-else-if="crmActualizado">
-              <span class="text-[#00A859] flex items-center gap-2">
+              <span class="text-centros flex items-center gap-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
                 INFO GUARDADA
               </span>
@@ -2310,315 +3719,226 @@ async function guardarEstadoGen(nuevoEstado) {
               {{ seleccion.empresaId ? 'ACTUALIZAR EMPRESA' : 'GUARDAR EMPRESA' }}
             </template>
           </button>
+        </div>
 
-          <button ref="refBtnGenerar" v-if="pasoActual === totalPasos" @click="esModoDemo ? generarRetoDemo() : generarReto()" :disabled="!paso3Valido || cargando"
-            :class="[esModoDemo ? 'from-[#1F2937] to-[#374151] shadow-[0_10px_30px_rgba(31,41,55,0.3)] hover:shadow-[0_15px_40px_rgba(31,41,55,0.4)]' : 'from-[#00A859] to-[#99CC33] shadow-[0_10px_30px_rgba(0,168,89,0.3)] hover:shadow-[0_15px_40px_rgba(153,204,51,0.4)]', tourTargetActivo === 'refBtnGenerar' ? 'tour-active' : '']"
-            class="flex-[2] min-w-[250px] px-8 py-6 bg-gradient-to-r text-white rounded-full font-black text-lg transition-all hover:-translate-y-1 active:scale-95 disabled:opacity-40 flex items-center justify-center gap-3">
+        <div class="fila-pasos w-full max-w-4xl">
+          <button v-if="pasoActual > 1" @click="irAPaso(pasoActual - 1)" class="btn-paso-atras">
+            VOLVER
+          </button>
+
+          <button v-if="pasoActual < totalPasos" data-tour="gen-siguiente" @click="avanzarPaso"
+            :disabled="!pasoActualValido"
+            class="btn-paso">
+            SIGUIENTE PASO
+          </button>
+
+          <button ref="refBtnGenerar" data-tour="gen-procesar" v-if="pasoActual === totalPasos" @click="esModoDemo ? generarRetoDemo() : generarReto()" :disabled="!paso3Valido || cargando"
+            :class="[esModoDemo ? 'from-[#1F2937] to-[#374151] shadow-[0_10px_30px_rgba(31,41,55,0.3)] hover:shadow-[0_15px_40px_rgba(31,41,55,0.4)]' : 'from-centros to-primary-400 shadow-[0_10px_30px_rgba(48,114,170,0.3)] hover:shadow-[0_15px_40px_rgba(107,164,213,0.4)]', tourTargetActivo === 'refBtnGenerar' ? 'tour-active' : '']"
+            class="btn-paso bg-gradient-to-r">
             <template v-if="!cargando">
               <svg v-if="esModoDemo" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <svg v-else class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
-              <span class="uppercase tracking-wide">
+              <span class="uppercase tracking-wide sm:hidden">
+                <template v-if="esModoDemo">{{ microretosGenerados.length > 0 ? 'Regenerar' : 'Demo IA' }}</template>
+                <template v-else>{{ microretosGenerados.length > 0 ? 'Más variantes' : 'Procesar' }}</template>
+              </span>
+              <span class="uppercase tracking-wide hidden sm:inline">
                 <template v-if="esModoDemo">{{ microretosGenerados.length > 0 ? 'Regenerar demo' : 'Procesar DEMO con IA' }}</template>
                 <template v-else>{{ microretosGenerados.length > 0 ? 'Generar más variantes' : 'Procesar con IA' }}</template>
               </span>
             </template>
             <template v-else>
               <div class="w-5 h-5 border-3 border-white/30 border-t-white rounded-full animate-spin"></div>
-              <span class="text-sm">{{ esModoDemo ? 'CARGANDO DEMO...' : `GENERANDO ${seleccion.cantidadMicroretos} RETO(S)...` }}</span>
+              <span class="text-sm sm:hidden">{{ esModoDemo ? 'CARGANDO...' : 'GENERANDO...' }}</span>
+              <span class="text-sm hidden sm:inline">{{ esModoDemo ? 'CARGANDO DEMO...' : `GENERANDO ${seleccion.cantidadMicroretos} RETO(S)...` }}</span>
             </template>
           </button>
         </div>
       </div>
 
-      <div v-if="microretosGenerados.length > 0" class="mt-24 pb-20 space-y-32 font-sans relative">
-        
-        <div v-if="microretosGenerados.length > 1" class="flex justify-center md:justify-end mb-8 sticky top-16 z-50">
-            <button @click="guardarTodos" :disabled="todosGuardados || guardandoTodos" class="px-8 py-4 bg-white border-2 border-gray-200 text-[#1F2937] hover:border-[#00A859] hover:text-[#00A859] rounded-full font-black text-xs md:text-sm uppercase tracking-widest shadow-lg transition-all hover:-translate-y-1 active:scale-95 disabled:hover:translate-y-0 disabled:opacity-80 flex items-center gap-2">
-                <template v-if="guardandoTodos">
-                  <svg class="animate-spin w-5 h-5" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/></svg> 
-                  GUARDANDO TODOS...
-                </template>
-                <template v-else-if="todosGuardados">
-                  <svg class="w-5 h-5 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
-                  ✓ TODOS GUARDADOS
-                </template>
-                <template v-else>
-                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
-                  GUARDAR LOS {{ microretosGenerados.length }} RETOS
-                </template>
-            </button>
+      <!-- Variantes generadas: miniaturas con lo esencial; la ficha completa se abre en un modal -->
+      <div v-if="microretosGenerados.length > 0" ref="refGaleriaRetos" data-tour="gen-galeria" class="mt-16 sm:mt-24 pb-20 font-sans scroll-mt-20">
+        <div class="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-6">
+          <div class="min-w-0">
+            <h3 class="text-xl sm:text-2xl font-black text-azul-noche">
+              {{ microretosGenerados.length === 1 ? 'Reto generado' : `${microretosGenerados.length} variantes generadas` }}
+            </h3>
+            <p class="text-sm text-gray-500">Pulsa en una variante para leer su ficha completa.</p>
+          </div>
+          <button v-if="microretosGenerados.length > 1 && !esModoDemo" @click="guardarTodos" :disabled="todosGuardados || guardandoTodos"
+            class="self-start sm:self-auto shrink-0 px-6 py-3 bg-white border-2 border-gray-200 text-[#1F2937] hover:border-centros hover:text-centros rounded-full font-black text-xs uppercase tracking-widest shadow-sm transition-all active:scale-95 disabled:opacity-80 flex items-center gap-2">
+            <template v-if="guardandoTodos">
+              <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/></svg>
+              Guardando todos...
+            </template>
+            <template v-else-if="todosGuardados">
+              <svg class="w-4 h-4 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+              Todos guardados
+            </template>
+            <template v-else>
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/></svg>
+              Guardar los {{ microretosGenerados.length }} retos
+            </template>
+          </button>
         </div>
 
-        <div v-for="(reto, index) in microretosGenerados" :key="index" class="relative animate-in slide-in-from-bottom-8 duration-700">
-          
-          <div v-if="microretosGenerados.length > 1" class="absolute -top-16 left-0 w-full flex items-center justify-center z-10">
-            <div class="w-full h-[1px] bg-gradient-to-r from-transparent via-gray-300 to-transparent"></div>
-            <span class="absolute px-6 py-2 bg-white border border-gray-200 text-gray-500 rounded-full text-xs font-black uppercase tracking-widest shadow-sm">
-              Variante #{{ microretosGenerados.length - index }}
-            </span>
-          </div>
+        <AvisoModoDemo v-if="esModoDemo" contexto="retos" class="mb-6" @salir="limpiarFormulario" />
 
-          <div class="flex flex-col md:flex-row justify-between items-start md:items-center bg-white p-6 rounded-2xl shadow-sm border border-gray-100 mb-8 gap-4">
-            <div>
-              <h3 class="text-lg font-black text-[#1F2937]">Previsualización de la Ficha Técnica</h3>
-              <p class="text-sm text-gray-500">Formato oficial de archivo.</p>
-            </div>
-            <button @click="guardar(index)" :disabled="reto._ui_guardado || reto._ui_guardando" class="btn-save w-full md:w-auto" :class="reto._ui_guardado ? 'border-[#00A859] bg-[#00A859]/5 text-[#00A859]' : ''">
-              <span v-if="reto._ui_guardando" class="flex items-center gap-2"><svg class="animate-spin w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/></svg> GUARDANDO...</span>
-              <span v-else-if="reto._ui_guardado">✓ PUBLICADO EN BD</span>
-              <span v-else>GUARDAR ESTA VERSIÓN</span>
+        <!-- 3 columnas solo en 2xl: con SidePanel y columna de avisos, en xl quedan ~670px -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-3 gap-4 sm:gap-6">
+          <article v-for="(reto, index) in microretosGenerados" :key="index" :data-tour="index === 0 ? 'gen-variante' : undefined"
+            class="group flex flex-col min-w-0 bg-white rounded-2xl border border-gray-200 shadow-sm hover:shadow-md hover:border-centros/50 transition-all animate-in fade-in duration-500">
+            <button type="button" @click="abrirReto(index)" class="flex-1 text-left p-5 sm:p-6 rounded-t-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-centros">
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <span class="whitespace-nowrap px-3 py-1 bg-gray-50 border border-gray-200 text-gray-500 rounded-full text-[10px] font-black uppercase tracking-widest">
+                  Variante #{{ numeroVariante(index) }}
+                </span>
+                <span v-if="esModoDemo" class="whitespace-nowrap px-3 py-1 bg-gray-50 border border-gray-200 text-gray-500 rounded-full text-[10px] font-black uppercase tracking-widest">
+                  Ejemplo de demo
+                </span>
+                <span v-else-if="reto._ui_guardado" class="whitespace-nowrap px-3 py-1 bg-centros/5 border border-centros/30 text-centros rounded-full text-[10px] font-black uppercase tracking-widest">
+                  ✓ Guardado
+                </span>
+              </div>
+              <h4 class="text-lg font-black text-azul-noche leading-tight line-clamp-2 break-words group-hover:text-centros transition-colors">{{ reto.titulo }}</h4>
+              <p v-if="reto.pregunta_reto" class="mt-2 text-sm font-bold text-gray-600 leading-snug line-clamp-3 break-words">{{ reto.pregunta_reto }}</p>
+              <p v-if="reto.subtitulo" class="mt-2 text-sm text-gray-500 leading-relaxed line-clamp-3 break-words">{{ reto.subtitulo }}</p>
+              <div class="mt-4 flex flex-wrap gap-2">
+                <span v-if="reto.empresa_nombre" class="max-w-full truncate px-3 py-1 bg-[#1F2937] text-white rounded-full text-[10px] font-bold uppercase tracking-wider">{{ reto.empresa_nombre }}</span>
+                <span v-if="reto.evaluacion_oficial?.length" class="px-3 py-1 bg-white border border-gray-200 text-gray-500 rounded-full text-[10px] font-bold uppercase tracking-wider">
+                  {{ reto.evaluacion_oficial.length }} RA
+                </span>
+                <span v-if="!reto.evaluacion_oficial?.length || reto.aviso_cobertura_incompleta || reto.aviso_aplicacion_incompleta"
+                  class="px-3 py-1 bg-amber-50 border border-amber-200 text-amber-700 rounded-full text-[10px] font-bold uppercase tracking-wider">
+                  Revisar RA/CE
+                </span>
+              </div>
             </button>
-          </div>
-          
-          <div class="bg-white rounded-[2rem] shadow-[0_20px_50px_rgb(0,0,0,0.06)] mx-auto max-w-5xl overflow-hidden border border-gray-100 relative z-20">
-            <div class="bg-gray-50 border-b border-gray-100 p-10 md:px-16 pt-12">
-              <p class="text-[#00A859] font-bold text-[10px] tracking-[0.2em] uppercase mb-4 flex items-center gap-2">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-                DuaLab · Ficha de Reto
-              </p>
-              <h1 class="text-3xl md:text-5xl font-black text-[#1F2937] tracking-tight leading-tight mb-2">
-                {{ reto.titulo }}
-              </h1>
-              <h2 class="text-lg md:text-xl text-gray-500 font-medium leading-relaxed mb-8">
-                {{ reto.subtitulo }}
-              </h2>
-              
-              <div class="flex flex-wrap gap-3">
-                <span class="flex items-center gap-2 px-4 py-2 bg-[#1F2937] text-white rounded-lg text-xs font-bold uppercase tracking-wider shadow-sm">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
-                  {{ reto.empresa_nombre }}
-                </span>
-                <span class="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-[#1F2937] rounded-lg text-xs font-bold uppercase tracking-wider">
-                  <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2-2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
-                  {{ reto._ui_familia || seleccion.familia }}
-                </span>
-                <span class="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-500 rounded-lg text-xs font-bold uppercase tracking-wider">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-                  Nivel: {{ reto.nivel_grupo || seleccion.nivelGrupo }} ({{ (reto.curso || seleccion.cursoSeleccionado) === 'ambos_cursos' ? 'Ambos Cursos (1º y 2º)' : (reto.curso || seleccion.cursoSeleccionado) + 'º' }})
-                </span>
-              </div>
+            <div class="flex flex-wrap items-center justify-between gap-2 px-5 sm:px-6 py-3 border-t border-gray-100">
+              <button type="button" @click="abrirReto(index)"
+                class="min-h-[36px] px-4 py-2 rounded-full bg-[#1F2937] text-white text-[11px] font-black uppercase tracking-widest hover:bg-centros transition-colors">
+                Ver ficha
+              </button>
+              <button v-if="!esModoDemo" type="button" @click="guardar(index)" :disabled="reto._ui_guardado || reto._ui_guardando"
+                class="min-h-[36px] px-4 py-2 rounded-full border-2 border-gray-200 bg-white text-[#1F2937] text-[11px] font-black uppercase tracking-widest hover:border-centros hover:text-centros transition-colors disabled:opacity-50 disabled:hover:border-gray-200 disabled:hover:text-[#1F2937]"
+                :class="reto._ui_guardado ? 'border-centros! text-centros! bg-centros/5' : ''">
+                <span v-if="reto._ui_guardando">Guardando...</span>
+                <span v-else-if="reto._ui_guardado">✓ Guardado</span>
+                <span v-else>Guardar</span>
+              </button>
+              <button v-if="puedeTrabajar(reto)" :data-tour="index === 0 ? 'gen-trabajar' : undefined" type="button" @click="trabajarReto(index)" :disabled="reto._ui_guardando"
+                class="min-h-[36px] px-4 py-2 rounded-full bg-centros text-white text-[11px] font-black uppercase tracking-widest hover:bg-[#1F2937] transition-colors disabled:opacity-50">
+                Trabajar este reto
+              </button>
             </div>
-
-            <div class="p-10 md:p-16 space-y-12">
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
-                <div>
-                  <h3 class="flex items-center gap-2 text-[#00A859] font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a3.001 3.001 0 00-2.83 2M15 11h3m-3 4h2"/></svg>
-                    ¿Quién es {{ reto.empresa_nombre }}?
-                  </h3>
-                  <p class="text-gray-600 text-sm leading-relaxed">{{ reto.quien_es }}</p>
-                </div>
-                <div>
-                  <h3 class="flex items-center gap-2 text-[#00A859] font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                    Su día a día
-                  </h3>
-                  <p class="text-gray-600 text-sm leading-relaxed">{{ reto.dia_a_dia }}</p>
-                </div>
-              </div>
-
-              <div>
-                <h3 class="flex items-center gap-2 text-yellow-600 font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                  Dificultades
-                </h3>
-                <ul class="space-y-2 pl-2">
-                  <li v-for="(item, i) in reto.dificultades" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
-                    <span class="text-yellow-500 font-black mt-0.5">•</span><span>{{ item }}</span>
-                  </li>
-                </ul>
-              </div>
-
-              <div class="bg-gradient-to-r from-gray-50 to-white border-l-4 border-[#00A859] p-8 rounded-r-2xl shadow-sm border-y border-r border-gray-100">
-                <h3 class="text-[#00A859] font-black uppercase text-[10px] tracking-[0.2em] mb-2 flex items-center gap-2">Pregunta del Reto</h3>
-                <p class="text-xl md:text-2xl font-bold text-[#1F2937] leading-snug">{{ reto.pregunta_reto }}</p>
-              </div>
-
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
-                <div>
-                  <h3 class="flex items-center gap-2 text-[#00A859] font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
-                    Qué necesitan
-                  </h3>
-                  <ul class="space-y-2 pl-2">
-                    <li v-for="(item, i) in reto.que_necesitan" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
-                      <span class="text-[#00A859] font-black mt-0.5">•</span><span>{{ item }}</span>
-                    </li>
-                  </ul>
-                </div>
-                <div>
-                  <h3 class="flex items-center gap-2 text-red-500 font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
-                    Limitaciones
-                  </h3>
-                  <ul class="space-y-2 pl-2">
-                    <li v-for="(item, i) in reto.limitaciones" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
-                      <span class="text-red-500 font-black mt-0.5">•</span><span>{{ item }}</span>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
-                <div>
-                  <h3 class="flex items-center gap-2 text-[#00A859] font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
-                    Ejemplos de Prototipos
-                  </h3>
-                  <ul class="space-y-2 pl-2">
-                    <li v-for="(item, i) in reto.prototipos" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
-                      <span class="text-[#00A859] font-black mt-0.5">•</span><span>{{ item }}</span>
-                    </li>
-                  </ul>
-                </div>
-                <div>
-                  <h3 class="flex items-center gap-2 text-blue-600 font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                    ODS Sugeridos
-                  </h3>
-                  <ul class="space-y-2 pl-2">
-                    <li v-for="ods in reto.ods_sugeridos" :key="ods" class="text-sm font-semibold text-[#1F2937]">{{ ods }}</li>
-                  </ul>
-                </div>
-              </div>
-
-              <div class="pt-6">
-                <h3 class="flex items-center gap-2 text-[#1F2937] font-bold uppercase text-xs tracking-widest border-b-2 border-gray-200 pb-2 mb-6">
-                  <svg class="w-5 h-5 text-[#00A859]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5z"/><path d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/></svg>
-                  Módulos + RA/CE seleccionados
-                </h3>
-
-                <!-- Aviso: no se pudo asignar ningún RA/CE -->
-                <div v-if="!reto.evaluacion_oficial || !reto.evaluacion_oficial.length"
-                     class="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
-                  <svg class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                  </svg>
-                  <p class="text-sm text-amber-700 leading-relaxed">
-                    No se ha podido asignar ningún RA/CE a este reto: los módulos elegidos todavía no tienen
-                    currículo cargado en la base de datos (pendiente de importar del BOE). Asígnalos manualmente
-                    antes de publicar el reto.
-                  </p>
-                </div>
-
-                <template v-else>
-                  <!-- Aviso: selección hecha por IA, revisar -->
-                  <div class="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-2xl px-4 py-3 mb-4">
-                    <svg class="w-5 h-5 text-blue-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                    </svg>
-                    <p class="text-sm text-blue-700 leading-relaxed">
-                      Esta selección de RA/CE la ha hecho la IA a partir del currículo oficial — revísala antes de publicar el reto.
-                      Cubre un mínimo de 3 módulos distintos (salvo que se hayan forzado módulos concretos)<template v-if="reto.curso === 'ambos_cursos'">, incluyendo al menos uno de 1º y uno de 2º</template>.
-                    </p>
-                  </div>
-
-                  <!-- Aviso: la IA no cumplió la cobertura mínima exigida (mínimo de módulos y/o mezcla 1º+2º) -->
-                  <div v-if="reto.aviso_cobertura_incompleta" class="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 mb-4">
-                    <svg class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                        d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-                    </svg>
-                    <p class="text-sm text-amber-700 leading-relaxed">
-                      <strong class="font-bold">Atención:</strong> esta vez la IA no cubrió correctamente la cobertura mínima exigida
-                      (mínimo de módulos distintos<template v-if="reto.curso === 'ambos_cursos'"> y/o mezcla de 1º y 2º</template>).
-                      Revisa manualmente los módulos/RA/CE de abajo, o pulsa "Generar más variantes" para intentarlo de nuevo.
-                    </p>
-                  </div>
-
-                  <div class="space-y-6">
-                    <div v-for="evalObj in reto.evaluacion_oficial" :key="evalObj.modulo" class="bg-white border border-gray-200 p-6 rounded-2xl shadow-sm">
-                      <div class="flex items-center justify-between flex-wrap gap-2 mb-4">
-                        <div>
-                          <p class="text-xs uppercase font-bold text-gray-400 mb-1">Módulo</p>
-                          <p class="font-black text-[#1F2937] text-lg">{{ evalObj.modulo }}</p>
-                        </div>
-                        <span v-if="evalObj.curso ?? cursoDeModulo(evalObj.modulo)" class="shrink-0 px-3 py-1 bg-blue-50 border border-blue-200 text-blue-700 rounded-lg text-[10px] font-bold uppercase tracking-wider">
-                          {{ evalObj.curso ?? cursoDeModulo(evalObj.modulo) }}º Curso
-                        </span>
-                      </div>
-                      <div class="mb-4">
-                        <p class="text-xs uppercase font-bold text-[#00A859] mb-1 flex items-center gap-1">
-                          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"/></svg> Resultado de Aprendizaje
-                        </p>
-                        <p class="text-sm font-semibold text-gray-700 bg-gray-50 p-4 rounded-xl border border-gray-100">{{ evalObj.ra }}</p>
-                      </div>
-                      <div class="mb-4">
-                        <p class="text-xs uppercase font-bold text-gray-500 mb-2">Criterios de Evaluación:</p>
-                        <ul class="space-y-2">
-                          <li v-for="(ce, i) in evalObj.ce" :key="i" class="text-sm text-gray-600 flex items-start gap-2">
-                            <span class="text-[#00A859] font-bold mt-0.5">✓</span> {{ ce }}
-                          </li>
-                        </ul>
-                      </div>
-                      <div class="mt-4 pt-4 border-t border-gray-100">
-                        <p class="text-sm text-gray-500 italic"><span class="font-bold not-italic text-[#1F2937]">Aplicación:</span> {{ evalObj.aplicacion }}</p>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-              </div>
-
-              <div v-if="reto.variantes && reto.variantes.length > 0" class="pt-6">
-                <h3 class="flex items-center gap-2 text-[#00A859] font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
-                  Variantes
-                </h3>
-                <ul class="space-y-3">
-                  <li v-for="(varItem, i) in reto.variantes" :key="i" class="text-sm text-gray-700 bg-gray-50 border border-gray-200 p-4 rounded-xl shadow-sm">
-                    <strong v-if="varItem.includes(':')" class="text-[#1F2937] block mb-1">{{ varItem.split(':')[0] }}</strong>
-                    <span>{{ varItem.includes(':') ? varItem.substring(varItem.indexOf(':') + 1).trim() : varItem }}</span>
-                  </li>
-                </ul>
-              </div>
-            </div>
-          </div> 
-          
-          <div class="bg-gray-50 text-[#1F2937] p-10 md:p-16 rounded-[2rem] shadow-sm mx-auto max-w-5xl border border-gray-200 relative mt-12">
-            <div class="absolute top-0 right-0 bg-white border-b border-l border-gray-200 text-gray-500 px-6 py-2 font-bold text-xs tracking-widest uppercase rounded-bl-xl shadow-sm">Uso Exclusivo Docente</div>
-            <h2 class="text-2xl font-black text-[#1F2937] mb-2 mt-2 flex items-center gap-3">
-              <svg class="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
-              Guía de Implementación
-            </h2>
-            <p class="text-gray-500 text-sm mb-12">Recomendaciones pedagógicas para dinamizar el reto.</p>
-            
-            <div class="grid grid-cols-1 gap-6">
-              <div v-for="(tip, i) in reto.tips_profesorado" :key="i" class="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
-                <div class="text-sm text-gray-700 leading-relaxed">
-                  <strong v-if="tip.includes(':')" class="text-[#00A859] block mb-2 uppercase tracking-wider text-xs">
-                    <svg class="w-4 h-4 inline-block mr-1 -mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path v-if="i===0" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/>
-                      <path v-else stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                    </svg>
-                    {{ tip.split(':')[0] }}
-                  </strong>
-                  <span class="block text-gray-600">{{ tip.includes(':') ? tip.substring(tip.indexOf(':') + 1).trim() : tip }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
+          </article>
         </div>
       </div>
 
+      <!-- Aviso: generar con IA sobre un diagnóstico ya guardado -->
+      <Teleport to="body">
+      <transition name="fade">
+        <div v-if="avisoSobrescribirDiagnostico" class="fixed inset-0 bg-gray-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+             @click.self="avisoSobrescribirDiagnostico = false" @keydown.esc="avisoSobrescribirDiagnostico = false">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="titulo-aviso-diagnostico"
+               class="bg-white rounded-3xl p-5 sm:p-8 w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl border border-gray-100">
+            <div class="flex items-center gap-3 mb-4">
+              <div class="p-2.5 rounded-2xl bg-amber-100 text-amber-600 shrink-0">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+              </div>
+              <h3 id="titulo-aviso-diagnostico" class="text-lg sm:text-xl font-black uppercase tracking-tight text-azul-noche">Esta empresa ya tiene diagnóstico</h3>
+            </div>
+            <p class="text-sm text-gray-700 leading-relaxed">
+              Hay un diagnóstico guardado para <strong class="break-words">{{ seleccion.empresaNombre }}</strong>.
+              Si lo generas con IA, <strong>se sustituirán sus respuestas</strong> en el formulario.
+            </p>
+            <p class="mt-3 text-sm text-gray-600 leading-relaxed bg-gray-50 border border-gray-100 rounded-2xl px-4 py-3">
+              El diagnóstico de la base de datos <strong>no cambia hasta que pulses «Guardar en la base de datos»</strong>.
+              Si no guardas, el nuevo diagnóstico solo se usará para este reto; con «Cancelar» del aviso de edición recuperas el anterior.
+            </p>
+            <div class="mt-6 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+              <button type="button" @click="avisoSobrescribirDiagnostico = false"
+                class="min-h-[40px] px-5 py-2 rounded-full font-bold text-xs tracking-widest uppercase border bg-white text-gray-500 border-gray-200 hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button type="button" @click="confirmarGenerarDiagnostico()" autofocus
+                class="min-h-[40px] px-5 py-2 rounded-full font-bold text-xs tracking-widest uppercase border bg-[#1F2937] text-white border-[#1F2937] hover:bg-[#1F2937]/90 shadow-md">
+                Aceptar y generar
+              </button>
+            </div>
+          </div>
+        </div>
+      </transition>
+      </Teleport>
+
+      <Teleport to="body">
       <transition name="fade">
         <div v-if="popupActivo" class="fixed inset-0 bg-gray-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" @click.self="cerrarPopup">
-          <div class="bg-white rounded-3xl p-8 max-w-lg w-full shadow-2xl border border-gray-100 relative">
+          <div class="bg-white rounded-3xl p-5 sm:p-8 max-w-lg w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-gray-100 relative">
             <button @click="cerrarPopup" class="absolute top-4 right-4 text-gray-400 hover:text-gray-700 bg-gray-50 hover:bg-gray-100 p-2 rounded-full transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
             <div class="flex items-center gap-3 mb-6">
-              <div :class="popupActivo.tipo === 'info' ? 'bg-[#00A859]/10 text-[#00A859]' : 'bg-[#99CC33]/20 text-[#00A859]'" class="p-3 rounded-2xl">
+              <div :class="popupActivo.tipo === 'info' ? 'bg-centros/10 text-centros' : 'bg-primary-400/20 text-centros'" class="p-3 rounded-2xl">
                 <svg v-if="popupActivo.tipo === 'info'" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                 <svg v-else class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
               </div>
-              <h3 class="text-xl font-black uppercase tracking-tight text-[#1F2937]">{{ popupActivo.tipo === 'info' ? 'Ayuda' : 'Ejemplo' }}</h3>
+              <h3 class="text-xl font-black uppercase tracking-tight text-azul-noche">{{ popupActivo.tipo === 'info' ? 'Ayuda' : 'Ejemplo' }}</h3>
             </div>
             <p class="text-gray-600 text-base md:text-lg leading-relaxed bg-gray-50 p-5 rounded-2xl border border-gray-100">{{ ayudas[popupActivo.id][popupActivo.tipo] }}</p>
           </div>
         </div>
       </transition>
+      </Teleport>
 
     </div>
+
+    <!-- Historial de avisos. A la derecha porque la izquierda ya la ocupa el menú lateral.
+         xl: columna fija junto al formulario. < xl: botón flotante desplegable. -->
+    <aside data-tour="gen-avisos" aria-label="Historial de avisos"
+      class="fixed top-20 right-4 z-[60] flex flex-col items-end max-w-[calc(100vw-2rem)]
+             xl:w-52 xl:items-stretch">
+      <div class="flex items-center gap-1.5 xl:justify-between xl:mb-2">
+        <button type="button" @click="toggleHistorial" :aria-expanded="historialAbierto"
+          class="relative flex items-center gap-1.5 min-h-[36px] xl:min-h-0 px-3 py-2 bg-white rounded-full border border-gray-200 shadow-md text-azul-noche text-[10px] font-black uppercase tracking-wider hover:border-centros transition-all
+                 xl:pointer-events-none xl:p-0 xl:bg-transparent xl:border-0 xl:shadow-none xl:text-gray-500">
+          <svg class="w-3.5 h-3.5 xl:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+          Avisos
+          <span v-if="avisosNoLeidos > 0"
+            class="xl:hidden absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[9px] font-black flex items-center justify-center">
+            {{ avisosNoLeidos }}
+          </span>
+        </button>
+      </div>
+
+      <!-- Último aviso asomando bajo el botón con el historial plegado (< xl) -->
+      <transition name="fade">
+        <div v-if="avisoFlotante && !historialAbierto" role="status"
+          class="xl:hidden mt-2 w-72 max-w-full rounded-xl border px-3 py-2 shadow-xl text-[11px] leading-snug"
+          :class="avisoFlotante.tipo === 'error' ? 'bg-red-50 border-red-200 text-red-900' : 'bg-white border-centros/40 text-azul-noche'">
+          <p class="font-black uppercase tracking-wide text-[9px]">{{ avisoFlotante.titulo }}</p>
+          <p class="mt-0.5 text-gray-600">{{ avisoFlotante.texto }}</p>
+        </div>
+      </transition>
+
+      <div :class="historialAbierto ? 'block' : 'hidden xl:block'"
+        class="mt-2 xl:mt-0 w-72 max-w-full xl:w-auto bg-white rounded-2xl border border-gray-100 shadow-xl xl:shadow-[0_10px_30px_rgb(0,0,0,0.05)] p-2.5">
+        <p v-if="!historialAvisos.length" class="px-1 py-1 text-[11px] text-gray-400 leading-snug">
+          Aquí irán apareciendo los avisos al pasar de paso y los errores, si los hay.
+        </p>
+        <ul v-else class="space-y-1.5 max-h-[60vh] xl:max-h-[calc(100vh-14rem)] overflow-y-auto" aria-live="polite">
+          <li v-for="(aviso, i) in historialAvisos" :key="aviso.id"
+            class="rounded-xl border px-2.5 py-1.5 text-[11px] leading-snug"
+            :class="aviso.tipo === 'error' ? 'bg-red-50 border-red-200' : i === 0 ? 'bg-centros/5 border-centros/30' : 'bg-gray-50 border-gray-100'">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-black uppercase tracking-wide text-[9px] truncate" :class="aviso.tipo === 'error' ? 'text-red-600' : i === 0 ? 'text-centros' : 'text-gray-500'">{{ aviso.titulo }}</span>
+              <span class="text-[9px] text-gray-400 shrink-0">{{ aviso.hora }}</span>
+            </div>
+            <p class="mt-0.5 text-gray-600">{{ aviso.texto }}</p>
+          </li>
+        </ul>
+      </div>
+    </aside>
+  </div>
+
   </div>
 
   <!-- Botón volver arriba: visible en paso 3 -->
@@ -2626,7 +3946,7 @@ async function guardarEstadoGen(nuevoEstado) {
     <button
       v-if="pasoActual === 3"
       @click="scrollToTop"
-      class="fixed bottom-8 right-8 z-50 w-14 h-14 bg-[#1F2937] text-white rounded-full shadow-2xl flex items-center justify-center hover:bg-[#00A859] transition-all duration-300 hover:-translate-y-1 active:scale-95 border-2 border-white/10"
+      class="fixed bottom-20 right-4 sm:bottom-8 sm:right-8 z-50 w-12 h-12 sm:w-14 sm:h-14 bg-[#1F2937] text-white rounded-full shadow-2xl flex items-center justify-center hover:bg-centros transition-all duration-300 hover:-translate-y-1 active:scale-95 border-2 border-white/10"
       title="Volver arriba"
     >
       <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2648,45 +3968,365 @@ async function guardarEstadoGen(nuevoEstado) {
     @empresa-creada="onEmpresaCreada"
     @empresa-actualizada="onEmpresaActualizada"
     @necesita-login="onNecesitaLoginEmpresa"
+    @crear-con-ia="abrirPanelFicticiaIA"
   />
 
-  <!-- Modal: ¿Activar guía-tour? -->
-  <TourPromptModal
-    :show="showTourPrompt"
-    titulo="¿Quieres activar la guía-tour?"
-    descripcion="Explora el generador de microretos con una guía paso a paso."
-    @activar="activarTourDesdeModal"
-    @omitir="omitirTourDesdeModal"
-  />
+
+  <!-- Ficha completa de la variante elegida en la galería. Teleport: el contenedor de las vistas
+       en App.vue tiene z-index 1 y, sin sacarlo a <body>, el modal quedaría bajo el SidePanel -->
+  <Teleport to="body">
+  <Modal :visible="retoAbiertoLista.length > 0" max-width="max-w-5xl" card-class="overflow-hidden" @cerrar="cerrarReto">
+    <template v-for="{ reto, index } in retoAbiertoLista" :key="index">
+      <div class="shrink-0 flex flex-wrap items-center gap-2 sm:gap-3 pl-4 pr-14 sm:pl-6 py-3 border-b border-gray-100 bg-white">
+        <div class="flex items-center gap-1">
+          <button type="button" @click="irRetoAnterior" :disabled="index >= microretosGenerados.length - 1" aria-label="Variante anterior"
+            class="w-9 h-9 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:border-centros hover:text-centros disabled:opacity-30 disabled:hover:border-gray-200 disabled:hover:text-gray-500">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+          </button>
+          <span class="px-2 text-xs font-black uppercase tracking-widest text-gray-500 whitespace-nowrap">
+            Variante #{{ numeroVariante(index) }}<span class="text-gray-300"> / {{ microretosGenerados.length }}</span>
+          </span>
+          <button type="button" @click="irRetoSiguiente" :disabled="index <= 0" aria-label="Variante siguiente"
+            class="w-9 h-9 rounded-full border border-gray-200 flex items-center justify-center text-gray-500 hover:border-centros hover:text-centros disabled:opacity-30 disabled:hover:border-gray-200 disabled:hover:text-gray-500">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>
+          </button>
+        </div>
+        <!-- En la demo no se guarda: el reto es un ejemplo ya existente -->
+        <span v-if="esModoDemo" class="sm:ml-auto inline-flex items-center min-h-[36px] px-4 py-2 rounded-full bg-gray-50 border border-gray-200 text-gray-500 text-[11px] font-black uppercase tracking-widest">
+          Ejemplo de demo · no se guarda
+        </span>
+        <button v-else @click="guardar(index)" :disabled="reto._ui_guardado || reto._ui_guardando"
+          class="sm:ml-auto min-h-[36px] px-4 sm:px-5 py-2 bg-white border-2 border-gray-200 text-[#1F2937] rounded-full font-black text-[11px] uppercase tracking-widest transition-colors hover:border-centros hover:text-centros disabled:opacity-50"
+          :class="reto._ui_guardado ? 'border-centros! bg-centros/5 text-centros! disabled:opacity-100' : ''">
+          <span v-if="reto._ui_guardando" class="flex items-center gap-2"><svg class="animate-spin w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2v4a6 6 0 106 6h4a10 10 0 11-10-10z"/></svg> Guardando...</span>
+          <span v-else-if="reto._ui_guardado">✓ Publicado en BD</span>
+          <span v-else>Guardar esta versión</span>
+        </button>
+        <button v-if="puedeTrabajar(reto)" type="button" @click="trabajarReto(index)" :disabled="reto._ui_guardando"
+          class="min-h-[36px] px-4 sm:px-5 py-2 bg-centros text-white rounded-full font-black text-[11px] uppercase tracking-widest transition-colors hover:bg-[#1F2937] disabled:opacity-50">
+          Trabajar este reto
+        </button>
+      </div>
+
+      <!-- El :key del <template> recrea el cuerpo al cambiar de variante: el scroll vuelve arriba -->
+      <div class="flex-1 min-h-0 overflow-y-auto overscroll-contain bg-gray-50/60 p-3 sm:p-6">
+              <div class="bg-white rounded-[2rem] overflow-hidden border border-gray-100">
+                <div class="bg-gray-50 border-b border-gray-100 p-5 sm:p-10 md:px-14">
+                  <p class="text-centros font-bold text-[10px] tracking-[0.2em] uppercase mb-4 flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    DUALAB · Ficha de Reto
+                  </p>
+                  <h1 class="text-2xl sm:text-3xl md:text-4xl font-black text-azul-noche tracking-tight leading-tight mb-2 break-words">
+                    {{ reto.titulo }}
+                  </h1>
+                  <h2 class="text-xl md:text-2xl text-gray-600 font-bold leading-snug mb-2">
+                    {{ reto.pregunta_reto }}
+                  </h2>
+                  <h3 class="text-base md:text-lg text-gray-500 font-medium leading-relaxed mb-8">
+                    {{ reto.subtitulo }}
+                  </h3>
+              
+                  <div class="flex flex-wrap gap-3">
+                    <span class="flex items-center gap-2 px-4 py-2 bg-[#1F2937] text-white rounded-full text-xs font-bold uppercase tracking-wider shadow-sm">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                      {{ reto.empresa_nombre }}
+                    </span>
+                    <span v-if="reto.empresa_es_simulada != null"
+                          :class="reto.empresa_es_simulada
+                            ? 'bg-amber-50 border-amber-200 text-amber-700'
+                            : 'bg-emerald-50 border-emerald-200 text-emerald-700'"
+                          class="flex items-center gap-2 px-4 py-2 border rounded-full text-xs font-bold uppercase tracking-wider">
+                      <svg v-if="reto.empresa_es_simulada" class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3
+                                 m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374
+                                 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                      </svg>
+                      <svg v-else class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                      </svg>
+                      {{ reto.empresa_es_simulada ? 'Empresa ficticia' : 'Empresa real' }}
+                    </span>
+                    <span v-if="reto.diagnostico_modificado"
+                          title="Generado con cambios en el diagnóstico que no se han guardado en la empresa. Se guardarán solo en este reto, indicados como ajustados."
+                          class="flex items-center gap-2 px-4 py-2 bg-amber-50 border border-amber-200 text-amber-700 rounded-full text-xs font-bold uppercase tracking-wider">
+                      Diagnóstico ajustado para este reto
+                    </span>
+                    <span v-if="reto.es_simulado"
+                          class="flex items-center gap-2 px-4 py-2 bg-rose-50 border border-rose-200 text-rose-700 rounded-full text-xs font-bold uppercase tracking-wider">
+                      <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                      </svg>
+                      Info simulada
+                    </span>
+                    <span class="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-[#1F2937] rounded-full text-xs font-bold uppercase tracking-wider">
+                      <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2-2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                      {{ reto._ui_familia || seleccion.familia }}
+                    </span>
+                    <span class="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-500 rounded-full text-xs font-bold uppercase tracking-wider">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                      Nivel: {{ reto.nivel_grupo || seleccion.nivelGrupo }} ({{ (reto.curso || seleccion.cursoSeleccionado) === 'ambos_cursos' ? 'Ambos Cursos (1º y 2º)' : (reto.curso || seleccion.cursoSeleccionado) + 'º' }})
+                    </span>
+                  </div>
+                </div>
+
+                <div class="p-5 sm:p-10 md:p-14 space-y-10 sm:space-y-12">
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+                    <div>
+                      <h3 class="flex items-center gap-2 text-centros font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a3.001 3.001 0 00-2.83 2M15 11h3m-3 4h2"/></svg>
+                        ¿Quién es {{ reto.empresa_nombre }}?
+                      </h3>
+                      <p class="text-gray-600 text-sm leading-relaxed">{{ reto.quien_es }}</p>
+                    </div>
+                    <div>
+                      <h3 class="flex items-center gap-2 text-centros font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        Su día a día
+                      </h3>
+                      <p class="text-gray-600 text-sm leading-relaxed">{{ reto.dia_a_dia }}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h3 class="flex items-center gap-2 text-yellow-600 font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                      Dificultades
+                    </h3>
+                    <ul class="space-y-2 pl-2">
+                      <li v-for="(item, i) in reto.dificultades" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
+                        <span class="text-yellow-500 font-black mt-0.5">•</span><span>{{ item }}</span>
+                      </li>
+                    </ul>
+                  </div>
+
+                  <div class="bg-gradient-to-r from-gray-50 to-white border-l-4 border-centros p-5 sm:p-8 rounded-r-2xl shadow-sm border-y border-r border-gray-100">
+                    <h3 class="text-centros font-black uppercase text-[10px] tracking-[0.2em] mb-2 flex items-center gap-2">Este reto consiste en responder a:</h3>
+                    <p class="text-xl md:text-2xl font-bold text-[#1F2937] leading-snug">{{ reto.pregunta_reto }}</p>
+                  </div>
+
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+                    <div>
+                      <h3 class="flex items-center gap-2 text-centros font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                        Qué necesitan
+                      </h3>
+                      <ul class="space-y-2 pl-2">
+                        <li v-for="(item, i) in reto.que_necesitan" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
+                          <span class="text-centros font-black mt-0.5">•</span><span>{{ item }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div>
+                      <h3 class="flex items-center gap-2 text-red-500 font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
+                        Limitaciones
+                      </h3>
+                      <ul class="space-y-2 pl-2">
+                        <li v-for="(item, i) in reto.limitaciones" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
+                          <span class="text-red-500 font-black mt-0.5">•</span><span>{{ item }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+                    <div>
+                      <h3 class="flex items-center gap-2 text-centros font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                        Ejemplos de Prototipos
+                      </h3>
+                      <ul class="space-y-2 pl-2">
+                        <li v-for="(item, i) in reto.prototipos" :key="i" class="flex items-start gap-3 text-sm text-gray-700">
+                          <span class="text-centros font-black mt-0.5">•</span><span>{{ item }}</span>
+                        </li>
+                      </ul>
+                    </div>
+                    <div>
+                      <h3 class="flex items-center gap-2 text-blue-600 font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        ODS Sugeridos
+                      </h3>
+                      <ul class="space-y-2 pl-2">
+                        <li v-for="ods in reto.ods_sugeridos" :key="ods" class="text-sm font-semibold text-[#1F2937]">{{ ods }}</li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  <div class="pt-6">
+                    <h3 class="flex items-center gap-2 text-azul-noche font-bold uppercase text-xs tracking-widest border-b-2 border-gray-200 pb-2 mb-6">
+                      <svg class="w-5 h-5 text-centros" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5z"/><path d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z"/></svg>
+                      Módulos + RA/CE seleccionados
+                    </h3>
+
+                    <!-- Aviso: no se pudo asignar ningún RA/CE -->
+                    <div v-if="!reto.evaluacion_oficial || !reto.evaluacion_oficial.length"
+                         class="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
+                      <svg class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                      </svg>
+                      <p class="text-sm text-amber-700 leading-relaxed">
+                        No se ha podido asignar ningún RA/CE a este reto: los módulos elegidos todavía no tienen
+                        currículo cargado en la base de datos (pendiente de importar del BOE). Asígnalos manualmente
+                        antes de publicar el reto.
+                      </p>
+                    </div>
+
+                    <template v-else>
+                      <!-- Aviso: RA/CE fijados por el docente (todos o parte) -->
+                      <div v-if="reto.ra_ce_origen === 'docente' || reto.ra_ce_origen === 'mixto'" class="flex items-start gap-3 bg-centros/5 border border-centros/30 rounded-2xl px-4 py-3 mb-4">
+                        <svg class="w-5 h-5 text-centros shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                        </svg>
+                        <p class="text-sm text-azul-noche leading-relaxed">
+                          Los RA/CE que fijaste se han incluido tal cual en este reto<template v-if="reto.ra_ce_origen === 'mixto'">; los de los módulos que dejaste libres los ha elegido la IA a partir del currículo oficial — revísalos antes de publicar</template>.
+                        </p>
+                      </div>
+
+                      <!-- Aviso: a algún RA fijado le falta la explicación de cómo se trabaja -->
+                      <div v-if="reto.aviso_aplicacion_incompleta" class="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 mb-4">
+                        <svg class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                        </svg>
+                        <p class="text-sm text-amber-700 leading-relaxed">
+                          <strong class="font-bold">Atención:</strong> la IA no ha explicado cómo se trabaja alguno de los RA que fijaste
+                          (aparecen sin «Aplicación»). El RA/CE está incluido igualmente; revisa que el reto lo trabaje de verdad.
+                        </p>
+                      </div>
+
+                      <!-- Aviso: selección hecha por IA, revisar -->
+                      <div v-if="reto.ra_ce_origen !== 'docente' && reto.ra_ce_origen !== 'mixto'" class="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-2xl px-4 py-3 mb-4">
+                        <svg class="w-5 h-5 text-blue-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <p class="text-sm text-blue-700 leading-relaxed">
+                          Esta selección de RA/CE la ha hecho la IA a partir del currículo oficial — revísala antes de publicar el reto.
+                          Cubre un mínimo de 3 módulos distintos (salvo que se hayan forzado módulos concretos)<template v-if="reto.curso === 'ambos_cursos'">, incluyendo al menos uno de 1º y uno de 2º</template>.
+                        </p>
+                      </div>
+
+                      <!-- Aviso: la IA no cumplió la cobertura mínima exigida (mínimo de módulos y/o mezcla 1º+2º) -->
+                      <div v-if="reto.aviso_cobertura_incompleta" class="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 mb-4">
+                        <svg class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                        </svg>
+                        <p class="text-sm text-amber-700 leading-relaxed">
+                          <strong class="font-bold">Atención:</strong> esta vez la IA no cubrió correctamente la cobertura mínima exigida
+                          (mínimo de módulos distintos<template v-if="reto.curso === 'ambos_cursos'"> y/o mezcla de 1º y 2º</template>).
+                          Revisa manualmente los módulos/RA/CE de abajo, o pulsa "Generar más variantes" para intentarlo de nuevo.
+                        </p>
+                      </div>
+
+                      <div class="space-y-6">
+                        <div v-for="(evalObj, ei) in reto.evaluacion_oficial" :key="evalObj.ra_id ?? `${evalObj.modulo}-${ei}`" class="bg-white border border-gray-200 p-4 sm:p-6 rounded-2xl shadow-sm">
+                          <div class="flex items-center justify-between flex-wrap gap-2 mb-4">
+                            <div>
+                              <p class="text-xs uppercase font-bold text-gray-400 mb-1">Módulo</p>
+                              <p class="font-black text-[#1F2937] text-lg">{{ evalObj.modulo }}</p>
+                            </div>
+                            <span v-if="evalObj.curso ?? cursoDeModulo(evalObj.modulo)" class="shrink-0 px-3 py-1 bg-blue-50 border border-blue-200 text-blue-700 rounded-full text-[10px] font-bold uppercase tracking-wider">
+                              {{ evalObj.curso ?? cursoDeModulo(evalObj.modulo) }}º Curso
+                            </span>
+                          </div>
+                          <div class="mb-4">
+                            <p class="text-xs uppercase font-bold text-centros mb-1 flex items-center gap-1">
+                              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M9 5l7 7-7 7"/></svg> Resultado de Aprendizaje
+                            </p>
+                            <p class="text-sm font-semibold text-gray-700 bg-gray-50 p-4 rounded-xl border border-gray-100">{{ evalObj.ra }}</p>
+                          </div>
+                          <div class="mb-4">
+                            <p class="text-xs uppercase font-bold text-gray-500 mb-2">Criterios de Evaluación:</p>
+                            <ul class="space-y-2">
+                              <li v-for="(ce, i) in evalObj.ce" :key="i" class="text-sm text-gray-600 flex items-start gap-2">
+                                <span class="text-centros font-bold mt-0.5">✓</span> {{ ce }}
+                              </li>
+                            </ul>
+                          </div>
+                          <div class="mt-4 pt-4 border-t border-gray-100">
+                            <p class="text-sm text-gray-500 italic"><span class="font-bold not-italic text-[#1F2937]">Aplicación:</span> {{ evalObj.aplicacion }}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+
+                  <div v-if="reto.variantes && reto.variantes.length > 0" class="pt-6">
+                    <h3 class="flex items-center gap-2 text-centros font-bold uppercase text-xs tracking-widest border-b border-gray-100 pb-2 mb-4">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"/></svg>
+                      Variantes
+                    </h3>
+                    <ul class="space-y-3">
+                      <li v-for="(varItem, i) in reto.variantes" :key="i" class="text-sm text-gray-700 bg-gray-50 border border-gray-200 p-4 rounded-xl shadow-sm">
+                        <strong v-if="varItem.includes(':')" class="text-[#1F2937] block mb-1">{{ varItem.split(':')[0] }}</strong>
+                        <span>{{ varItem.includes(':') ? varItem.substring(varItem.indexOf(':') + 1).trim() : varItem }}</span>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div> 
+          
+              <div class="bg-gray-50 text-[#1F2937] p-5 sm:p-10 md:p-14 rounded-[2rem] border border-gray-200 relative mt-6 sm:mt-8">
+                <div class="absolute top-0 right-0 bg-white border-b border-l border-gray-200 text-gray-500 px-6 py-2 font-bold text-xs tracking-widest uppercase rounded-bl-xl shadow-sm">Uso Exclusivo Docente</div>
+                <h2 class="text-xl sm:text-2xl font-black text-azul-noche mb-2 mt-8 sm:mt-2 flex items-center gap-3">
+                  <svg class="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"/></svg>
+                  Guía de Implementación
+                </h2>
+                <p class="text-gray-500 text-sm mb-8 sm:mb-12">Recomendaciones pedagógicas para dinamizar el reto.</p>
+            
+                <div class="grid grid-cols-1 gap-6">
+                  <div v-for="(tip, i) in reto.tips_profesorado" :key="i" class="bg-white p-4 sm:p-6 rounded-2xl border border-gray-100 shadow-sm">
+                    <div class="text-sm text-gray-700 leading-relaxed">
+                      <strong v-if="tip.includes(':')" class="text-centros block mb-2 uppercase tracking-wider text-xs">
+                        <svg class="w-4 h-4 inline-block mr-1 -mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path v-if="i===0" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/>
+                          <path v-else stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        {{ tip.split(':')[0] }}
+                      </strong>
+                      <span class="block text-gray-600">{{ tip.includes(':') ? tip.substring(tip.indexOf(':') + 1).trim() : tip }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+      </div>
+    </template>
+  </Modal>
+
+  <!-- Al volver al generador con trabajo hecho: recuperarlo o empezar de cero (hay que elegir) -->
+  <Modal :visible="avisoTrabajoAnterior" :closable="false" max-width="max-w-md" card-class="p-6 sm:p-8">
+    <div role="alertdialog" aria-labelledby="titulo-trabajo-anterior" class="text-center">
+      <div class="mx-auto mb-4 w-12 h-12 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+      </div>
+      <h2 id="titulo-trabajo-anterior" class="text-lg sm:text-xl font-black text-azul-noche break-words">Hay información anterior en el generador</h2>
+      <p class="mt-2 text-sm text-gray-600 leading-relaxed break-words">
+        <template v-if="seleccion.empresaNombre">Estabas trabajando con <strong>{{ seleccion.empresaNombre }}</strong>. </template>
+        <template v-if="microretosGenerados.length">
+          Tienes {{ microretosGenerados.length === 1 ? '1 reto generado' : `${microretosGenerados.length} retos generados` }}<template v-if="retosSinGuardar">, {{ retosSinGuardar === 1 ? '1 sin guardar' : `${retosSinGuardar} sin guardar` }}</template>.
+        </template>
+        ¿Quieres recuperarlo o volver a empezar?
+      </p>
+      <p v-if="retosSinGuardar" class="mt-2 text-xs font-bold text-amber-700">Si vuelves a empezar, los retos sin guardar se perderán.</p>
+      <div class="mt-6 flex flex-wrap justify-center gap-3">
+        <button type="button" class="accion-secundaria" @click="empezarDeNuevo">Volver a empezar</button>
+        <button type="button" class="accion-principal" @click="recuperarTrabajoAnterior">Recuperar</button>
+      </div>
+    </div>
+  </Modal>
+  </Teleport>
 </template>
 
 <style scoped>
 @reference "../style.css";
 
-/* Estilos adaptados: Inputs OSCUROS sobre fondo claro para alto contraste */
-.input-style {
-  @apply w-full border-2 rounded-2xl p-4 text-sm font-semibold outline-none transition-all shadow-inner disabled:opacity-50;
-  background-color: #F0FBF4;
-  color: #1F2937;
-  border-color: #BBE8D0;
-}
-
-.input-style::placeholder {
-  color: #9CA3AF;
-}
-
-.input-style:focus {
-  background-color: #E6F7EE;
-  border-color: #00A859;
-  box-shadow: 0 0 0 4px rgba(0, 168, 89, 0.15);
-}
-
-.label-style {
-  @apply text-[10px] font-black uppercase tracking-[0.2em] text-gray-500 ml-4 mb-2 block;
-}
+/* .input-style y .label-style viven en style.css: también las usan componentes hijos */
 
 .btn-save {
-  @apply px-8 py-4 bg-white border-2 border-gray-200 text-[#1F2937] rounded-full font-black text-xs uppercase tracking-widest shadow-sm transition-all hover:-translate-y-1 hover:border-[#00A859] hover:text-[#00A859] active:scale-95 disabled:hover:translate-y-0 disabled:opacity-50;
+  @apply px-8 py-4 bg-white border-2 border-gray-200 text-[#1F2937] rounded-full font-black text-xs uppercase tracking-widest shadow-sm transition-all hover:-translate-y-1 hover:border-centros hover:text-centros active:scale-95 disabled:hover:translate-y-0 disabled:opacity-50;
 }
 
 /* Animaciones más suaves acordes a una interfaz clara */
@@ -2711,22 +4351,41 @@ async function guardarEstadoGen(nuevoEstado) {
 .step-glow-empresa {
   animation: glow-lime 2s ease-in-out infinite;
 }
+.siguiente-empresas-glow {
+  /* Dos parpadeos al aparecer y después el brillo pulsante continuo */
+  animation:
+    siguiente-parpadeo 1.4s ease-in-out 2 both,
+    glow-green 2s ease-in-out 2.8s infinite;
+}
+@keyframes siguiente-parpadeo {
+  0%, 50%, 100% { opacity: 1;    transform: scale(1); }
+  25%           { opacity: 0.25; transform: scale(1.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .siguiente-empresas-glow { animation: none; }
+}
 @keyframes glow-green {
-  0%, 100% { box-shadow: 0 0 0 2px #00A859, 0 0 14px rgba(0, 168, 89, 0.25); }
-  50%       { box-shadow: 0 0 0 3px #00A859, 0 0 24px rgba(0, 168, 89, 0.45); }
+  0%, 100% { box-shadow: 0 0 0 2px #3072AA, 0 0 14px rgba(48, 114, 170, 0.25); }
+  50%       { box-shadow: 0 0 0 3px #3072AA, 0 0 24px rgba(48, 114, 170, 0.45); }
 }
 @keyframes glow-lime {
-  0%, 100% { box-shadow: 0 0 0 2px #99CC33, 0 0 14px rgba(153, 204, 51, 0.25); }
-  50%       { box-shadow: 0 0 0 3px #99CC33, 0 0 24px rgba(153, 204, 51, 0.45); }
+  0%, 100% { box-shadow: 0 0 0 2px #6BA4D5, 0 0 14px rgba(107, 164, 213, 0.25); }
+  50%       { box-shadow: 0 0 0 3px #6BA4D5, 0 0 24px rgba(107, 164, 213, 0.45); }
 }
 
 /* ─── Tour guiado ────────────────────────────────────────────────────────── */
 .tour-active {
-  box-shadow: 0 0 0 3px #00A859, 0 0 0 8px rgba(0, 168, 89, 0.2), 0 4px 20px rgba(0,0,0,0.1) !important;
+  box-shadow: 0 0 0 3px #3072AA, 0 0 0 8px rgba(48, 114, 170, 0.2), 0 4px 20px rgba(0,0,0,0.1) !important;
   border-radius: 1rem;
   transition: box-shadow 0.25s ease;
   position: relative;
   z-index: 9991;
+}
+/* Los botones resaltados por el tour conservan su forma de píldora */
+button.tour-active.rounded-full,
+.btn-paso.tour-active,
+.btn-paso-atras.tour-active {
+  border-radius: 9999px;
 }
 
 .tour-seccion-blur {
@@ -2735,6 +4394,31 @@ async function guardarEstadoGen(nuevoEstado) {
   pointer-events: none;
   transition: filter 0.3s ease, opacity 0.3s ease;
 }
+
+/* ─── Forzado de módulos ─────────────────────────────────────────────────── */
+/* El :key del banner cambia al pasar de auto ↔ forzado, así el parpadeo se repite en cada cambio */
+.modulos-estado {
+  animation: modulos-parpadeo 0.7s ease-in-out 3;
+}
+@keyframes modulos-parpadeo {
+  0%, 100% { transform: scale(1);     box-shadow: 0 0 0 0 rgba(48, 114, 170, 0); }
+  50%       { transform: scale(1.015); box-shadow: 0 0 0 6px rgba(48, 114, 170, 0.25); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .modulos-estado { animation: none; }
+}
+.toast-modulos-destacado {
+  animation: modulos-parpadeo 0.7s ease-in-out 0.3s 4;
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast-modulos-destacado { animation: none; }
+}
+/* Sección de RA/CE señalada mientras se ve su toast */
+.ra-ce-senalado { box-shadow: 0 0 0 3px #fbbf24, 0 0 0 8px rgba(251, 191, 36, 0.25); animation: ra-ce-pulso 1.6s ease-in-out infinite; }
+@keyframes ra-ce-pulso { 50% { box-shadow: 0 0 0 3px #fbbf24, 0 0 0 12px rgba(251, 191, 36, 0.1); } }
+@media (prefers-reduced-motion: reduce) { .ra-ce-senalado { animation: none; } }
+.toast-modulos-enter-active, .toast-modulos-leave-active { transition: opacity 0.25s ease, transform 0.25s ease; }
+.toast-modulos-enter-from, .toast-modulos-leave-to { opacity: 0; transform: translate(-50%, 12px); }
 
 .sp-fade-enter-active, .sp-fade-leave-active { transition: opacity 200ms ease; }
 .sp-fade-enter-from, .sp-fade-leave-to { opacity: 0; }
