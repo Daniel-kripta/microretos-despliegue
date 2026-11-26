@@ -13,6 +13,8 @@ const items       = ref({ empresas: [], microretos: [], ciclos: [], familias: []
 const errorCorreos = ref('')
 const total       = ref(0)
 const filtroActivo = ref('todos')
+// Purga automática (papelera:purgar, cada noche): tras cuántos días y qué tipos; el resto no se borra solo
+const purga       = ref({ dias: 30, tipos: [] })
 
 // Modal borrado permanente
 const modalEliminar  = ref(false)
@@ -168,6 +170,36 @@ const contadorPorTipo = computed(() =>
   )
 )
 
+// Días que le quedan antes de la purga (null si ese tipo no se borra solo)
+function diasParaPurga(item) {
+  if (!item.deleted_at || !purga.value.tipos.includes(item.tipo)) return null
+  const transcurridos = Math.floor((Date.now() - new Date(item.deleted_at)) / 86400000)
+  return Math.max(purga.value.dias - transcurridos, 0)
+}
+function textoPurga(item) {
+  const dias = diasParaPurga(item)
+  if (dias === null) return 'no se borra solo'
+  if (dias === 0) return 'se borra del todo esta noche'
+  return dias === 1 ? 'se borra del todo mañana' : `se borra del todo en ${dias} días`
+}
+
+// Aviso de cabecera: retos a medida y retos en borrador, cuántos hay y cuándo se borra el primero
+const TIPOS_AVISO = ['solicitudes', 'retos_borrador', 'microretos']
+const avisoPurga = computed(() => {
+  const partes = TIPOS_AVISO
+    .map(t => ({ t, n: items.value[t]?.length ?? 0 }))
+    .filter(x => x.n)
+    .map(x => `${x.n} ${(x.n === 1 ? TIPOS[x.t].label : TIPOS[x.t].labelPlural).toLowerCase()}`)
+  if (!partes.length) return null
+  const dias = TIPOS_AVISO.flatMap(t => items.value[t] ?? []).map(diasParaPurga).filter(d => d !== null)
+  const pronto = dias.filter(d => d <= 7).length
+  return {
+    texto: `${partes.join(' · ')}. Se borran del todo solos a los ${purga.value.dias} días en la papelera`,
+    primero: dias.length ? Math.min(...dias) : null,
+    pronto,
+  }
+})
+
 // ─── API ──────────────────────────────────────────────────────────────────────
 async function cargarPapelera() {
   cargando.value = true
@@ -176,6 +208,7 @@ async function cargarPapelera() {
     const [res, correos] = await Promise.all([api.get('/papelera'), cargarCorreos()])
     items.value = { ...items.value, ...res.data.items, correos }
     total.value = res.data.total + correos.length
+    if (res.data.purga) purga.value = res.data.purga
   } catch (e) {
     error.value = 'No se pudo cargar la papelera. Comprueba la conexión.'
   } finally {
@@ -303,7 +336,7 @@ onMounted(cargarPapelera)
         <BotonVolver fallback="/base-datos" class="mb-3" />
         <div class="flex items-start justify-between gap-4 flex-wrap">
 
-          <div class="flex items-center gap-3">
+          <div data-tour="pap-cabecera" class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-2xl bg-red-50 border border-red-100 flex items-center justify-center shrink-0">
               <svg class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <polyline points="3 6 5 6 21 6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -323,6 +356,7 @@ onMounted(cargarPapelera)
           <!-- Vaciar papelera -->
           <button
             v-if="total > 0 && !cargando"
+            data-tour="pap-vaciar"
             @click="abrirModalVaciar"
             class="flex items-center gap-2 px-4 py-2 rounded-full
                    bg-red-50 border border-red-200 text-red-600
@@ -342,7 +376,7 @@ onMounted(cargarPapelera)
         </div>
 
         <!-- Tabs de filtro -->
-        <div class="flex flex-wrap gap-1.5 mt-5">
+        <div data-tour="pap-todos" class="flex flex-wrap gap-1.5 mt-5">
           <button
             @click="filtroActivo = 'todos'"
             class="min-h-9 px-3 py-1.5 rounded-full text-xs font-bold transition-all duration-150"
@@ -356,7 +390,7 @@ onMounted(cargarPapelera)
 
         </div>
         <!-- Un bloque por origen, separados por una línea -->
-        <div v-for="g in GRUPOS" :key="g.clave" class="mt-3 border-t border-gray-100 pt-3">
+        <div v-for="g in GRUPOS" :key="g.clave" :data-tour="`pap-grupo-${g.clave}`" class="mt-3 border-t border-gray-100 pt-3">
           <p class="mb-1.5 text-[11px] font-bold uppercase tracking-[0.15em] text-gray-400">{{ g.titulo }}</p>
           <div class="flex flex-wrap gap-1.5">
             <button
@@ -375,6 +409,11 @@ onMounted(cargarPapelera)
           </div>
         </div>
         <p v-if="errorCorreos" class="mt-3 text-xs font-semibold text-amber-700" role="status">{{ errorCorreos }}</p>
+        <!-- Plan de purga: lo de Retos a medida y los retos en borrador, con cuándo se borra el primero -->
+        <p v-if="avisoPurga && !cargando" data-tour="pap-purga" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800" role="status">
+          {{ avisoPurga.texto }}{{ avisoPurga.primero !== null ? ` (el primero, ${avisoPurga.primero === 0 ? 'esta noche' : avisoPurga.primero === 1 ? 'mañana' : `en ${avisoPurga.primero} días`})` : '' }}.
+          <template v-if="avisoPurga.pronto"> {{ avisoPurga.pronto === 1 ? '1 se borra' : `${avisoPurga.pronto} se borran` }} en los próximos 7 días: restáuralo{{ avisoPurga.pronto === 1 ? '' : 's' }} antes si hace falta.</template>
+        </p>
       </div>
     </div>
 
@@ -402,7 +441,7 @@ onMounted(cargarPapelera)
       </div>
 
       <!-- Estado vacío -->
-      <div v-else-if="itemsFiltrados.length === 0" class="flex flex-col items-center justify-center py-20 gap-4">
+      <div v-else-if="itemsFiltrados.length === 0" data-tour="pap-vacia" class="flex flex-col items-center justify-center py-20 gap-4">
         <div class="w-16 h-16 rounded-2xl bg-gray-100 border border-gray-200 flex items-center justify-center">
           <svg class="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <polyline points="3 6 5 6 21 6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -420,12 +459,13 @@ onMounted(cargarPapelera)
       </div>
 
       <!-- Lista de items -->
-      <div v-else class="space-y-2">
+      <div v-else data-tour="pap-lista" class="space-y-2">
 
         <!-- Item card -->
         <div
           v-for="item in itemsFiltrados"
           :key="item.tipo + item.id"
+          :data-tour="item === itemsFiltrados[0] ? 'pap-item' : undefined"
           class="bg-white rounded-2xl border border-gray-100 shadow-sm
                  flex items-center gap-3 sm:gap-4 px-4 sm:px-5 py-4
                  transition-all duration-150 hover:border-gray-200 hover:shadow"
@@ -524,7 +564,8 @@ onMounted(cargarPapelera)
               Correo del {{ formatearFecha(item.fecha) }} · borrarlo quita la copia de Central, no el original del webmail
             </p>
             <p v-else class="text-xs text-gray-400 mt-0.5">
-              Eliminado {{ formatearFecha(item.deleted_at) }}
+              Eliminado {{ formatearFecha(item.deleted_at) }} ·
+              <span :class="diasParaPurga(item) !== null && diasParaPurga(item) <= 7 ? 'font-bold text-amber-700' : ''">{{ textoPurga(item) }}</span>
             </p>
           </div>
 
@@ -534,6 +575,7 @@ onMounted(cargarPapelera)
             <!-- Restaurar -->
             <button
               @click="restaurar(item)"
+              :data-tour="item === itemsFiltrados[0] ? 'pap-restaurar' : undefined"
               :disabled="restaurando === item.id + item.tipo"
               aria-label="Restaurar" title="Restaurar"
               class="flex items-center justify-center gap-1.5 w-9 h-9 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 rounded-full
@@ -557,6 +599,7 @@ onMounted(cargarPapelera)
             <!-- Eliminar permanentemente -->
             <button
               @click="abrirModalEliminar(item)"
+              :data-tour="item === itemsFiltrados[0] ? 'pap-eliminar' : undefined"
               aria-label="Eliminar permanentemente" title="Eliminar permanentemente"
               class="flex items-center justify-center gap-1.5 w-9 h-9 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 rounded-full
                      bg-red-50 border border-red-100 text-red-500
